@@ -115,7 +115,7 @@ sequenceDiagram
 
 ```bash
 # 1. 下载本仓库
-git clone https://github.com/YourOrg/LogMind.git
+git clone https://github.com/leeeway/LogMind
 cd LogMind
 
 # 2. 建立和激活隔离环境
