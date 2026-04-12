@@ -1,0 +1,140 @@
+# ==============================================================================
+# LogMind Helm Chart — Values
+# ==============================================================================
+
+replicaCount:
+  api: 2
+  worker: 3
+  beat: 1
+
+image:
+  repository: registry.internal/logmind
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Application Configuration ────────────────────────────
+config:
+  appEnv: "production"
+  debug: false
+
+  # Elasticsearch
+  elasticsearch:
+    hosts: "http://10.14.3.101:9200"
+    username: ""
+    password: ""
+    verifyCerts: false
+
+  # Database
+  database:
+    host: "logmind-postgresql"
+    port: 5432
+    name: "logmind"
+    username: "logmind"
+    # For MySQL:
+    # driver: "mysql+aiomysql"
+    # host: "mysql-server"
+    # port: 3306
+
+  # Redis
+  redis:
+    host: "logmind-redis-master"
+    port: 6379
+    db: 0
+
+  # Celery
+  celery:
+    brokerDb: 1
+    resultDb: 2
+    concurrency: 4
+
+  # WeChat Work Notification
+  wechat:
+    enabled: false
+    webhookUrl: ""
+
+  # AI Cost Control
+  analysis:
+    severityThreshold: "error"
+    maxLogsPerTask: 500
+    dailyTaskLimit: 100
+    cooldownMinutes: 30
+
+# ── Secrets ──────────────────────────────────────────────
+secrets:
+  databasePassword: "logmind"
+  redisPassword: ""
+  secretKey: "change-me-in-production-use-openssl-rand-hex-32"
+  jwtSecretKey: "change-me-jwt-secret-key"
+  encryptionKey: "change-me-use-fernet-generate-key"
+
+# ── API Service ──────────────────────────────────────────
+api:
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations: {}
+    host: logmind.internal.company.com
+    tls: false
+    tlsSecretName: ""
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPU: 80
+
+# ── Worker ───────────────────────────────────────────────
+worker:
+  resources:
+    requests:
+      cpu: 1000m
+      memory: 1Gi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+
+# ── Beat ─────────────────────────────────────────────────
+beat:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ── Dependencies ─────────────────────────────────────────
+postgresql:
+  enabled: true
+  auth:
+    database: logmind
+    username: logmind
+    password: logmind
+  primary:
+    persistence:
+      size: 20Gi
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      size: 5Gi

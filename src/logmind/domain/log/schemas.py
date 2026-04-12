@@ -1,0 +1,66 @@
+"""
+Log Domain — Pydantic Schemas
+"""
+
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+from logmind.shared.base_schema import BaseSchema
+
+
+class LogQueryRequest(BaseModel):
+    """ES log query parameters."""
+    index_pattern: str = Field(..., description="ES index pattern(s)")
+    time_from: datetime
+    time_to: datetime
+    query: str = Field("", description="Free text search query")
+    severity: str | None = Field(
+        None, description="Filter by severity: debug/info/warning/error/critical"
+    )
+    namespace: str | None = None
+    pod_name: str | None = None
+    container_name: str | None = None
+    extra_filters: dict = Field(default_factory=dict)
+    size: int = Field(100, ge=1, le=1000)
+    sort_order: str = Field("desc", pattern=r"^(asc|desc)$")
+
+
+class LogEntry(BaseSchema):
+    """Single log entry from ES."""
+    id: str
+    timestamp: str
+    level: str = ""
+    message: str
+    source: dict = Field(default_factory=dict)
+    kubernetes: dict = Field(default_factory=dict)
+    raw: dict = Field(default_factory=dict)
+
+
+class LogQueryResponse(BaseSchema):
+    """Log query response."""
+    total: int
+    logs: list[LogEntry]
+    took_ms: int
+
+
+class LogAggregation(BaseSchema):
+    """Log aggregation result."""
+    key: str
+    count: int
+
+
+class LogStatsResponse(BaseSchema):
+    """Log statistics."""
+    total_logs: int
+    by_level: list[LogAggregation]
+    by_namespace: list[LogAggregation]
+    time_histogram: list[dict]
+
+
+class ESIndexInfo(BaseSchema):
+    """ES index information."""
+    name: str
+    docs_count: int
+    size: str
+    status: str

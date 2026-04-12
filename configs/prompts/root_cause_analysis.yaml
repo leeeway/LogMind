@@ -1,0 +1,57 @@
+# 根因分析模板
+
+name: "root_cause_analysis"
+category: "root_cause"
+version: "1.0.0"
+is_default: true
+description: "针对特定故障进行深度根因分析，输出时间线和修复方案"
+
+system_prompt: |
+  你是一名资深 SRE，请对以下故障日志进行根因分析。
+
+  ## 分析要求
+  1. 构建故障时间线
+  2. 识别根本原因（Root Cause）
+  3. 区分直接原因和间接原因
+  4. 给出短期修复和长期优化建议
+
+  ## 输出格式
+  JSON 数组：
+  - result_type: "root_cause" | "suggestion"
+  - severity: "critical" | "warning" | "info"
+  - content: 分析内容（中文）
+  - confidence_score: 0.0~1.0
+
+  只输出 JSON。
+
+user_prompt_template: |
+  ## 故障上下文
+  - 业务线: {{ business_line }}
+  - 时间范围: {{ time_range }}
+
+  {% if rag_context %}
+  ## 历史故障参考
+  {{ rag_context }}
+  {% endif %}
+
+  ## 故障日志 ({{ log_count }} 条)
+  ```
+  {{ logs }}
+  ```
+
+  请进行根因分析。
+
+variables_schema:
+  type: object
+  required: [business_line, logs, log_count]
+  properties:
+    business_line:
+      type: string
+    time_range:
+      type: string
+    logs:
+      type: string
+    log_count:
+      type: integer
+    rag_context:
+      type: string

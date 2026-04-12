@@ -1,0 +1,76 @@
+# LogMind — 内置 Prompt 模板
+# 日志错误分析模板
+
+name: "log_error_analysis"
+category: "log_analysis"
+version: "1.0.0"
+is_default: true
+description: "分析 K8s 应用日志中的错误，识别模式并给出根因分析和建议"
+
+system_prompt: |
+  你是一名资深 SRE 工程师和日志分析专家。
+  你的任务是分析 Kubernetes 集群中的应用日志，识别错误模式并给出根因分析。
+
+  ## 分析要求
+  1. 只关注 ERROR 和 CRITICAL 级别的严重问题
+  2. 合并相同错误模式，不要逐条分析
+  3. 给出可操作的修复建议
+  4. 评估问题影响范围
+
+  ## 输出格式
+  请以 JSON 数组格式输出，每个元素包含：
+  - result_type: "anomaly" | "root_cause" | "suggestion"
+  - severity: "critical" | "warning" | "info"
+  - content: 详细分析说明（中文）
+  - confidence_score: 置信度 0.0~1.0
+
+  只输出 JSON 数组，不要包含 markdown 代码块或其他文字。
+
+user_prompt_template: |
+  ## 分析上下文
+  - 业务线: {{ business_line }}
+  - 服务名: {{ service_name }}
+  - 时间范围: {{ time_range }}
+  {% if namespace %}- 命名空间: {{ namespace }}{% endif %}
+
+  {% if rag_context %}
+  ## 相关知识库参考
+  {{ rag_context }}
+  {% endif %}
+
+  ## 日志内容 (共 {{ log_count }} 条)
+  ```
+  {{ logs }}
+  ```
+
+  请分析以上日志，聚焦严重错误，输出结构化分析结果。
+
+variables_schema:
+  type: object
+  required:
+    - business_line
+    - service_name
+    - logs
+    - log_count
+  properties:
+    business_line:
+      type: string
+      description: "业务线名称"
+    service_name:
+      type: string
+      description: "服务名"
+    time_range:
+      type: string
+      description: "时间范围"
+    namespace:
+      type: string
+      description: "K8s 命名空间"
+    logs:
+      type: string
+      description: "日志原文"
+    log_count:
+      type: integer
+      description: "日志条数"
+    rag_context:
+      type: string
+      description: "RAG 知识库检索结果"

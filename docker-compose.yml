@@ -1,0 +1,145 @@
+# LogMind Development Environment
+# Usage: docker compose up -d
+
+services:
+  # === LogMind API Server ===
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    command: >
+      uvicorn logmind.main:app
+      --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://logmind:logmind@postgres:5432/logmind
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ES_HOSTS=http://10.14.3.101:9200
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - JWT_SECRET_KEY=dev-jwt-secret-change-in-production
+      - ENCRYPTION_KEY=dev-encryption-key-change-me
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./configs:/app/configs
+    networks:
+      - logmind
+
+  # === Celery Worker ===
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    command: >
+      celery -A logmind.core.celery_app worker
+      --loglevel=info --concurrency=4
+      -Q analysis,alert,rag,celery
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+asyncpg://logmind:logmind@postgres:5432/logmind
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ES_HOSTS=http://10.14.3.101:9200
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - ENCRYPTION_KEY=dev-encryption-key-change-me
+    depends_on:
+      - api
+    volumes:
+      - ./src:/app/src
+      - ./configs:/app/configs
+    networks:
+      - logmind
+
+  # === Celery Beat (Scheduler) ===
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    command: >
+      celery -A logmind.core.celery_app beat
+      --loglevel=info
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+asyncpg://logmind:logmind@postgres:5432/logmind
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - ES_HOSTS=http://10.14.3.101:9200
+      - ENCRYPTION_KEY=dev-encryption-key-change-me
+    depends_on:
+      - worker
+    volumes:
+      - ./src:/app/src
+    networks:
+      - logmind
+
+  # === PostgreSQL ===
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: logmind
+      POSTGRES_USER: logmind
+      POSTGRES_PASSWORD: logmind
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U logmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - logmind
+
+  # === Redis ===
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - logmind
+
+  # === MinIO (RAG Document Storage) ===
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: logmind
+      MINIO_ROOT_PASSWORD: logmind123456
+    volumes:
+      - miniodata:/data
+    networks:
+      - logmind
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+
+networks:
+  logmind:
+    driver: bridge

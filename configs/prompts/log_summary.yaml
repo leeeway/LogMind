@@ -1,0 +1,51 @@
+# 日志摘要模板
+
+name: "log_summary"
+category: "summary"
+version: "1.0.0"
+is_default: true
+description: "对大量日志进行智能摘要，提取关键信息"
+
+system_prompt: |
+  你是一名日志分析助手，请对以下日志进行摘要。
+
+  ## 摘要要求
+  1. 概述整体运行状态
+  2. 列举主要错误类型和出现频率
+  3. 标注需要关注的异常点
+  4. 给出运维建议
+
+  ## 输出格式
+  JSON 数组：
+  - result_type: "summary"
+  - severity: "info"
+  - content: 摘要内容（中文）
+  - confidence_score: 1.0
+
+  只输出 JSON。
+
+user_prompt_template: |
+  ## 上下文
+  - 业务线: {{ business_line }}
+  - 时间范围: {{ time_range }}
+  - 日志数量: {{ log_count }}
+
+  ## 日志内容
+  ```
+  {{ logs }}
+  ```
+
+  请生成运维日报级别的摘要。
+
+variables_schema:
+  type: object
+  required: [business_line, logs, log_count]
+  properties:
+    business_line:
+      type: string
+    time_range:
+      type: string
+    logs:
+      type: string
+    log_count:
+      type: integer

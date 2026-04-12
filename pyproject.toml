@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "logmind"
+version = "0.1.0"
+description = "Enterprise-grade AI-powered log analysis platform"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "LogMind Team" },
+]
+keywords = ["aiops", "log-analysis", "kubernetes", "elasticsearch", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Logging",
+]
+
+dependencies = [
+    # Web Framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    # Database
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",           # PostgreSQL async driver
+    "aiomysql>=0.2.0",           # MySQL async driver
+    "alembic>=1.14.0",
+    # Redis
+    "redis[hiredis]>=5.2.0",
+    # Elasticsearch
+    "elasticsearch[async]>=8.16.0",
+    # Task Queue
+    "celery[redis]>=5.4.0",
+    # AI / LLM
+    "httpx>=0.28.0",
+    "tiktoken>=0.8.0",
+    # Auth
+    "pyjwt[crypto]>=2.10.0",
+    "passlib[bcrypt]>=1.7.4",
+    # Template
+    "jinja2>=3.1.4",
+    "jsonschema>=4.23.0",
+    # Config
+    "pydantic-settings>=2.6.0",
+    "pyyaml>=6.0.2",
+    # Encryption
+    "cryptography>=44.0.0",
+    # Observability
+    "structlog>=24.4.0",
+    # RAG
+    "langchain-text-splitters>=0.3.0",
+    # Utilities
+    "python-dateutil>=2.9.0",
+    "tenacity>=9.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.28.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+    "factory-boy>=3.3.0",
+]
+prod = [
+    "gunicorn>=23.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/logmind"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "A", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

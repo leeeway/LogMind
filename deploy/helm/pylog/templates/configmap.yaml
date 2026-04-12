@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "logmind.fullname" . }}-config
+  labels:
+    {{- include "logmind.labels" . | nindent 4 }}
+data:
+  APP_ENV: {{ .Values.config.appEnv | quote }}
+  DEBUG: {{ .Values.config.debug | quote }}
+  ES_HOSTS: {{ .Values.config.elasticsearch.hosts | quote }}
+  ES_USERNAME: {{ .Values.config.elasticsearch.username | quote }}
+  ES_VERIFY_CERTS: {{ .Values.config.elasticsearch.verifyCerts | quote }}
+  WECHAT_ENABLED: {{ .Values.config.wechat.enabled | quote }}
+  WECHAT_WEBHOOK_URL: {{ .Values.config.wechat.webhookUrl | quote }}
+  ANALYSIS_SEVERITY_THRESHOLD: {{ .Values.config.analysis.severityThreshold | quote }}
+  ANALYSIS_MAX_LOGS_PER_TASK: {{ .Values.config.analysis.maxLogsPerTask | quote }}
+  ANALYSIS_DAILY_TASK_LIMIT: {{ .Values.config.analysis.dailyTaskLimit | quote }}
+  ANALYSIS_COOLDOWN_MINUTES: {{ .Values.config.analysis.cooldownMinutes | quote }}
