@@ -48,7 +48,7 @@
 ## ✨ 核心特性 (Key Features)
 
 * **🤖 大语言模型任意门**：提供开箱即用的 OpenAI、Claude 3、Gemini 1.5、DeepSeek 接入，同时支持高度兼容的内网私有化模型（只需暴露 Standard Rest 协议接口即可快速适配）。
-* **🏢 企业级隔离池设计**：天然基于 **租户 (Tenant)** -> **业务线 (Business Line)** 的层级模型构建引擎。即便在千万级日志吞吐的 K8s 中，你依旧能为特殊的 `develop-slowcoach` 索引分发不同的系统超管和模型配额。
+* **🏢 企业级隔离池设计**：天然基于 **租户 (Tenant)** -> **业务线 (Business Line)** 的层级模型构建引擎。即便在千万级日志吞吐的 K8s 中，你依旧能为特殊的 `develop` 索引分发不同的系统超管和模型配额。
 * **🧠 内置 RAG (检索增强生成)**：模型不知道内部框架代码逻辑？LogMind 支持将企业内部文档、Git 知识库和 SOP 处理手册预先向量化，AI 在给出根因判断前会自动进行近义上下文检索并对齐业务标准。
 * **⏳ Celery 分布式滑动窗口**：通过 `异步消费 Worker + Time Patrol Scheduler`，解决 Filebeat 将日志推向 ES 时产生的物理吞吐延迟，永远不遗漏任何一条 FATAL 级别的黄金排错点。
 * **🔐 端到端加密架构**：彻底杜绝大模型 API 密钥泄漏！所有的 `API Key` 刚进网关就会走动态推导密钥，做 Fernet + HMAC 防篡改高强度对称加密落库。
@@ -179,7 +179,7 @@ docker-compose --env-file .env.production up -d --build
 
 ```json
 {
-  "name": "Slowcoach 开发联调线",
+  "name": "develop 开发联调线",
   "description": "接管后端服务核心错误",
   "es_index_pattern": "develop-server*",
   "log_parse_config": {
