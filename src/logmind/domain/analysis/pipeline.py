@@ -3,7 +3,7 @@ AI Analysis Pipeline — 8-Stage Log Analysis
 
 Stages:
 1. LogFetchStage     — Fetch logs from ES
-2. LogPreprocessStage — Clean, deduplicate, truncate
+2. LogPreprocessStage — Clean, deduplicate, truncate, merge stack traces
 3. RAGRetrieveStage   — Retrieve relevant knowledge
 4. PromptBuildStage   — Assemble prompt from template
 5. AIInferenceStage   — Call AI provider
@@ -13,6 +13,7 @@ Stages:
 """
 
 import json
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -21,6 +22,30 @@ from logmind.core.logging import get_logger
 from logmind.domain.provider.base import ChatMessage, ChatRequest, TokenUsage
 
 logger = get_logger(__name__)
+
+# ── Stack Trace Detection Patterns ───────────────────────
+# Java stack trace patterns
+_JAVA_STACK_RE = re.compile(
+    r"^\s+(at\s+[\w.$]+\(|"           # at com.example.Class(File.java:123)
+    r"Caused by:\s+|"                  # Caused by: java.lang.Exception
+    r"\.\.\.\s*\d+\s+more|"           # ... 12 more
+    r"Suppressed:\s+|"                 # Suppressed: java.lang.Exception
+    r"\}\s*$|"                         # closing brace of stack
+    r"at\s+sun\.|at\s+java\.|"         # JDK internal frames
+    r"at\s+org\.springframework\.|"    # Spring framework frames
+    r"at\s+org\.apache\.)"             # Apache framework frames
+)
+
+# Pattern to detect the start of a new log entry in message content
+# Matches formats like: [2026-04-13 21:49:48.488] or 2026-04-13T21:49:48
+_LOG_ENTRY_START_RE = re.compile(
+    r"^\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+)
+
+# Pattern to extract exception class name from message
+_EXCEPTION_CLASS_RE = re.compile(
+    r"([\w.]+(?:Exception|Error|Throwable|Fault))"
+)
 
 
 # ── Pipeline Context ─────────────────────────────────────
@@ -41,6 +66,11 @@ class PipelineContext:
     query: str = ""
     extra_filters: dict = field(default_factory=dict)
 
+    # GYYX business context
+    domain: str = ""
+    branch: str = ""
+    image_version: str = ""
+
     # Stage 1: Log Fetch
     raw_logs: list[dict] = field(default_factory=list)
     log_count: int = 0
@@ -48,6 +78,7 @@ class PipelineContext:
     # Stage 2: Preprocess
     processed_logs: str = ""
     log_metadata: dict = field(default_factory=dict)
+    has_stack_traces: bool = False
 
     # Stage 3: RAG
     rag_context: str = ""
@@ -116,6 +147,17 @@ class LogFetchStage(PipelineStage):
         ctx.raw_logs = [log.raw for log in result.logs]
         ctx.log_count = len(ctx.raw_logs)
 
+        # Extract GYYX business context from first log entry
+        if ctx.raw_logs:
+            first_log = ctx.raw_logs[0]
+            gy = first_log.get("gy", {})
+            if isinstance(gy, dict):
+                ctx.domain = ctx.domain or gy.get("domain", "")
+                ctx.branch = ctx.branch or gy.get("branch", "")
+            image = first_log.get("image", {})
+            if isinstance(image, dict):
+                ctx.image_version = ctx.image_version or image.get("version", "")
+
         logger.info("log_fetch_completed", count=ctx.log_count, task_id=ctx.task_id)
         return ctx
 
@@ -123,7 +165,15 @@ class LogFetchStage(PipelineStage):
 # ── Stage 2: Preprocess ─────────────────────────────────
 
 class LogPreprocessStage(PipelineStage):
-    """Clean, deduplicate, and format logs for AI consumption."""
+    """
+    Clean, deduplicate, merge stack traces, and format logs for AI consumption.
+
+    Stack trace handling:
+    - Detects Java stack trace patterns (at ..., Caused by:, ... N more)
+    - Merges multi-line stack traces into the preceding exception message
+    - Supports stack traces in message field content
+    - Deduplicates by exception class name + first line (not brute-force truncation)
+    """
 
     name = "log_preprocess"
 
@@ -132,29 +182,49 @@ class LogPreprocessStage(PipelineStage):
             ctx.processed_logs = "(No logs found matching the query)"
             return ctx
 
-        # Deduplicate by message
+        # Phase 1: Merge stack traces for error.log entries
+        merged_logs = self._merge_stack_traces(ctx.raw_logs)
+
+        # Phase 2: Deduplicate
         seen = set()
         unique_logs = []
-        for log in ctx.raw_logs:
+        for log in merged_logs:
             msg = self._extract_message(log)
-            msg_key = msg[:200]  # Dedup key
-            if msg_key not in seen:
-                seen.add(msg_key)
+            dedup_key = self._make_dedup_key(msg)
+            if dedup_key not in seen:
+                seen.add(dedup_key)
                 unique_logs.append(log)
 
-        # Format logs
+        # Phase 3: Format logs with business context
         lines = []
         for log in unique_logs[:200]:  # Limit to 200 unique entries
             ts = log.get("@timestamp", "")
             level = self._extract_level(log)
             msg = self._extract_message(log)
-            ns = log.get("kubernetes", {}).get("namespace", "")
-            pod = log.get("kubernetes", {}).get("pod", {}).get("name", "")
 
+            # GYYX gy.* context
+            gy = log.get("gy", {}) if isinstance(log.get("gy"), dict) else {}
+            domain = gy.get("domain", "")
+            branch = gy.get("branch", "")
+
+            # Kubernetes context (backward compatible)
+            k8s = log.get("kubernetes", {})
+            ns = k8s.get("namespace", "") if isinstance(k8s, dict) else ""
+            pod = k8s.get("pod", {}).get("name", "") if isinstance(k8s, dict) else ""
+
+            # Build formatted line with available context
+            context_parts = []
+            if domain:
+                context_parts.append(f"domain:{domain}")
+            if branch:
+                context_parts.append(f"branch:{branch}")
             if ns and pod:
-                lines.append(f"[{ts}] [{level}] [{ns}/{pod}] {msg}")
-            else:
-                lines.append(f"[{ts}] [{level}] {msg}")
+                context_parts.append(f"{ns}/{pod}")
+            elif ns:
+                context_parts.append(ns)
+
+            context_str = f" [{', '.join(context_parts)}]" if context_parts else ""
+            lines.append(f"[{ts}] [{level}]{context_str} {msg}")
 
         ctx.processed_logs = "\n".join(lines)
 
@@ -164,20 +234,149 @@ class LogPreprocessStage(PipelineStage):
 
         ctx.log_metadata = {
             "original_count": ctx.log_count,
+            "merged_count": len(merged_logs),
             "deduped_count": len(unique_logs),
             "formatted_count": len(lines),
+            "has_stack_traces": ctx.has_stack_traces,
         }
 
         logger.info("log_preprocess_completed", **ctx.log_metadata, task_id=ctx.task_id)
         return ctx
 
+    def _merge_stack_traces(self, logs: list[dict]) -> list[dict]:
+        """
+        Merge multi-line stack trace entries into their parent exception log.
+
+        Strategy:
+        - Group consecutive logs from the same pod/domain where subsequent
+          messages look like stack trace continuation lines
+        - Append stack trace lines to the parent message
+        """
+        if not logs:
+            return logs
+
+        merged = []
+        current = None
+
+        for log in logs:
+            msg = self._extract_message(log)
+            filetype = ""
+            gy = log.get("gy", {})
+            if isinstance(gy, dict):
+                filetype = gy.get("filetype", "")
+
+            is_stack_line = self._is_stack_trace_line(msg)
+
+            if is_stack_line and current is not None:
+                # This looks like a continuation of a stack trace
+                # Append to the current log's message
+                current_msg = self._extract_message(current)
+                current["message"] = current_msg + "\n" + msg
+                current["_stack_merged"] = True
+            else:
+                # New log entry or non-stack-trace line
+                if current is not None:
+                    merged.append(current)
+                current = dict(log)  # shallow copy
+
+                # Check if the message itself contains embedded stack traces
+                if filetype == "error.log" or self._contains_exception(msg):
+                    current["_is_error_entry"] = True
+
+        # Don't forget the last entry
+        if current is not None:
+            merged.append(current)
+
+        # Mark context if any merges happened
+        if any(log.get("_stack_merged") for log in merged):
+            # This will be used by the pipeline context
+            self._has_stack_traces = True
+
+        return merged
+
+    _has_stack_traces: bool = False
+
+    @staticmethod
+    def _is_stack_trace_line(msg: str) -> bool:
+        """Detect if a message line is part of a Java stack trace."""
+        if not msg:
+            return False
+        stripped = msg.strip()
+        # Common Java stack trace patterns
+        if stripped.startswith("at "):
+            return True
+        if stripped.startswith("Caused by:"):
+            return True
+        if stripped.startswith("Suppressed:"):
+            return True
+        if re.match(r"^\.\.\.\s*\d+\s+more$", stripped):
+            return True
+        # Check with compiled regex for edge cases
+        if _JAVA_STACK_RE.match(msg):
+            return True
+        return False
+
+    @staticmethod
+    def _contains_exception(msg: str) -> bool:
+        """Check if a message contains an exception class reference."""
+        return bool(_EXCEPTION_CLASS_RE.search(msg))
+
+    @staticmethod
+    def _make_dedup_key(msg: str) -> str:
+        """
+        Generate a deduplication key for a log message.
+
+        For stack traces: use exception class + first line
+        For normal logs: use first 200 characters
+        """
+        if not msg:
+            return ""
+
+        # For stack traces, use exception class name as key
+        exc_match = _EXCEPTION_CLASS_RE.search(msg)
+        if exc_match:
+            # Exception class + first line (before newline)
+            first_line = msg.split("\n")[0][:200]
+            return f"{exc_match.group(1)}:{first_line}"
+
+        # For normal messages, use first 200 chars
+        return msg[:200]
+
     @staticmethod
     def _extract_level(source: dict) -> str:
+        """
+        Extract log level from varied field names.
+        Supports: level, severity, loglevel, log.level, gy.filetype, message content.
+        """
+        # 1. Dedicated level fields
         for field_name in ["level", "severity", "loglevel"]:
             if field_name in source:
                 return str(source[field_name]).upper()
         if isinstance(source.get("log"), dict):
-            return str(source["log"].get("level", "")).upper()
+            val = source["log"].get("level", "")
+            if val:
+                return str(val).upper()
+
+        # 2. GYYX gy.filetype mapping
+        from logmind.domain.log.service import _FILETYPE_LEVEL_MAP
+        gy = source.get("gy", {})
+        if isinstance(gy, dict):
+            filetype = gy.get("filetype", "")
+            if filetype in _FILETYPE_LEVEL_MAP:
+                return _FILETYPE_LEVEL_MAP[filetype].upper()
+
+        # 3. Parse from message content
+        message = source.get("message", "")
+        if isinstance(message, str):
+            match = _MSG_LEVEL_RE.search(message)
+            if match:
+                level_str = match.group(1).upper()
+                if level_str == "WARN":
+                    return "WARNING"
+                if level_str == "FATAL":
+                    return "CRITICAL"
+                return level_str
+
         return "UNKNOWN"
 
     @staticmethod
@@ -229,23 +428,40 @@ class PromptBuildStage(PipelineStage):
 
         async with get_db_context() as session:
             # Get template — use specified or find default
+            # For error logs with stack traces, prefer stack_trace_analysis template
+            target_category = "log_analysis"
+            if ctx.has_stack_traces:
+                target_category = "stack_trace_analysis"
+
             if ctx.prompt_template_id:
                 template = await self.prompt_repo.get_by_id(
                     session, ctx.prompt_template_id, tenant_id=ctx.tenant_id
                 )
             else:
+                # Try to find category-specific template first
                 stmt = select(PromptTemplate).where(
                     PromptTemplate.tenant_id == ctx.tenant_id,
-                    PromptTemplate.category == "log_analysis",
+                    PromptTemplate.category == target_category,
                     PromptTemplate.is_default == True,
                     PromptTemplate.is_active == True,
                 ).limit(1)
                 result = await session.execute(stmt)
                 template = result.scalar_one_or_none()
 
+                # Fallback to log_analysis if no stack_trace template
+                if not template and target_category != "log_analysis":
+                    stmt = select(PromptTemplate).where(
+                        PromptTemplate.tenant_id == ctx.tenant_id,
+                        PromptTemplate.category == "log_analysis",
+                        PromptTemplate.is_default == True,
+                        PromptTemplate.is_active == True,
+                    ).limit(1)
+                    result = await session.execute(stmt)
+                    template = result.scalar_one_or_none()
+
             if not template:
                 # Use built-in fallback prompt
-                ctx.system_prompt = self._fallback_system_prompt()
+                ctx.system_prompt = self._fallback_system_prompt(ctx)
                 ctx.user_prompt = self._fallback_user_prompt(ctx)
                 return ctx
 
@@ -257,6 +473,11 @@ class PromptBuildStage(PipelineStage):
                 "logs": ctx.processed_logs,
                 "log_count": ctx.log_count,
                 "rag_context": ctx.rag_context,
+                # GYYX context
+                "domain": ctx.domain,
+                "branch": ctx.branch,
+                "image_version": ctx.image_version,
+                "has_stack_traces": ctx.has_stack_traces,
             }
 
             ctx.system_prompt, ctx.user_prompt = self.prompt_engine.render(
@@ -268,8 +489,8 @@ class PromptBuildStage(PipelineStage):
         return ctx
 
     @staticmethod
-    def _fallback_system_prompt() -> str:
-        return """你是一名资深 SRE 工程师和日志分析专家。
+    def _fallback_system_prompt(ctx: PipelineContext) -> str:
+        base = """你是一名资深 SRE 工程师和日志分析专家。
 分析 Kubernetes 集群中的应用日志，识别错误模式并给出根因分析。
 
 ## 输出要求
@@ -281,12 +502,36 @@ class PromptBuildStage(PipelineStage):
 
 只输出 JSON 数组，不要输出其他内容。只关注严重问题 (ERROR/CRITICAL)。"""
 
+        if ctx.has_stack_traces:
+            base += """
+
+## 堆栈异常分析指引
+- 重点关注 Caused by 链，找到根因异常
+- 区分业务代码异常（cn.gyyx.* 包）和框架异常（Spring、MyBatis 等）
+- 对 NullPointerException 类分析可能的空值来源
+- 合并相同异常类的多次出现，统计频率
+- 给出具体的代码修复建议（涉及的类名和方法）"""
+
+        return base
+
     @staticmethod
     def _fallback_user_prompt(ctx: PipelineContext) -> str:
+        context_lines = [
+            f"- 业务线: {ctx.business_line_name}",
+            f"- 时间范围: {ctx.time_from} ~ {ctx.time_to}",
+            f"- 日志数量: {ctx.log_count}",
+        ]
+        if ctx.domain:
+            context_lines.append(f"- 站点域名: {ctx.domain}")
+        if ctx.branch:
+            context_lines.append(f"- 代码分支: {ctx.branch}")
+        if ctx.image_version:
+            context_lines.append(f"- 镜像版本: {ctx.image_version}")
+
+        context_str = "\n".join(context_lines)
+
         return f"""## 分析上下文
-- 业务线: {ctx.business_line_name}
-- 时间范围: {ctx.time_from} ~ {ctx.time_to}
-- 日志数量: {ctx.log_count}
+{context_str}
 
 ## 日志内容
 ```

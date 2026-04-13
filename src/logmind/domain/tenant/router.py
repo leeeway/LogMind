@@ -137,6 +137,7 @@ async def create_business_line(
         log_parse_config=json.dumps(req.log_parse_config),
         default_filters=json.dumps(req.default_filters),
         severity_threshold=req.severity_threshold,
+        field_mapping=json.dumps(req.field_mapping),
     )
     biz = await biz_repo.create(session, biz)
     return BusinessLineResponse.model_validate(biz)
@@ -180,6 +181,8 @@ async def update_business_line(
         values["log_parse_config"] = json.dumps(values["log_parse_config"])
     if "default_filters" in values:
         values["default_filters"] = json.dumps(values["default_filters"])
+    if "field_mapping" in values:
+        values["field_mapping"] = json.dumps(values["field_mapping"])
 
     success = await biz_repo.update_by_id(
         session, biz_id, values, tenant_id=user.tenant_id

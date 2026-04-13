@@ -3,9 +3,11 @@ Log Domain — ES Query Service
 
 Handles log retrieval, search, and aggregation from Elasticsearch.
 Supports arbitrary index patterns (per user requirement: indexes named by site).
+Supports GYYX Filebeat log format with gy.* fields and data-stream indices.
 """
 
 import json
+import re
 from datetime import datetime
 
 from logmind.core.elasticsearch import get_es_client
@@ -21,6 +23,30 @@ from logmind.domain.log.schemas import (
 
 logger = get_logger(__name__)
 
+# gy.filetype → standard log level mapping
+_FILETYPE_LEVEL_MAP: dict[str, str] = {
+    "error.log": "error",
+    "info.log": "info",
+    "warn.log": "warning",
+    "warning.log": "warning",
+    "debug.log": "debug",
+    "trace.log": "debug",
+}
+
+# Reverse mapping: severity → filetype values (for ES filter)
+_SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
+    "error": ["error.log"],
+    "warning": ["warn.log", "warning.log"],
+    "info": ["info.log"],
+    "debug": ["debug.log", "trace.log"],
+}
+
+# Regex to extract level from message content like "[ERROR]", "[WARN]" etc.
+_MSG_LEVEL_RE = re.compile(
+    r"\[(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\]",
+    re.IGNORECASE,
+)
+
 
 class LogService:
     """Elasticsearch log query and aggregation service."""
@@ -32,6 +58,7 @@ class LogService:
         """
         Search logs from ES with flexible filtering.
         Supports arbitrary index patterns (named by site, etc.)
+        Compatible with both kubernetes.* and gy.* field formats.
         """
         must_clauses = []
         filter_clauses = []
@@ -57,20 +84,27 @@ class LogService:
             })
 
         # Severity filter — flexible field matching for varied log formats
+        # Supports: level, log.level, severity, loglevel, AND gy.filetype
         if request.severity:
+            severity_should = [
+                {"term": {"level": request.severity}},
+                {"term": {"log.level": request.severity}},
+                {"term": {"severity": request.severity}},
+                {"term": {"loglevel": request.severity.upper()}},
+            ]
+            # Also match gy.filetype for GYYX format
+            filetype_values = _SEVERITY_FILETYPE_MAP.get(request.severity.lower(), [])
+            for ft in filetype_values:
+                severity_should.append({"term": {"gy.filetype": ft}})
+
             filter_clauses.append({
                 "bool": {
-                    "should": [
-                        {"term": {"level": request.severity}},
-                        {"term": {"log.level": request.severity}},
-                        {"term": {"severity": request.severity}},
-                        {"term": {"loglevel": request.severity.upper()}},
-                    ],
+                    "should": severity_should,
                     "minimum_should_match": 1,
                 }
             })
 
-        # K8s metadata filters
+        # K8s metadata filters (backward compatible)
         if request.namespace:
             filter_clauses.append(
                 {"term": {"kubernetes.namespace": request.namespace}}
@@ -82,6 +116,16 @@ class LogService:
         if request.container_name:
             filter_clauses.append(
                 {"term": {"kubernetes.container.name": request.container_name}}
+            )
+
+        # GYYX gy.* field filters
+        if request.domain:
+            filter_clauses.append(
+                {"term": {"gy.domain": request.domain}}
+            )
+        if request.filetype:
+            filter_clauses.append(
+                {"term": {"gy.filetype": request.filetype}}
             )
 
         # Extra filters from business line config
@@ -110,6 +154,7 @@ class LogService:
         logs = []
         for hit in result["hits"]["hits"]:
             source = hit["_source"]
+            gy_meta = self._extract_gy_metadata(source)
             logs.append(LogEntry(
                 id=hit["_id"],
                 timestamp=source.get("@timestamp", ""),
@@ -118,6 +163,12 @@ class LogService:
                 source=source,
                 kubernetes=source.get("kubernetes", {}),
                 raw=source,
+                # GYYX metadata
+                domain=gy_meta.get("domain", ""),
+                pod_name=gy_meta.get("pod_name", ""),
+                branch=gy_meta.get("branch", ""),
+                image_version=gy_meta.get("image_version", ""),
+                filetype=gy_meta.get("filetype", ""),
             ))
 
         return LogQueryResponse(
@@ -153,6 +204,18 @@ class LogService:
                         "size": 20,
                     }
                 },
+                "by_domain": {
+                    "terms": {
+                        "field": "gy.domain",
+                        "size": 50,
+                    }
+                },
+                "by_filetype": {
+                    "terms": {
+                        "field": "gy.filetype",
+                        "size": 10,
+                    }
+                },
                 "time_histogram": {
                     "date_histogram": {
                         "field": "@timestamp",
@@ -175,6 +238,14 @@ class LogService:
                 LogAggregation(key=b["key"], count=b["doc_count"])
                 for b in aggs.get("by_namespace", {}).get("buckets", [])
             ],
+            by_domain=[
+                LogAggregation(key=b["key"], count=b["doc_count"])
+                for b in aggs.get("by_domain", {}).get("buckets", [])
+            ],
+            by_filetype=[
+                LogAggregation(key=b["key"], count=b["doc_count"])
+                for b in aggs.get("by_filetype", {}).get("buckets", [])
+            ],
             time_histogram=[
                 {"time": b["key_as_string"], "count": b["doc_count"]}
                 for b in aggs.get("time_histogram", {}).get("buckets", [])
@@ -182,7 +253,10 @@ class LogService:
         )
 
     async def list_indices(self, pattern: str = "*") -> list[ESIndexInfo]:
-        """List ES indices matching a pattern."""
+        """
+        List ES indices matching a pattern.
+        Supports both regular indices and .ds-* data stream backing indices.
+        """
         try:
             indices = await self.es.cat.indices(
                 index=pattern, format="json", h="index,docs.count,store.size,status"
@@ -196,6 +270,7 @@ class LogService:
                 )
                 for idx in indices
                 if not idx.get("index", "").startswith(".")
+                or idx.get("index", "").startswith(".ds-")  # Keep data stream indices
             ]
         except Exception as e:
             logger.error("list_indices_failed", error=str(e))
@@ -205,7 +280,14 @@ class LogService:
 
     @staticmethod
     def _extract_level(source: dict) -> str:
-        """Extract log level from varied field names."""
+        """
+        Extract log level from varied field names.
+        Priority:
+          1. Dedicated fields: level, log.level, severity, loglevel
+          2. GYYX gy.filetype mapping (error.log → error, etc.)
+          3. Regex from message content ([ERROR], [WARN], etc.)
+        """
+        # 1. Dedicated level fields
         for field in ["level", "log.level", "severity", "loglevel"]:
             parts = field.split(".")
             val = source
@@ -217,6 +299,28 @@ class LogService:
                     break
             if val:
                 return str(val).lower()
+
+        # 2. GYYX gy.filetype mapping
+        gy = source.get("gy", {})
+        if isinstance(gy, dict):
+            filetype = gy.get("filetype", "")
+            if filetype in _FILETYPE_LEVEL_MAP:
+                return _FILETYPE_LEVEL_MAP[filetype]
+
+        # 3. Parse from message content
+        message = source.get("message", "")
+        if isinstance(message, str):
+            match = _MSG_LEVEL_RE.search(message)
+            if match:
+                level_str = match.group(1).lower()
+                if level_str in ("warn", "warning"):
+                    return "warning"
+                if level_str == "fatal":
+                    return "critical"
+                if level_str == "trace":
+                    return "debug"
+                return level_str
+
         return ""
 
     @staticmethod
@@ -226,6 +330,34 @@ class LogService:
             if field in source and isinstance(source[field], str):
                 return source[field]
         return json.dumps(source, ensure_ascii=False)[:500]
+
+    @staticmethod
+    def _extract_gy_metadata(source: dict) -> dict:
+        """
+        Extract GYYX business metadata from gy.* fields.
+
+        Fields:
+          gy.domain   → site domain name
+          gy.podname  → pod name with version suffix
+          gy.branch   → code branch (master=prod, develop=test)
+          gy.filetype → log file type (error.log, info.log, etc.)
+          image.version → container image version
+        """
+        gy = source.get("gy", {})
+        if not isinstance(gy, dict):
+            return {}
+
+        image = source.get("image", {})
+        if not isinstance(image, dict):
+            image = {}
+
+        return {
+            "domain": gy.get("domain", ""),
+            "pod_name": gy.get("podname", ""),
+            "branch": gy.get("branch", ""),
+            "filetype": gy.get("filetype", ""),
+            "image_version": image.get("version", ""),
+        }
 
 
 # Singleton

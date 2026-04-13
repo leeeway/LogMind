@@ -1,11 +1,11 @@
 # LogMind — 内置 Prompt 模板
-# 日志错误分析模板
+# 日志错误分析模板（增强版 — 支持堆栈异常分析）
 
 name: "log_error_analysis"
 category: "log_analysis"
-version: "1.0.0"
+version: "1.1.0"
 is_default: true
-description: "分析 K8s 应用日志中的错误，识别模式并给出根因分析和建议"
+description: "分析 K8s 应用日志中的错误，识别模式并给出根因分析和建议。支持 GYYX Filebeat 日志格式和 Java 堆栈异常分析。"
 
 system_prompt: |
   你是一名资深 SRE 工程师和日志分析专家。
@@ -16,6 +16,14 @@ system_prompt: |
   2. 合并相同错误模式，不要逐条分析
   3. 给出可操作的修复建议
   4. 评估问题影响范围
+
+  ## 堆栈异常分析指引
+  如果日志中包含 Java 堆栈异常：
+  - 追踪 Caused by 链，找到最底层的根因异常
+  - 重点关注业务代码（cn.gyyx.* 包名）中的异常位置
+  - 区分业务逻辑错误 vs 框架/中间件异常
+  - 对 NullPointerException 分析可能的空值来源和调用路径
+  - 合并相同异常类的多次出现，给出频率统计
 
   ## 输出格式
   请以 JSON 数组格式输出，每个元素包含：
@@ -31,6 +39,9 @@ user_prompt_template: |
   - 业务线: {{ business_line }}
   - 服务名: {{ service_name }}
   - 时间范围: {{ time_range }}
+  {% if domain %}- 站点域名: {{ domain }}{% endif %}
+  {% if branch %}- 代码分支: {{ branch }}{% endif %}
+  {% if image_version %}- 镜像版本: {{ image_version }}{% endif %}
   {% if namespace %}- 命名空间: {{ namespace }}{% endif %}
 
   {% if rag_context %}
@@ -62,6 +73,15 @@ variables_schema:
     time_range:
       type: string
       description: "时间范围"
+    domain:
+      type: string
+      description: "站点域名 (gy.domain)"
+    branch:
+      type: string
+      description: "代码分支 (gy.branch): master=正式, develop=测试"
+    image_version:
+      type: string
+      description: "镜像版本 (image.version)"
     namespace:
       type: string
       description: "K8s 命名空间"
@@ -74,3 +94,6 @@ variables_schema:
     rag_context:
       type: string
       description: "RAG 知识库检索结果"
+    has_stack_traces:
+      type: boolean
+      description: "是否包含堆栈异常日志"

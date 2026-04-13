@@ -21,6 +21,10 @@ class LogQueryRequest(BaseModel):
     namespace: str | None = None
     pod_name: str | None = None
     container_name: str | None = None
+    domain: str | None = Field(None, description="Filter by gy.domain (site domain)")
+    filetype: str | None = Field(
+        None, description="Filter by gy.filetype (e.g. error.log, info.log)"
+    )
     extra_filters: dict = Field(default_factory=dict)
     size: int = Field(100, ge=1, le=1000)
     sort_order: str = Field("desc", pattern=r"^(asc|desc)$")
@@ -35,6 +39,13 @@ class LogEntry(BaseSchema):
     source: dict = Field(default_factory=dict)
     kubernetes: dict = Field(default_factory=dict)
     raw: dict = Field(default_factory=dict)
+
+    # GYYX gy.* business metadata
+    domain: str = Field("", description="Site domain from gy.domain")
+    pod_name: str = Field("", description="Pod name from gy.podname")
+    branch: str = Field("", description="Code branch from gy.branch")
+    image_version: str = Field("", description="Image version from image.version")
+    filetype: str = Field("", description="Log file type from gy.filetype")
 
 
 class LogQueryResponse(BaseSchema):
@@ -55,6 +66,8 @@ class LogStatsResponse(BaseSchema):
     total_logs: int
     by_level: list[LogAggregation]
     by_namespace: list[LogAggregation]
+    by_domain: list[LogAggregation] = Field(default_factory=list)
+    by_filetype: list[LogAggregation] = Field(default_factory=list)
     time_histogram: list[dict]
 
 

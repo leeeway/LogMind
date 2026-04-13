@@ -78,6 +78,20 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         String(20), default="error"
     )
 
+    # Configurable field mapping for varied log formats (JSON text)
+    # Defines how to map source-specific fields to LogMind standard fields.
+    # Example for GYYX Filebeat format:
+    # {
+    #   "level_field": "gy.filetype",
+    #   "level_mapping": {"info.log": "info", "error.log": "error", ...},
+    #   "domain_field": "gy.domain",
+    #   "pod_field": "gy.podname",
+    #   "branch_field": "gy.branch",
+    #   "version_field": "image.version",
+    #   "filetype_field": "gy.filetype"
+    # }
+    field_mapping: Mapped[str] = mapped_column(Text, default="{}")
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Relationships

@@ -56,6 +56,7 @@ CREATE TABLE business_line (
 	log_parse_config TEXT NOT NULL, 
 	default_filters TEXT NOT NULL, 
 	severity_threshold VARCHAR(20) NOT NULL, 
+	field_mapping TEXT NOT NULL DEFAULT '{}', 
 	is_active BOOLEAN NOT NULL, 
 	id VARCHAR(36) NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
