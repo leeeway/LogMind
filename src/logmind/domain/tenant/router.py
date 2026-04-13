@@ -139,6 +139,8 @@ async def create_business_line(
         severity_threshold=req.severity_threshold,
         language=req.language,
         field_mapping=json.dumps(req.field_mapping),
+        ai_enabled=req.ai_enabled,
+        webhook_url=req.webhook_url,
     )
     biz = await biz_repo.create(session, biz)
     return BusinessLineResponse.model_validate(biz)

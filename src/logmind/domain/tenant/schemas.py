@@ -86,6 +86,16 @@ class BusinessLineCreate(BaseModel):
         description="Field mapping for varied log formats. "
         'e.g. {"level_field": "gy.filetype", "domain_field": "gy.domain", ...}',
     )
+    ai_enabled: bool = Field(
+        True,
+        description="Enable AI model analysis. When False, only sends error log notifications via webhook.",
+    )
+    webhook_url: str = Field(
+        "",
+        max_length=500,
+        description="Webhook URL for notifications. Overrides global setting. "
+        "Supports WeChat Work, DingTalk, Feishu webhooks.",
+    )
 
 
 class BusinessLineUpdate(BaseModel):
@@ -97,6 +107,8 @@ class BusinessLineUpdate(BaseModel):
     severity_threshold: str | None = None
     language: str | None = Field(None, pattern=r"^(java|csharp|python|go|other)$")
     field_mapping: dict | None = None
+    ai_enabled: bool | None = None
+    webhook_url: str | None = None
     is_active: bool | None = None
 
 
@@ -109,5 +121,7 @@ class BusinessLineResponse(BaseSchema):
     severity_threshold: str
     language: str = "java"
     field_mapping: dict = Field(default_factory=dict)
+    ai_enabled: bool = True
+    webhook_url: str = ""
     is_active: bool
     created_at: datetime

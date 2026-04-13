@@ -58,6 +58,8 @@ CREATE TABLE business_line (
 	severity_threshold VARCHAR(20) NOT NULL, 
 	language VARCHAR(20) NOT NULL DEFAULT 'java', 
 	field_mapping TEXT NOT NULL DEFAULT '{}', 
+	ai_enabled BOOLEAN NOT NULL DEFAULT TRUE, 
+	webhook_url VARCHAR(500) NOT NULL DEFAULT '', 
 	is_active BOOLEAN NOT NULL, 
 	id VARCHAR(36) NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 

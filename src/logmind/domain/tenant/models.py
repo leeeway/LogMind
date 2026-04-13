@@ -102,6 +102,16 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # }
     field_mapping: Mapped[str] = mapped_column(Text, default="{}")
 
+    # AI model toggle — when False, skip AI inference and directly send
+    # error log notifications via webhook. Useful for cost control or
+    # when AI provider is not configured.
+    ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Per-business-line webhook URL for notifications.
+    # Overrides the global wechat_webhook_url from settings.
+    # Supports WeChat Work, DingTalk, Feishu, or any webhook accepting JSON POST.
+    webhook_url: Mapped[str] = mapped_column(String(500), default="")
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Relationships

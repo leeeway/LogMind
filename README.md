@@ -1,254 +1,513 @@
 <div align="center">
   <br/>
-  <h1>🧠 LogMind (智能日志中枢)</h1>
-  <br/>
-
-  <p><b>面向云原生环境的 AI 驱动日志审计、自动化错误诊断与故障自愈防线平台</b></p>
+  <h1>🧠 LogMind</h1>
+  <p><b>智能日志分析与告警平台</b></p>
+  <p>AI-Powered Log Analysis & Alert Platform for Cloud-Native and Hybrid Infrastructure</p>
 
   <p>
     <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.13-blue.svg?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.13" /></a>
-    <a href="https://fastapi.tiangolo.com"><img src="https://img.shields.io/badge/FastAPI-0.111.0-009688.svg?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" /></a>
-    <a href="https://www.sqlalchemy.org/"><img src="https://img.shields.io/badge/SQLAlchemy-2.0-red.svg?style=for-the-badge" alt="SQLAlchemy" /></a>
-    <a href="https://docs.celeryq.dev/"><img src="https://img.shields.io/badge/Celery-Distributed-lightgreen.svg?style=for-the-badge" alt="Celery" /></a>
+    <a href="https://fastapi.tiangolo.com"><img src="https://img.shields.io/badge/FastAPI-0.111-009688.svg?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" /></a>
     <img src="https://img.shields.io/badge/Elasticsearch-8.x-yellow?style=for-the-badge&logo=elasticsearch" alt="ES" />
-    <img src="https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=for-the-badge&logo=docker" alt="Docker Ready" />
+    <img src="https://img.shields.io/badge/Celery-Distributed-lightgreen.svg?style=for-the-badge" alt="Celery" />
+    <img src="https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=for-the-badge&logo=docker" alt="Docker" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-purple.svg?style=for-the-badge" alt="License MIT" /></a>
-  </p>
-
-  <p>
-    随着云原生架构的扩展，传统的基于正则匹配和关键字堆砌的日志拦截规则已无法适应复杂微服务间的衍生报错。<br/>
-    <b>LogMind</b> 作为统一日志网关与大型语言模型（LLMs）的桥梁，以异步分布式架构为您建立 24/7 永不休息的“资深 AI 运维专家”。
   </p>
 </div>
 
 <br/>
 
----
-
-## 📑 目录 (Table of Contents)
-
-- [✨ 核心特性 (Key Features)](#-核心特性-key-features)
-- [🏗️ 架构设计 (Architecture)](#-架构设计-architecture)
-  - [系统数据流拓扑](#1-系统数据流拓扑)
-  - [自动巡检工作流 (Patrol Workflow)](#2-自动巡检工作流-patrol-workflow)
-- [📦 安装指南 (Installation)](#-安装指南-installation)
-  - [方式一：物理机/容器源码级部署 (开发推荐)](#方式一物理机容器源码级部署-开发推荐)
-  - [方式二：Docker Compose 一键启动 (生产推荐)](#方式二docker-compose-一键启动-生产推荐)
-- [🚀 最佳实践教程 (Quick Start)](#-最佳实践教程-quick-start)
-  - [1. 申请鉴权 Token](#1-申请鉴权-token)
-  - [2. 注册大模型驱动 (AI Providers)](#2-注册大模型驱动-ai-providers)
-  - [3. 配置 K8S 日志流监听拦截](#3-配置-k8s-日志流监听拦截)
-- [🔌 API 调用规范示例](#-api-调用规范示例)
-- [🎯 未来路标 (Roadmap)](#-未来路标-roadmap)
-- [🤝 参与贡献 (Contributing)](#-参与贡献-contributing)
-- [📜 开源协议 (License)](#-开源协议-license)
+> LogMind 对接企业已有的 ELK 日志基础设施，通过 AI 大模型自动识别错误模式、追踪异常根因、生成修复建议，并将告警推送至企业微信 / 钉钉 / 飞书。  
+> 支持 **Java (K8s)** 和 **C# (.NET/VM)** 混合架构，提供灵活的 **AI 开关**：开启时进行深度智能分析，关闭时自动降级为轻量化异常通知。
 
 ---
 
-## ✨ 核心特性 (Key Features)
+## 📑 目录
 
-* **🤖 大语言模型任意门**：提供开箱即用的 OpenAI、Claude 、Gemini 、DeepSeek 接入，同时支持高度兼容的内网私有化模型（只需暴露 Standard Rest 协议接口即可快速适配）。
-* **🏢 企业级隔离池设计**：天然基于 **租户 (Tenant)** -> **业务线 (Business Line)** 的层级模型构建引擎。即便在千万级日志吞吐的 K8s 中，你依旧能为特殊的 `develop` 索引分发不同的系统超管和模型配额。
-* **🧠 内置 RAG (检索增强生成)**：模型不知道内部框架代码逻辑？LogMind 支持将企业内部文档、Git 知识库和 SOP 处理手册预先向量化，AI 在给出根因判断前会自动进行近义上下文检索并对齐业务标准。
-* **⏳ Celery 分布式滑动窗口**：通过 `异步消费 Worker + Time Patrol Scheduler`，解决 Filebeat 将日志推向 ES 时产生的物理吞吐延迟，永远不遗漏任何一条 FATAL 级别的黄金排错点。
-* **🔐 端到端加密架构**：彻底杜绝大模型 API 密钥泄漏！所有的 `API Key` 刚进网关就会走动态推导密钥，做 Fernet + HMAC 防篡改高强度对称加密落库。
+- [核心能力](#-核心能力)
+- [架构设计](#-架构设计)
+- [功能矩阵](#-功能矩阵)
+- [快速开始](#-快速开始)
+- [业务线配置指南](#-业务线配置指南)
+- [通知模板说明](#-通知模板说明)
+- [API 接口参考](#-api-接口参考)
+- [项目结构](#-项目结构)
+- [未来路标](#-未来路标)
+- [参与贡献](#-参与贡献)
+- [开源协议](#-开源协议)
 
 ---
 
-## 🏗️ 架构设计 (Architecture)
+## ✨ 核心能力
 
-### 1. 系统数据流拓扑
+### 🔌 无缝对接企业 ELK
+
+直接读取已有 Elasticsearch 中的 Filebeat 日志，无需改造日志采集链路。支持 Data Stream 索引（`.ds-*`）和传统索引。
+
+### 🤖 AI 大模型弹性分析
+
+- 开箱即用对接 OpenAI / Claude / Gemini / DeepSeek / 内网私有模型
+- **AI 开关**：按业务线独立控制，关闭即零 Token 消耗
+- AI 异常自动降级：模型故障时自动切换为原始日志通知，告警不丢失
+
+### 🌐 多语言日志智能解析
+
+| 语言 | 日志级别提取 | 堆栈检测 | 部署环境 |
+|------|------------|---------|---------|
+| **Java** | `gy.filetype` 映射 (error.log / info.log) | `at pkg.Class(File.java:123)` + `Caused by:` | K8s Pod |
+| **C#** | message NLog 正则 (`时间 [线程] ERROR 类名`) | `at NS.Class() in File.cs:line N` | Windows VM |
+| **Python** | message 关键词 | `Traceback` + `File "xxx", line N` | 通用 |
+| **Go** | message 关键词 | `goroutine` + `panic` | K8s / VM |
+
+### 📨 模板化 Webhook 通知
+
+三种告警模板自动匹配场景，支持企业微信 / 钉钉 / 飞书 webhook 自动适配：
+
+| 模板 | 触发场景 | 包含信息 |
+|------|---------|---------|
+| ⚠️ 日志异常告警 | AI 关闭，检测到错误日志 | 业务线、站点、环境、语言、日志数、异常摘要 |
+| 🔴 AI 分析告警 | AI 分析发现 Critical 问题 | 告警级别、AI 结论、影响范围、任务 ID |
+| 🛑 AI 流程异常 | AI 模型调用失败 | 错误信息、故障原因 + 降级通知 |
+
+### 🏢 企业级多租户
+
+天然基于 **租户 → 业务线** 层级隔离。每个业务线独立配置 ES 索引、开发语言、AI 开关、webhook 地址、告警阈值。
+
+---
+
+## 🏗 架构设计
+
+### 系统架构
+
 ```mermaid
-graph TD;
-    subgraph K8S 集群环境
-        A[微服务 Pods] -->|标准输出/文件中继| B(Filebeat / Logstash)
+graph TD
+    subgraph 日志采集层
+        A["Java 服务 (K8s)"] -->|Filebeat 8.x| ES[(ES 集群)]
+        B["C# 服务 (VM)"] -->|Filebeat 8.x| ES
     end
-    B -->|高吞吐收集| C[(Elasticsearch 网关池)]
-    
-    subgraph LogMind 控制面
-        H[Swagger API] -->|配置租户及路由规则| I[(PostgreSQL)]
-        J[Celery Beat 定时器] -->|分发分析窗口| D[Celery 分析 Worker]
-        D -->|条件过滤&拉取| C
-        D -->|RAG 文档补充| E[MinIO 向量库]
+
+    subgraph LogMind 平台
+        API[FastAPI 接口层] -->|配置管理| DB[(PostgreSQL)]
+        Beat[Celery Beat 调度器] -->|定时巡检| Worker[Celery Worker]
+        Worker -->|查询日志| ES
+        Worker -->|RAG 增强| MinIO[MinIO 向量库]
     end
 
     subgraph AI 模型层
-        D -->|发起病灶会诊查询| F((OpenAI / DeepSeek / 内部大模型))
-        F -->|生成“诊断+自愈脚本”| D
+        Worker -->|"ai_enabled=true"| LLM((LLM Provider))
+        LLM -->|分析结果| Worker
     end
-    
-    D -->|企微 / 钉钉| G[开发者手持设备]
-    D -->|落盘归档任务| I
+
+    subgraph 通知层
+        Worker -->|"企业微信 / 钉钉 / 飞书"| Notify[📱 开发者]
+    end
+
+    Worker -->|结果归档| DB
 ```
 
-### 2. 自动巡检工作流 (Patrol Workflow)
-
-当后台 `make beat` 启动后，引擎的核心内部交互序列执行逻辑如下：
+### 分析流程
 
 ```mermaid
 sequenceDiagram
-    participant Beat as 调度器(Celery Beat)
-    participant Worker as 消费端(Worker)
-    participant ES as 存储层(Elasticsearch)
-    participant LLM as 模型大脑(AI Provider)
-    
-    Beat->>Worker: 触发定时任务 scheduled_log_patrol()
-    Worker->>ES: 分发当前游标时间到各[业务线]，请求 Severity >= Error 数据
-    ES-->>Worker: 返回目标报错源日志(JSON List)
-    alt 没有报错出现
-        Worker-->>Beat: 标记 [巡检通过]，退出流
-    else 提取到严重报错线索
-        Worker->>Worker: 解析与分组去重，拦截 Token 风暴
-        Worker->>LLM: 组装专属 System/User Prompt 发送会诊
-        LLM-->>Worker: 返回排查根因 (Root Cause) + 预估修复代码 (Fix)
-        Worker->>Worker: 通过飞书/钉钉 webhook 发报预警
+    participant Beat as Celery Beat
+    participant Worker as Worker
+    participant ES as Elasticsearch
+    participant LLM as AI 模型
+    participant WH as Webhook
+
+    Beat->>Worker: scheduled_log_patrol()
+
+    Worker->>ES: 查询各业务线 ERROR 日志
+    ES-->>Worker: 返回日志数据
+
+    alt 无错误日志
+        Worker-->>Beat: ✅ 巡检通过
+    else 发现错误日志
+        Worker->>Worker: 预处理 (去重 + 堆栈合并)
+
+        alt ai_enabled = true
+            Worker->>LLM: 发送分析 Prompt
+            alt AI 正常响应
+                LLM-->>Worker: 返回根因分析
+                Worker->>Worker: 持久化分析结果
+                opt 发现 Critical 问题
+                    Worker->>WH: 🔴 AI 分析告警
+                end
+            else AI 调用失败
+                Worker->>WH: 🛑 AI 流程异常通知
+                Worker->>WH: ⚠️ 降级: 发送原始日志摘要
+            end
+        else ai_enabled = false
+            Worker->>WH: ⚠️ 日志异常告警 (含日志摘要)
+        end
     end
 ```
 
 ---
 
-## 📦 安装指南 (Installation)
+## 📋 功能矩阵
 
-### 方式一：物理机/容器源码级部署 (开发推荐)
+| 模块 | 功能 | 状态 |
+|------|------|------|
+| **日志接入** | Filebeat → ES 日志读取 | ✅ |
+| | Data Stream 索引 (`.ds-*`) 支持 | ✅ |
+| | 自定义 ES 索引模式 | ✅ |
+| **日志解析** | Java `gy.filetype` 级别映射 | ✅ |
+| | C# NLog/log4net 级别解析 | ✅ |
+| | Java 堆栈异常合并 | ✅ |
+| | C# .NET 堆栈异常合并 | ✅ |
+| | Filebeat multiline 感知 | ✅ |
+| **AI 分析** | 多模型支持 (OpenAI/Claude/DeepSeek...) | ✅ |
+| | 配置化 Prompt 模板 (YAML) | ✅ |
+| | Java / C# 双语言堆栈分析 Prompt | ✅ |
+| | 业务线级 AI 开关 | ✅ |
+| | AI 失败降级通知 | ✅ |
+| **告警通知** | 企业微信 Webhook | ✅ |
+| | 钉钉 Webhook | ✅ |
+| | 飞书 Webhook | ✅ |
+| | 模板化通知 (3 种场景) | ✅ |
+| | 业务线独立 Webhook URL | ✅ |
+| **平台能力** | 多租户隔离 | ✅ |
+| | JWT 认证 + 角色鉴权 | ✅ |
+| | API Key Fernet 加密存储 | ✅ |
+| | Celery Beat 定时巡检 | ✅ |
+| | 巡检冷却控制 | ✅ |
+| **RAG** | 知识库向量化检索 | 🔲 规划中 |
 
-环境要求：`Python >= 3.13`，必须且仅支持使用虚拟环境管理。
+---
+
+## 🚀 快速开始
+
+### 环境要求
+
+| 组件 | 版本要求 |
+|------|---------|
+| Python | ≥ 3.13 |
+| PostgreSQL / MySQL | 任选其一 |
+| Redis | ≥ 6.0 |
+| Elasticsearch | ≥ 8.x（已部署，含 Filebeat 日志数据） |
+
+### 源码部署
 
 ```bash
-# 1. 下载本仓库
-git clone https://github.com/leeeway/LogMind
+# 1. 克隆项目
+git clone https://github.com/leeeway/LogMind.git
 cd LogMind
 
-# 2. 建立和激活隔离环境
+# 2. 创建虚拟环境
 python3 -m venv .venv
-source .venv/bin/activate  # (Windows环境执行 .venv\Scripts\activate )
+source .venv/bin/activate
 
-# 3. 安装所需依赖
+# 3. 安装依赖
 pip install -r requirements.txt
 
-# 4. 根据系统模版建立运行配置
-cp .env.example .env     # (之后请进入 .env 根据你实际本机的 DB 输入正确账密)
+# 4. 配置环境变量
+cp .env.example .env
+# 编辑 .env，配置数据库、ES、Redis 连接信息
 
-# 5. 播种数据引擎（极为重要！）
+# 5. 初始化数据库 + 播种默认数据
 python -m logmind.scripts.seed_prompts
 
-# 6. 拉起 Uvicorn 主控服务，挂载在 8000 端口
-uvicorn logmind.main:app --host 0.0.0.1 --port 8000 --reload
+# 6. 启动服务
+make run      # FastAPI 主服务 (端口 8000)
+make worker   # Celery Worker (新终端)
+make beat     # Celery Beat 调度器 (新终端)
 ```
 
-### 方式二：Docker Compose 一键启动 (生产推荐)
+### Docker Compose 部署
 
-在企业环境内网部署中，您可以依赖附带的容器编排方案直接拉起应用包含的独立 Redis 与 Postgres 运行时环境：
 ```bash
+# 一键启动（含 PostgreSQL + Redis）
 docker-compose --env-file .env.production up -d --build
 ```
-此时 Web 服务挂载宿主的 `8000` 端口，Celery 分布式端自动后台运作。
 
----
+### 首次配置
 
-## 🚀 最佳实践教程 (Quick Start)
+1. **登录获取 Token**
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/v1/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"username": "admin", "password": "logmind2024!"}'
+   ```
 
-在此教程之前，确保服务已经拉起并能顺利访问 Web UI：[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-
-### 1. 申请鉴权 Token
-系统的全域操作必须受到 Auth 防御校验。
-- 在页面找到 `POST /api/v1/auth/login`。
-- Request Body 使用 初始化时终端生成的超管密码进行提交（默认超管账号为 `admin` / 密码依初始化日志而定）。
-- 将响应得到的 `access_token` 数据拷贝。
-- 移步至屏幕最右上角全局锁定按钮处 🔒，直接点击并粘贴！无需再补充 `Bearer` 等前缀。成功配置后发起调用即可通行。
-
-### 2. 注册大模型驱动 (AI Providers)
-调用 `POST /api/v1/providers`：
-让系统具备智慧的第一步，是把任意私有化/公有化模型连接进来：
-
-```json
-{
-  "provider_type": "openai",
-  "name": "生产主力诊断引擎(GPT-4o)",
-  "api_base_url": "https://api.openai.com/v1",
-  "api_key": "YOUR_ENCRYPTED_SK",
-  "default_model": "gpt-4o",
-  "priority": 1,
-  "rate_limit_rpm": 60,
-  "is_active": true
-}
-```
-
-### 3. 配置 K8S 日志流监听拦截
-调用 `POST /api/v1/business-lines`：
-告诉 LogMind 当前要守护的是哪个网关或子系统的数据源索引（如 `develop-server`）
-
-```json
-{
-  "name": "develop 开发联调线",
-  "description": "接管后端服务核心错误",
-  "es_index_pattern": "develop-server*",
-  "log_parse_config": {
-     "timestamp_field": "@timestamp",
-     "message_field": "message"
-  },
-  "default_filters": {
-     "kubernetes.container.name": "app"
-  },
-  "severity_threshold": "error"
-}
-```
-
----
-
-## 🔌 API 调用规范示例 
-
-如果希望跳过 Swagger 使用脚本来发起智能分析任务并抓取最终解决报告，可以使用如下标准 cURL 实现：
-
-**立刻对刚绑定的某个错误系统进行排查下发:**
-```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/analysis/tasks" \
-     -H "Authorization: Bearer <Your_Token>" \
+2. **注册 AI 模型提供商**（可选，仅 `ai_enabled=true` 时需要）
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/v1/providers \
+     -H "Authorization: Bearer <TOKEN>" \
      -H "Content-Type: application/json" \
      -d '{
-       "business_line_id": "<上文业务线返回的UUID>",
-       "task_type": "manual",
-       "time_from": "2026-04-12T00:00:00Z",
-       "time_to": "2026-04-12T08:00:00Z"
-}'
+       "provider_type": "openai",
+       "name": "主分析引擎",
+       "api_base_url": "https://api.openai.com/v1",
+       "api_key": "sk-xxx",
+       "default_model": "gpt-4o",
+       "priority": 1
+     }'
+   ```
+
+3. **创建业务线** → 见下一节
+
+---
+
+## ⚙️ 业务线配置指南
+
+业务线是 LogMind 的核心配置单元。每个业务线对应一组 ES 索引，独立控制日志解析策略、AI 开关和告警通道。
+
+### Java 服务（K8s 部署 + AI 分析）
+
+```json
+{
+  "name": "tong-kernel",
+  "description": "通行证内核服务",
+  "es_index_pattern": "master-stage-tong-kernel.cn*",
+  "severity_threshold": "error",
+  "language": "java",
+  "ai_enabled": true,
+  "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+}
 ```
 
-**获取分析后的结论及诊断单结果:**
+### C# 服务（Windows VM + 仅通知）
+
+```json
+{
+  "name": "interface-security",
+  "description": "安全接口服务 (C#)",
+  "es_index_pattern": "master-interface.security.cn*",
+  "severity_threshold": "error",
+  "language": "csharp",
+  "ai_enabled": false,
+  "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=yyy"
+}
+```
+
+### 配置字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | ✅ | 业务线名称 |
+| `es_index_pattern` | string | ✅ | ES 索引模式，支持通配符。多个用逗号分隔 |
+| `severity_threshold` | string | — | 告警阈值：`debug` / `info` / `warning` / `error` / `critical` |
+| `language` | string | — | 开发语言：`java` / `csharp` / `python` / `go` / `other`。决定日志解析策略 |
+| `ai_enabled` | boolean | — | 大模型开关。`false` 时跳过 AI 推理，直接发送异常日志通知 |
+| `webhook_url` | string | — | 业务线专属 webhook URL。为空时使用全局配置 |
+| `field_mapping` | object | — | 自定义字段映射（高级用法） |
+
+---
+
+## 📨 通知模板说明
+
+### AI 关闭 — 日志异常告警
+
+当 `ai_enabled=false` 且检测到错误日志时，自动推送：
+
+```
+## ⚠️ 日志异常告警
+
+**业务线**: interface-security
+**站点**: interface.security.cn
+**语言**: C#
+**时间范围**: 2026-04-13 22:00 ~ 22:30
+**异常日志数**: 15 条
+
+---
+
+**异常摘要**:
+2026-04-13 19:09:56,856 [155] ERROR .Core.DBUtility.DataHelper
+- SqlException: Timeout expired...
+
+---
+> 请及时排查处理。登录 LogMind 平台查看完整日志。
+```
+
+### AI 开启 — AI 分析告警
+
+当 AI 分析发现 Critical 级别问题时推送：
+
+```
+## 🔴 LogMind AI 分析告警
+
+**告警级别**: CRITICAL
+**业务线**: tong-kernel
+**站点**: stage-tong-kernel.cn (正式环境)
+**分析日志数**: 23 条
+
+---
+
+**AI 分析结论**:
+1. NullPointerException 根因：cn.tong.filter.ConvertToHumpFilter
+   第 96 行 phoneToken 参数未做空值校验...
+
+---
+> 请及时处理。登录 LogMind 平台查看完整分析报告。
+```
+
+### AI 异常降级 — 流程异常通知
+
+当 AI 模型调用失败（超时 / 配额 / Key 过期）时：
+
+```
+## 🛑 AI 分析流程异常
+
+**业务线**: tong-kernel
+**站点**: stage-tong-kernel.cn
+
+**错误信息**: API Error: quota exceeded
+
+---
+> AI 模型调用异常，请检查模型配置和 API Key。
+```
+
+随后自动降级发送原始日志摘要通知。
+
+---
+
+## 🔌 API 接口参考
+
+完整 Swagger 文档：`http://127.0.0.1:8000/docs`
+
+### 核心接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/v1/auth/login` | 登录获取 JWT Token |
+| `POST` | `/api/v1/business-lines` | 创建业务线 |
+| `PUT` | `/api/v1/business-lines/{id}` | 更新业务线（可单独切换 AI 开关） |
+| `POST` | `/api/v1/analysis/tasks` | 手动触发分析任务 |
+| `GET` | `/api/v1/analysis/tasks/{id}` | 获取分析任务结果 |
+| `POST` | `/api/v1/providers` | 注册 AI 模型提供商 |
+| `POST` | `/api/v1/alerts/rules` | 创建告警规则 |
+| `GET` | `/api/v1/alerts/history` | 查看告警历史 |
+| `GET` | `/api/v1/logs/search` | 搜索 ES 日志 |
+| `GET` | `/api/v1/logs/stats` | 日志统计聚合 |
+| `GET` | `/api/v1/logs/indices` | 列出 ES 索引 |
+
+### 手动触发分析
+
 ```bash
-curl -X GET "http://127.0.0.1:8000/api/v1/analysis/tasks/<Task_ID>" \
-     -H "Authorization: Bearer <Your_Token>"
+curl -X POST "http://127.0.0.1:8000/api/v1/analysis/tasks" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "business_line_id": "<BUSINESS_LINE_ID>",
+    "task_type": "manual",
+    "time_from": "2026-04-13T14:00:00Z",
+    "time_to": "2026-04-13T22:00:00Z"
+  }'
 ```
 
+### 动态切换 AI 开关
+
+```bash
+curl -X PUT "http://127.0.0.1:8000/api/v1/business-lines/<ID>" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"ai_enabled": false}'
+```
+
+---
+
+## 📁 项目结构
+
+```
+LogMind/
+├── src/logmind/
+│   ├── core/                    # 基础设施层
+│   │   ├── config.py            # Pydantic 配置管理
+│   │   ├── database.py          # SQLAlchemy 异步引擎
+│   │   ├── elasticsearch.py     # ES 客户端
+│   │   ├── celery_app.py        # Celery 配置
+│   │   ├── security.py          # JWT + Fernet 加密
+│   │   └── dependencies.py      # FastAPI 依赖注入
+│   ├── domain/                  # 业务领域层 (DDD)
+│   │   ├── tenant/              # 租户 + 用户 + 业务线
+│   │   ├── log/                 # ES 日志查询与解析
+│   │   ├── analysis/            # AI 分析 Pipeline (8 阶段)
+│   │   ├── alert/               # 告警规则 + Webhook 通知
+│   │   ├── provider/            # AI 模型提供商管理
+│   │   ├── prompt/              # Prompt 模板引擎
+│   │   ├── rag/                 # RAG 知识库 (规划中)
+│   │   └── dashboard/           # 仪表盘统计
+│   ├── shared/                  # 通用组件
+│   └── main.py                  # FastAPI 入口
+├── configs/prompts/             # 内置 Prompt 模板 (YAML)
+│   ├── log_analysis.yaml        # 通用日志分析模板
+│   └── stack_trace_analysis.yaml # 堆栈异常分析模板
+├── migrations/                  # 数据库迁移脚本
+├── deploy/                      # 部署配置
+├── docker-compose.yml           # Docker Compose 编排
+├── Makefile                     # 常用命令
+└── .env.example                 # 环境变量模板
+```
 
 ---
 
 ## 🎯 未来路标 (Roadmap)
 
-- [x] 完成核心基于租户的多 Elasticsearch 并发切分
-- [x] OpenAPI 通用格式适配层 (SubAPI / DeepSeek / Ollama)
-- [x] Celery Beat 分布式轮组重试窗口算法
-- [ ] RAG 本地混合部署向量索引系统接入整合 (v0.2.x 目标)
-- [ ] 针对异常根因全自动输出 Python / Go / Java 代码对应 Pull Request
-- [ ] Webhook 扩展：支持 Teams, Slack 自适应排版推送
+### v1.0 — 当前版本 ✅
+
+- [x] 多租户 + 业务线隔离架构
+- [x] Java / C# 双语言日志解析引擎
+- [x] 多模型 AI Provider 管理 (OpenAI / DeepSeek / 内网模型)
+- [x] Celery 分布式定时巡检 + 冷却控制
+- [x] 业务线级 AI 开关 + AI 异常降级通知
+- [x] 模板化 Webhook 多平台推送 (企业微信 / 钉钉 / 飞书)
+- [x] Java + C# 堆栈异常智能合并与分析
+- [x] Prompt 模板化管理 (YAML 配置)
+
+### v1.1 — 近期计划
+
+- [ ] Web 管理界面 (Vue.js / React Dashboard)
+- [ ] 告警规则引擎增强 (关键词 / 正则 / 阈值触发)
+- [ ] 日志趋势分析看板
+- [ ] Python / Go 堆栈解析深度支持
+- [ ] 告警静默 / 聚合 / 升级策略
+
+### v1.2 — 中期目标
+
+- [ ] RAG 知识库接入 (企业 SOP / 代码仓库 / 历史 Postmortem)
+- [ ] 多 ES 集群联邦查询
+- [ ] Webhook 扩展：Teams / Slack / Email
+- [ ] 告警 On-Call 值班排班集成
+- [ ] 分析成本核算与 Token 预算控制面板
+
+### v2.0 — 远期愿景
+
+- [ ] AI 自愈建议 → 自动生成 Fix PR (GitHub / GitLab)
+- [ ] Kubernetes 事件流 (Event) 关联分析
+- [ ] 跨服务分布式链路追踪 (Trace) 关联
+- [ ] 自然语言日志查询 (Text-to-DSL)
+- [ ] 运行时风险预警 (异常指标趋势预测)
 
 ---
 
-## 🤝 参与贡献 (Contributing)
+## 🤝 参与贡献
 
-LogMind 欢迎并拥抱所有的开发者反馈与社区代码合并！
-如果你有意愿贡献或改进其基础设施层代码：
-1. 请先 **Fork** 这个代码库。
-2. 创建属于你的修复分支 (`git checkout -b feature/AmazingFeature`)。
-3. 校验并严格按照 `black` 及 `isort` 提供代码格式。
-4. 提交更改记录 (`git commit -m 'Add some AmazingFeature'`)。
-5. 推送到您的分支 (`git push origin feature/AmazingFeature`)。
-6. 并向项目主分支提交 **Pull Request**。
+LogMind 欢迎社区贡献！
+
+1. **Fork** 本仓库
+2. 创建特性分支 `git checkout -b feature/your-feature`
+3. 遵循代码规范 `make lint && make format`
+4. 提交更改 `git commit -m 'feat: add your feature'`
+5. 推送分支 `git push origin feature/your-feature`
+6. 提交 **Pull Request**
+
+### 开发命令
+
+```bash
+make help       # 查看所有可用命令
+make dev        # 安装开发依赖
+make run        # 启动开发服务器
+make worker     # 启动 Celery Worker
+make beat       # 启动定时调度器
+make test       # 运行测试
+make lint       # 代码检查
+make format     # 代码格式化
+```
 
 ---
 
-## 📜 开源协议 (License)
+## 📜 开源协议
 
-LogMind 作为一个前瞻性的平台，遵照且受控于完全免费的 **[MIT 许可协议](LICENSE)** 予以分发。
+[MIT License](LICENSE) — 允许商业使用和私有化部署。
 
-> **The MIT License (MIT)**
->
-> 允许商业化与私有部署。项目本身不提供针对 AI 调用侧所消耗的实际资金池或算力的任何担保。详情点击并参阅 `LICENSE` 正文以了解免责与约束项。
+> 项目本身不对 AI 模型调用产生的费用和算力消耗提供任何担保。请参阅 LICENSE 了解完整条款。
