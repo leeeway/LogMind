@@ -1,7 +1,8 @@
 """
-Migration: Add field_mapping column to business_line table.
+Migration: Add field_mapping and language columns to business_line table.
 
-Supports configurable field name mapping for varied log formats (e.g. GYYX gy.* fields).
+- field_mapping: Configurable field name mapping for varied log formats
+- language: Development language for language-specific log parsing (java/csharp/python/go/other)
 """
 
 import asyncio
@@ -11,19 +12,19 @@ from logmind.core.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
-MIGRATION_SQL_PG = """
-ALTER TABLE business_line
-ADD COLUMN IF NOT EXISTS field_mapping TEXT NOT NULL DEFAULT '{}';
-"""
+MIGRATION_SQLS_PG = [
+    "ALTER TABLE business_line ADD COLUMN IF NOT EXISTS field_mapping TEXT NOT NULL DEFAULT '{}';",
+    "ALTER TABLE business_line ADD COLUMN IF NOT EXISTS language VARCHAR(20) NOT NULL DEFAULT 'java';",
+]
 
-MIGRATION_SQL_MYSQL = """
-ALTER TABLE business_line
-ADD COLUMN field_mapping TEXT NOT NULL DEFAULT '{}';
-"""
+MIGRATION_SQLS_MYSQL = [
+    "ALTER TABLE business_line ADD COLUMN field_mapping TEXT NOT NULL DEFAULT '{}';",
+    "ALTER TABLE business_line ADD COLUMN language VARCHAR(20) NOT NULL DEFAULT 'java';",
+]
 
 
 async def migrate():
-    """Run migration to add field_mapping column."""
+    """Run migration to add field_mapping and language columns."""
     from logmind.core.config import get_settings
 
     settings = get_settings()
@@ -39,27 +40,33 @@ async def migrate():
     from logmind.core.database import init_db
     await init_db()
 
-    sql = MIGRATION_SQL_PG if settings.database_dialect == "postgresql" else MIGRATION_SQL_MYSQL
+    sqls = MIGRATION_SQLS_PG if settings.database_dialect == "postgresql" else MIGRATION_SQLS_MYSQL
 
     async with get_db_context() as session:
-        try:
-            from sqlalchemy import text
-            await session.execute(text(sql))
-            print("✅ Migration completed: added field_mapping column to business_line")
-            logger.info("migration_completed", column="field_mapping", table="business_line")
-        except Exception as e:
-            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
-                print("⏭️  Column field_mapping already exists, skipping")
-                logger.info("migration_skipped", reason="column_already_exists")
-            else:
-                print(f"❌ Migration failed: {e}")
-                logger.error("migration_failed", error=str(e))
-                raise
+        from sqlalchemy import text
+        for sql in sqls:
+            try:
+                await session.execute(text(sql))
+                col_name = "field_mapping" if "field_mapping" in sql else "language"
+                print(f"✅ Added column: {col_name}")
+                logger.info("migration_column_added", column=col_name, table="business_line")
+            except Exception as e:
+                err_str = str(e).lower()
+                if "already exists" in err_str or "duplicate column" in err_str:
+                    col_name = "field_mapping" if "field_mapping" in sql else "language"
+                    print(f"⏭️  Column {col_name} already exists, skipping")
+                    logger.info("migration_skipped", column=col_name, reason="already_exists")
+                else:
+                    print(f"❌ Migration failed: {e}")
+                    logger.error("migration_failed", error=str(e))
+                    raise
+
+    print("✅ Migration completed")
 
 
 def main():
     setup_logging(log_level="INFO", json_format=False)
-    print("🔄 Running migration: add_field_mapping")
+    print("🔄 Running migration: add_field_mapping + language")
     asyncio.run(migrate())
 
 

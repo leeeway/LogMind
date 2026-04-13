@@ -10,6 +10,10 @@ Stages:
 6. ResultParseStage   — Parse AI output to structured results
 7. AlertEvalStage     — Evaluate alert rules
 8. PersistStage       — Save results to DB
+
+Language-aware processing:
+  - Java: gy.filetype-based level, Java stack traces (at ..., Caused by:)
+  - C#: NLog message-based level, .NET stack traces (at ... in ...cs:line N)
 """
 
 import json
@@ -24,27 +28,47 @@ from logmind.domain.provider.base import ChatMessage, ChatRequest, TokenUsage
 logger = get_logger(__name__)
 
 # ── Stack Trace Detection Patterns ───────────────────────
+
 # Java stack trace patterns
 _JAVA_STACK_RE = re.compile(
-    r"^\s+(at\s+[\w.$]+\(|"           # at com.example.Class(File.java:123)
-    r"Caused by:\s+|"                  # Caused by: java.lang.Exception
-    r"\.\.\.\s*\d+\s+more|"           # ... 12 more
-    r"Suppressed:\s+|"                 # Suppressed: java.lang.Exception
-    r"\}\s*$|"                         # closing brace of stack
-    r"at\s+sun\.|at\s+java\.|"         # JDK internal frames
-    r"at\s+org\.springframework\.|"    # Spring framework frames
-    r"at\s+org\.apache\.)"             # Apache framework frames
+    r"^\s+at\s+[\w.$]+\("            # at com.example.Class(File.java:123)
 )
 
-# Pattern to detect the start of a new log entry in message content
-# Matches formats like: [2026-04-13 21:49:48.488] or 2026-04-13T21:49:48
-_LOG_ENTRY_START_RE = re.compile(
-    r"^\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+# C# .NET stack trace patterns
+_CSHARP_STACK_RE = re.compile(
+    r"^\s+at\s+[\w.]+\(.*\)"          # at Gyyx.Core.Class.Method(args)
+    r"|^\s+at\s+[\w.]+.*\sin\s"       # at Namespace.Class.Method() in D:\path\File.cs:line 96
+)
+
+# Common stack trace continuation markers (both Java + C#)
+_STACK_CONTINUATION_PREFIXES = (
+    "at ",
+    "Caused by:",
+    "Suppressed:",
+    "--- End of",           # C#: --- End of inner exception stack trace ---
+    "--- End of stack",     # C#: --- End of stack trace from previous location ---
+    "Exception rethrown",   # C# rethrow marker
 )
 
 # Pattern to extract exception class name from message
+# Supports both Java (java.lang.NullPointerException) and
+# C# (System.NullReferenceException, Gyyx.Core.SomeException)
 _EXCEPTION_CLASS_RE = re.compile(
     r"([\w.]+(?:Exception|Error|Throwable|Fault))"
+)
+
+# C# NLog level regex for pipeline-internal level extraction
+_NLOG_LEVEL_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.\d]*\s+"
+    r"\[[\w\-]+\]\s+"
+    r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b",
+    re.IGNORECASE,
+)
+
+# Bracket level regex
+_BRACKET_LEVEL_RE = re.compile(
+    r"\[(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\]",
+    re.IGNORECASE,
 )
 
 
@@ -66,10 +90,14 @@ class PipelineContext:
     query: str = ""
     extra_filters: dict = field(default_factory=dict)
 
+    # Business line language — determines parsing strategy
+    language: str = "java"  # java / csharp / python / go / other
+
     # GYYX business context
     domain: str = ""
     branch: str = ""
     image_version: str = ""
+    host_name: str = ""
 
     # Stage 1: Log Fetch
     raw_logs: list[dict] = field(default_factory=list)
@@ -140,6 +168,7 @@ class LogFetchStage(PipelineStage):
             time_to=ctx.time_to,
             query=ctx.query,
             severity=ctx.severity_threshold,
+            language=ctx.language,
             extra_filters=ctx.extra_filters,
             size=500,  # Cost control: max logs per task
         )
@@ -157,6 +186,9 @@ class LogFetchStage(PipelineStage):
             image = first_log.get("image", {})
             if isinstance(image, dict):
                 ctx.image_version = ctx.image_version or image.get("version", "")
+            host = first_log.get("host", {})
+            if isinstance(host, dict):
+                ctx.host_name = ctx.host_name or host.get("name", "")
 
         logger.info("log_fetch_completed", count=ctx.log_count, task_id=ctx.task_id)
         return ctx
@@ -168,11 +200,10 @@ class LogPreprocessStage(PipelineStage):
     """
     Clean, deduplicate, merge stack traces, and format logs for AI consumption.
 
-    Stack trace handling:
-    - Detects Java stack trace patterns (at ..., Caused by:, ... N more)
-    - Merges multi-line stack traces into the preceding exception message
-    - Supports stack traces in message field content
-    - Deduplicates by exception class name + first line (not brute-force truncation)
+    Language-aware stack trace handling:
+    - Java: at com.example.Class(File.java:123), Caused by:, ... N more
+    - C#: at Namespace.Class.Method() in File.cs:line 96, --- End of inner exception ---
+    - Filebeat multiline: skip cross-document merge when log.flags contains "multiline"
     """
 
     name = "log_preprocess"
@@ -182,7 +213,7 @@ class LogPreprocessStage(PipelineStage):
             ctx.processed_logs = "(No logs found matching the query)"
             return ctx
 
-        # Phase 1: Merge stack traces for error.log entries
+        # Phase 1: Merge stack traces (skip for Filebeat multiline-merged docs)
         merged_logs = self._merge_stack_traces(ctx.raw_logs)
 
         # Phase 2: Deduplicate
@@ -207,6 +238,10 @@ class LogPreprocessStage(PipelineStage):
             domain = gy.get("domain", "")
             branch = gy.get("branch", "")
 
+            # Host context (for C# VM-deployed services)
+            host = log.get("host", {}) if isinstance(log.get("host"), dict) else {}
+            host_name = host.get("name", "")
+
             # Kubernetes context (backward compatible)
             k8s = log.get("kubernetes", {})
             ns = k8s.get("namespace", "") if isinstance(k8s, dict) else ""
@@ -220,8 +255,8 @@ class LogPreprocessStage(PipelineStage):
                 context_parts.append(f"branch:{branch}")
             if ns and pod:
                 context_parts.append(f"{ns}/{pod}")
-            elif ns:
-                context_parts.append(ns)
+            elif host_name:
+                context_parts.append(f"host:{host_name}")
 
             context_str = f" [{', '.join(context_parts)}]" if context_parts else ""
             lines.append(f"[{ts}] [{level}]{context_str} {msg}")
@@ -232,12 +267,20 @@ class LogPreprocessStage(PipelineStage):
         if len(ctx.processed_logs) > 32000:
             ctx.processed_logs = ctx.processed_logs[:32000] + "\n... (truncated)"
 
+        # Detect stack traces in processed output
+        has_stacks = any(
+            log.get("_stack_merged") or self._message_has_stack(self._extract_message(log))
+            for log in merged_logs
+        )
+        ctx.has_stack_traces = has_stacks
+
         ctx.log_metadata = {
             "original_count": ctx.log_count,
             "merged_count": len(merged_logs),
             "deduped_count": len(unique_logs),
             "formatted_count": len(lines),
             "has_stack_traces": ctx.has_stack_traces,
+            "language": ctx.language,
         }
 
         logger.info("log_preprocess_completed", **ctx.log_metadata, task_id=ctx.task_id)
@@ -247,10 +290,8 @@ class LogPreprocessStage(PipelineStage):
         """
         Merge multi-line stack trace entries into their parent exception log.
 
-        Strategy:
-        - Group consecutive logs from the same pod/domain where subsequent
-          messages look like stack trace continuation lines
-        - Append stack trace lines to the parent message
+        Skips cross-document merging for logs with log.flags: multiline
+        (Filebeat has already merged them at the source).
         """
         if not logs:
             return logs
@@ -260,60 +301,82 @@ class LogPreprocessStage(PipelineStage):
 
         for log in logs:
             msg = self._extract_message(log)
-            filetype = ""
-            gy = log.get("gy", {})
-            if isinstance(gy, dict):
-                filetype = gy.get("filetype", "")
+
+            # Check if Filebeat already merged multiline for this doc
+            log_meta = log.get("log", {})
+            if isinstance(log_meta, dict):
+                flags = log_meta.get("flags", "")
+                if isinstance(flags, list):
+                    flags = ",".join(flags)
+                if "multiline" in str(flags):
+                    # Already merged by Filebeat — treat as a single entry
+                    if current is not None:
+                        merged.append(current)
+                    current = dict(log)
+                    continue
 
             is_stack_line = self._is_stack_trace_line(msg)
 
             if is_stack_line and current is not None:
-                # This looks like a continuation of a stack trace
-                # Append to the current log's message
+                # Continuation of a stack trace — append to current
                 current_msg = self._extract_message(current)
                 current["message"] = current_msg + "\n" + msg
                 current["_stack_merged"] = True
             else:
-                # New log entry or non-stack-trace line
+                # New log entry
                 if current is not None:
                     merged.append(current)
                 current = dict(log)  # shallow copy
-
-                # Check if the message itself contains embedded stack traces
-                if filetype == "error.log" or self._contains_exception(msg):
-                    current["_is_error_entry"] = True
 
         # Don't forget the last entry
         if current is not None:
             merged.append(current)
 
-        # Mark context if any merges happened
-        if any(log.get("_stack_merged") for log in merged):
-            # This will be used by the pipeline context
-            self._has_stack_traces = True
-
         return merged
-
-    _has_stack_traces: bool = False
 
     @staticmethod
     def _is_stack_trace_line(msg: str) -> bool:
-        """Detect if a message line is part of a Java stack trace."""
+        """
+        Detect if a message line is part of a stack trace.
+        Supports both Java and C# .NET stack trace formats.
+        """
         if not msg:
             return False
         stripped = msg.strip()
-        # Common Java stack trace patterns
-        if stripped.startswith("at "):
-            return True
-        if stripped.startswith("Caused by:"):
-            return True
-        if stripped.startswith("Suppressed:"):
-            return True
+
+        # Check common prefixes (works for both Java and C#)
+        for prefix in _STACK_CONTINUATION_PREFIXES:
+            if stripped.startswith(prefix):
+                return True
+
+        # Java: "... 12 more"
         if re.match(r"^\.\.\.\s*\d+\s+more$", stripped):
             return True
-        # Check with compiled regex for edge cases
+
+        # Java stack frame
         if _JAVA_STACK_RE.match(msg):
             return True
+
+        # C# stack frame
+        if _CSHARP_STACK_RE.match(msg):
+            return True
+
+        return False
+
+    @staticmethod
+    def _message_has_stack(msg: str) -> bool:
+        """Check if a message contains embedded stack trace content."""
+        if not msg:
+            return False
+        # Check for exception class names
+        if _EXCEPTION_CLASS_RE.search(msg):
+            # Also verify there's a stack-trace-like pattern
+            if "\n" in msg:
+                for line in msg.split("\n")[1:]:
+                    stripped = line.strip()
+                    for prefix in _STACK_CONTINUATION_PREFIXES:
+                        if stripped.startswith(prefix):
+                            return True
         return False
 
     @staticmethod
@@ -335,7 +398,6 @@ class LogPreprocessStage(PipelineStage):
         # For stack traces, use exception class name as key
         exc_match = _EXCEPTION_CLASS_RE.search(msg)
         if exc_match:
-            # Exception class + first line (before newline)
             first_line = msg.split("\n")[0][:200]
             return f"{exc_match.group(1)}:{first_line}"
 
@@ -348,34 +410,33 @@ class LogPreprocessStage(PipelineStage):
         Extract log level from varied field names.
         Supports: level, severity, loglevel, log.level, gy.filetype, message content.
         """
+        from logmind.domain.log.service import _FILETYPE_LEVEL_MAP, _normalize_level
+
         # 1. Dedicated level fields
         for field_name in ["level", "severity", "loglevel"]:
             if field_name in source:
-                return str(source[field_name]).upper()
+                return _normalize_level(str(source[field_name])).upper()
         if isinstance(source.get("log"), dict):
             val = source["log"].get("level", "")
             if val:
-                return str(val).upper()
+                return _normalize_level(str(val)).upper()
 
-        # 2. GYYX gy.filetype mapping
-        from logmind.domain.log.service import _FILETYPE_LEVEL_MAP
+        # 2. Java gy.filetype mapping
         gy = source.get("gy", {})
         if isinstance(gy, dict):
             filetype = gy.get("filetype", "")
             if filetype in _FILETYPE_LEVEL_MAP:
                 return _FILETYPE_LEVEL_MAP[filetype].upper()
 
-        # 3. Parse from message content
+        # 3. C# NLog/log4net message parsing
         message = source.get("message", "")
         if isinstance(message, str):
-            match = _MSG_LEVEL_RE.search(message)
+            match = _NLOG_LEVEL_RE.search(message)
             if match:
-                level_str = match.group(1).upper()
-                if level_str == "WARN":
-                    return "WARNING"
-                if level_str == "FATAL":
-                    return "CRITICAL"
-                return level_str
+                return _normalize_level(match.group(1)).upper()
+            match = _BRACKET_LEVEL_RE.search(message)
+            if match:
+                return _normalize_level(match.group(1)).upper()
 
         return "UNKNOWN"
 
@@ -477,6 +538,8 @@ class PromptBuildStage(PipelineStage):
                 "domain": ctx.domain,
                 "branch": ctx.branch,
                 "image_version": ctx.image_version,
+                "host_name": ctx.host_name,
+                "language": ctx.language,
                 "has_stack_traces": ctx.has_stack_traces,
             }
 
@@ -490,8 +553,18 @@ class PromptBuildStage(PipelineStage):
 
     @staticmethod
     def _fallback_system_prompt(ctx: PipelineContext) -> str:
-        base = """你是一名资深 SRE 工程师和日志分析专家。
-分析 Kubernetes 集群中的应用日志，识别错误模式并给出根因分析。
+        lang_desc = {
+            "java": "Java/Spring Boot",
+            "csharp": "C#/.NET",
+            "python": "Python",
+            "go": "Go",
+            "other": "",
+        }
+        tech_stack = lang_desc.get(ctx.language, "")
+        tech_hint = f"（技术栈: {tech_stack}）" if tech_stack else ""
+
+        base = f"""你是一名资深 SRE 工程师和日志分析专家。
+分析应用服务日志{tech_hint}，识别错误模式并给出根因分析。
 
 ## 输出要求
 请以 JSON 数组格式输出，每个元素包含：
@@ -503,9 +576,21 @@ class PromptBuildStage(PipelineStage):
 只输出 JSON 数组，不要输出其他内容。只关注严重问题 (ERROR/CRITICAL)。"""
 
         if ctx.has_stack_traces:
-            base += """
+            if ctx.language == "csharp":
+                base += """
 
-## 堆栈异常分析指引
+## .NET 堆栈异常分析指引
+- 追踪 InnerException 链，找到最内层根因异常
+- 重点关注 Gyyx.* 命名空间下的业务代码异常
+- 区分业务代码异常 vs 框架异常（System.*, Microsoft.*)
+- 对 NullReferenceException 分析可能的空引用来源
+- 关注数据库操作异常（SqlException、连接池耗尽等）
+- 合并相同异常类的多次出现，统计频率
+- 给出具体的代码修复建议（涉及的类名和方法）"""
+            else:
+                base += """
+
+## Java 堆栈异常分析指引
 - 重点关注 Caused by 链，找到根因异常
 - 区分业务代码异常（cn.gyyx.* 包）和框架异常（Spring、MyBatis 等）
 - 对 NullPointerException 类分析可能的空值来源
@@ -516,17 +601,27 @@ class PromptBuildStage(PipelineStage):
 
     @staticmethod
     def _fallback_user_prompt(ctx: PipelineContext) -> str:
+        lang_names = {
+            "java": "Java",
+            "csharp": "C#/.NET",
+            "python": "Python",
+            "go": "Go",
+        }
         context_lines = [
             f"- 业务线: {ctx.business_line_name}",
             f"- 时间范围: {ctx.time_from} ~ {ctx.time_to}",
             f"- 日志数量: {ctx.log_count}",
         ]
+        if ctx.language in lang_names:
+            context_lines.append(f"- 开发语言: {lang_names[ctx.language]}")
         if ctx.domain:
             context_lines.append(f"- 站点域名: {ctx.domain}")
         if ctx.branch:
             context_lines.append(f"- 代码分支: {ctx.branch}")
         if ctx.image_version:
             context_lines.append(f"- 镜像版本: {ctx.image_version}")
+        if ctx.host_name:
+            context_lines.append(f"- 主机名: {ctx.host_name}")
 
         context_str = "\n".join(context_lines)
 

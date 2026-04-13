@@ -103,6 +103,7 @@ async def _execute_analysis(task_id: str):
         business_line_name=biz.name,
         es_index_pattern=biz.es_index_pattern,
         severity_threshold=biz.severity_threshold,
+        language=biz.language,
         time_from=task.time_from,
         time_to=task.time_to,
         query=query_params.get("query", ""),

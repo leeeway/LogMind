@@ -1,15 +1,15 @@
 # LogMind — 内置 Prompt 模板
-# 日志错误分析模板（增强版 — 支持堆栈异常分析）
+# 日志错误分析模板（增强版 — 支持 Java + C# 多语言堆栈分析）
 
 name: "log_error_analysis"
 category: "log_analysis"
-version: "1.1.0"
+version: "1.2.0"
 is_default: true
-description: "分析 K8s 应用日志中的错误，识别模式并给出根因分析和建议。支持 GYYX Filebeat 日志格式和 Java 堆栈异常分析。"
+description: "分析应用日志中的错误，识别模式并给出根因分析和建议。支持 Java/Spring Boot 和 C#/.NET 技术栈。"
 
 system_prompt: |
   你是一名资深 SRE 工程师和日志分析专家。
-  你的任务是分析 Kubernetes 集群中的应用日志，识别错误模式并给出根因分析。
+  你的任务是分析应用服务日志，识别错误模式并给出根因分析。
 
   ## 分析要求
   1. 只关注 ERROR 和 CRITICAL 级别的严重问题
@@ -17,13 +17,20 @@ system_prompt: |
   3. 给出可操作的修复建议
   4. 评估问题影响范围
 
-  ## 堆栈异常分析指引
-  如果日志中包含 Java 堆栈异常：
+  ## 多语言堆栈分析指引
+
+  ### Java 堆栈异常
+  如果日志中包含 Java 堆栈异常（at xxx.xxx.Class.method(File.java:123)）：
   - 追踪 Caused by 链，找到最底层的根因异常
   - 重点关注业务代码（cn.gyyx.* 包名）中的异常位置
   - 区分业务逻辑错误 vs 框架/中间件异常
-  - 对 NullPointerException 分析可能的空值来源和调用路径
-  - 合并相同异常类的多次出现，给出频率统计
+
+  ### C#/.NET 堆栈异常
+  如果日志中包含 .NET 堆栈异常（at Namespace.Class.Method() in File.cs:line N）：
+  - 追踪 InnerException 链（--- End of inner exception --- 标记）
+  - 重点关注 Gyyx.* 命名空间下的业务代码
+  - 区分业务异常 vs System.*/Microsoft.* 框架异常
+  - 关注数据库操作异常（SqlException、连接池问题等）
 
   ## 输出格式
   请以 JSON 数组格式输出，每个元素包含：
@@ -39,9 +46,11 @@ user_prompt_template: |
   - 业务线: {{ business_line }}
   - 服务名: {{ service_name }}
   - 时间范围: {{ time_range }}
+  {% if language %}- 开发语言: {{ language }}{% endif %}
   {% if domain %}- 站点域名: {{ domain }}{% endif %}
   {% if branch %}- 代码分支: {{ branch }}{% endif %}
   {% if image_version %}- 镜像版本: {{ image_version }}{% endif %}
+  {% if host_name %}- 主机名: {{ host_name }}{% endif %}
   {% if namespace %}- 命名空间: {{ namespace }}{% endif %}
 
   {% if rag_context %}
@@ -73,15 +82,21 @@ variables_schema:
     time_range:
       type: string
       description: "时间范围"
+    language:
+      type: string
+      description: "开发语言: java/csharp/python/go/other"
     domain:
       type: string
       description: "站点域名 (gy.domain)"
     branch:
       type: string
-      description: "代码分支 (gy.branch): master=正式, develop=测试"
+      description: "代码分支: master=正式, develop=测试"
     image_version:
       type: string
       description: "镜像版本 (image.version)"
+    host_name:
+      type: string
+      description: "主机名 (host.name), C# VM 部署时标识来源"
     namespace:
       type: string
       description: "K8s 命名空间"

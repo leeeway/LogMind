@@ -4,6 +4,10 @@ Log Domain — ES Query Service
 Handles log retrieval, search, and aggregation from Elasticsearch.
 Supports arbitrary index patterns (per user requirement: indexes named by site).
 Supports GYYX Filebeat log format with gy.* fields and data-stream indices.
+
+Language-aware log parsing:
+  - Java (K8s): level from gy.filetype (error.log, info.log, etc.)
+  - C# (Windows VM): level from message content (NLog/log4net format)
 """
 
 import json
@@ -23,7 +27,7 @@ from logmind.domain.log.schemas import (
 
 logger = get_logger(__name__)
 
-# gy.filetype → standard log level mapping
+# ── Java: gy.filetype → standard log level mapping ──────
 _FILETYPE_LEVEL_MAP: dict[str, str] = {
     "error.log": "error",
     "info.log": "info",
@@ -33,7 +37,7 @@ _FILETYPE_LEVEL_MAP: dict[str, str] = {
     "trace.log": "debug",
 }
 
-# Reverse mapping: severity → filetype values (for ES filter)
+# Java: reverse mapping for severity → filetype ES filter
 _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
     "error": ["error.log"],
     "warning": ["warn.log", "warning.log"],
@@ -41,11 +45,46 @@ _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
     "debug": ["debug.log", "trace.log"],
 }
 
-# Regex to extract level from message content like "[ERROR]", "[WARN]" etc.
-_MSG_LEVEL_RE = re.compile(
+# ── C# NLog/log4net filetypes (mixed-level log files) ───
+# These files contain ALL levels in one file; level is embedded in message
+_MIXED_LEVEL_FILETYPES: set[str] = {
+    "sys.log.txt",
+    "sys.log",
+    "app.log.txt",
+    "application.log",
+}
+
+# ── Level extraction regex patterns ─────────────────────
+# Pattern 1: Level in brackets — [ERROR], [WARN], [INFO]
+_BRACKET_LEVEL_RE = re.compile(
     r"\[(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\]",
     re.IGNORECASE,
 )
+
+# Pattern 2: C# NLog/log4net — level as standalone word after timestamp and thread
+# Matches: "2026-04-13 19:09:56,856 [155] DEBUG Gyyx.Core..."
+# Also:    "2026-04-13 19:09:56,856 [155] ERROR Gyyx.Core..."
+_NLOG_LEVEL_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.\d]*\s+"  # timestamp
+    r"\[[\w\-]+\]\s+"                                       # [thread_id]
+    r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b",  # LEVEL
+    re.IGNORECASE,
+)
+
+# Pattern 3: Java Logback/Log4j2 — level in message (sometimes)
+# Matches: "[2026-04-13 21:49:48.488] ... [ERROR] ..."
+_JAVA_MSG_LEVEL_RE = re.compile(
+    r"\[(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\]",
+    re.IGNORECASE,
+)
+
+# Severity keyword mapping for ES message-level query
+_SEVERITY_MSG_KEYWORDS: dict[str, list[str]] = {
+    "error": ["ERROR", "FATAL", "CRITICAL"],
+    "warning": ["WARN", "WARNING"],
+    "info": ["INFO"],
+    "debug": ["DEBUG", "TRACE"],
+}
 
 
 class LogService:
@@ -59,6 +98,7 @@ class LogService:
         Search logs from ES with flexible filtering.
         Supports arbitrary index patterns (named by site, etc.)
         Compatible with both kubernetes.* and gy.* field formats.
+        Language-aware severity filtering for Java and C# log formats.
         """
         must_clauses = []
         filter_clauses = []
@@ -83,8 +123,7 @@ class LogService:
                 }
             })
 
-        # Severity filter — flexible field matching for varied log formats
-        # Supports: level, log.level, severity, loglevel, AND gy.filetype
+        # ── Severity filter — language-aware ─────────────
         if request.severity:
             severity_should = [
                 {"term": {"level": request.severity}},
@@ -92,10 +131,25 @@ class LogService:
                 {"term": {"severity": request.severity}},
                 {"term": {"loglevel": request.severity.upper()}},
             ]
-            # Also match gy.filetype for GYYX format
+
+            # Java: match gy.filetype (error.log, info.log, etc.)
             filetype_values = _SEVERITY_FILETYPE_MAP.get(request.severity.lower(), [])
             for ft in filetype_values:
                 severity_should.append({"term": {"gy.filetype": ft}})
+
+            # C# / mixed-level filetypes: match level keyword in message content
+            # This is needed because C# logs put all levels in a single file (sys.log.txt)
+            msg_keywords = _SEVERITY_MSG_KEYWORDS.get(request.severity.lower(), [])
+            if msg_keywords:
+                # Use query_string to match level keywords in message
+                # Only when language hint is provided or as a general fallback
+                keyword_query = " OR ".join(msg_keywords)
+                severity_should.append({
+                    "query_string": {
+                        "default_field": "message",
+                        "query": keyword_query,
+                    }
+                })
 
             filter_clauses.append({
                 "bool": {
@@ -169,6 +223,7 @@ class LogService:
                 branch=gy_meta.get("branch", ""),
                 image_version=gy_meta.get("image_version", ""),
                 filetype=gy_meta.get("filetype", ""),
+                host_name=gy_meta.get("host_name", ""),
             ))
 
         return LogQueryResponse(
@@ -281,11 +336,13 @@ class LogService:
     @staticmethod
     def _extract_level(source: dict) -> str:
         """
-        Extract log level from varied field names.
+        Extract log level from varied field names and formats.
+
         Priority:
           1. Dedicated fields: level, log.level, severity, loglevel
-          2. GYYX gy.filetype mapping (error.log → error, etc.)
-          3. Regex from message content ([ERROR], [WARN], etc.)
+          2. Java: gy.filetype mapping (error.log → error, etc.)
+          3. C# NLog: parse from message "timestamp [thread] LEVEL Class - msg"
+          4. Bracket format: [ERROR], [WARN], etc. in message
         """
         # 1. Dedicated level fields
         for field in ["level", "log.level", "severity", "loglevel"]:
@@ -298,28 +355,27 @@ class LogService:
                     val = None
                     break
             if val:
-                return str(val).lower()
+                return _normalize_level(str(val))
 
-        # 2. GYYX gy.filetype mapping
+        # 2. Java: gy.filetype mapping (only for known single-level files)
         gy = source.get("gy", {})
         if isinstance(gy, dict):
             filetype = gy.get("filetype", "")
             if filetype in _FILETYPE_LEVEL_MAP:
                 return _FILETYPE_LEVEL_MAP[filetype]
 
-        # 3. Parse from message content
+        # 3. C# NLog/log4net: parse from message content
         message = source.get("message", "")
         if isinstance(message, str):
-            match = _MSG_LEVEL_RE.search(message)
+            # Try NLog format first (most specific pattern)
+            match = _NLOG_LEVEL_RE.search(message)
             if match:
-                level_str = match.group(1).lower()
-                if level_str in ("warn", "warning"):
-                    return "warning"
-                if level_str == "fatal":
-                    return "critical"
-                if level_str == "trace":
-                    return "debug"
-                return level_str
+                return _normalize_level(match.group(1))
+
+            # Then try bracket format [ERROR], [WARN]
+            match = _BRACKET_LEVEL_RE.search(message)
+            if match:
+                return _normalize_level(match.group(1))
 
         return ""
 
@@ -336,20 +392,27 @@ class LogService:
         """
         Extract GYYX business metadata from gy.* fields.
 
-        Fields:
+        Common fields (all sites):
           gy.domain   → site domain name
+          gy.filetype → log file type
+        Java K8s only:
           gy.podname  → pod name with version suffix
           gy.branch   → code branch (master=prod, develop=test)
-          gy.filetype → log file type (error.log, info.log, etc.)
           image.version → container image version
+        C# Windows VM:
+          host.name   → Windows machine name (e.g. 10_14_83_74)
         """
         gy = source.get("gy", {})
         if not isinstance(gy, dict):
-            return {}
+            gy = {}
 
         image = source.get("image", {})
         if not isinstance(image, dict):
             image = {}
+
+        host = source.get("host", {})
+        if not isinstance(host, dict):
+            host = {}
 
         return {
             "domain": gy.get("domain", ""),
@@ -357,7 +420,27 @@ class LogService:
             "branch": gy.get("branch", ""),
             "filetype": gy.get("filetype", ""),
             "image_version": image.get("version", ""),
+            "host_name": host.get("name", ""),
         }
+
+
+def _normalize_level(raw: str) -> str:
+    """Normalize varied level strings to standard values."""
+    upper = raw.strip().upper()
+    level_map = {
+        "ERROR": "error",
+        "ERR": "error",
+        "FATAL": "critical",
+        "CRITICAL": "critical",
+        "WARN": "warning",
+        "WARNING": "warning",
+        "INFO": "info",
+        "INFORMATION": "info",
+        "DEBUG": "debug",
+        "TRACE": "debug",
+        "VERBOSE": "debug",
+    }
+    return level_map.get(upper, raw.lower())
 
 
 # Singleton

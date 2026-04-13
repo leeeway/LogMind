@@ -75,6 +75,12 @@ class BusinessLineCreate(BaseModel):
     log_parse_config: dict = Field(default_factory=dict)
     default_filters: dict = Field(default_factory=dict)
     severity_threshold: str = Field("error", pattern=r"^(debug|info|warning|error|critical)$")
+    language: str = Field(
+        "java",
+        pattern=r"^(java|csharp|python|go|other)$",
+        description="Development language: java/csharp/python/go/other. "
+        "Determines log parsing strategy and stack trace detection.",
+    )
     field_mapping: dict = Field(
         default_factory=dict,
         description="Field mapping for varied log formats. "
@@ -89,6 +95,7 @@ class BusinessLineUpdate(BaseModel):
     log_parse_config: dict | None = None
     default_filters: dict | None = None
     severity_threshold: str | None = None
+    language: str | None = Field(None, pattern=r"^(java|csharp|python|go|other)$")
     field_mapping: dict | None = None
     is_active: bool | None = None
 
@@ -100,6 +107,7 @@ class BusinessLineResponse(BaseSchema):
     description: str
     es_index_pattern: str
     severity_threshold: str
+    language: str = "java"
     field_mapping: dict = Field(default_factory=dict)
     is_active: bool
     created_at: datetime

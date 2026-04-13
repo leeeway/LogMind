@@ -137,6 +137,7 @@ async def create_business_line(
         log_parse_config=json.dumps(req.log_parse_config),
         default_filters=json.dumps(req.default_filters),
         severity_threshold=req.severity_threshold,
+        language=req.language,
         field_mapping=json.dumps(req.field_mapping),
     )
     biz = await biz_repo.create(session, biz)

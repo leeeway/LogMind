@@ -23,7 +23,11 @@ class LogQueryRequest(BaseModel):
     container_name: str | None = None
     domain: str | None = Field(None, description="Filter by gy.domain (site domain)")
     filetype: str | None = Field(
-        None, description="Filter by gy.filetype (e.g. error.log, info.log)"
+        None, description="Filter by gy.filetype (e.g. error.log, info.log, sys.log.txt)"
+    )
+    language: str | None = Field(
+        None, description="Business line language (java/csharp). "
+        "When set, enables language-specific severity filtering on message content."
     )
     extra_filters: dict = Field(default_factory=dict)
     size: int = Field(100, ge=1, le=1000)
@@ -46,6 +50,7 @@ class LogEntry(BaseSchema):
     branch: str = Field("", description="Code branch from gy.branch")
     image_version: str = Field("", description="Image version from image.version")
     filetype: str = Field("", description="Log file type from gy.filetype")
+    host_name: str = Field("", description="Host name from host.name (esp. for VM-deployed C# services)")
 
 
 class LogQueryResponse(BaseSchema):

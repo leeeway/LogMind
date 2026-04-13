@@ -78,6 +78,16 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         String(20), default="error"
     )
 
+    # Development language — determines log format parsing strategy
+    # java: gy.filetype-based level, Java stack traces (at ..., Caused by:)
+    # csharp: NLog/log4net format, .NET stack traces, sys.log.txt filetype
+    # python: Python traceback format
+    # go: Go panic/runtime stack format
+    # other: Generic format, level extracted from message
+    language: Mapped[str] = mapped_column(
+        String(20), default="java"
+    )  # java / csharp / python / go / other
+
     # Configurable field mapping for varied log formats (JSON text)
     # Defines how to map source-specific fields to LogMind standard fields.
     # Example for GYYX Filebeat format:
