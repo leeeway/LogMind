@@ -143,7 +143,8 @@ def _build_pipeline_error_alert(
         f"```",
         f"",
         f"---",
-        f"> AI 模型调用异常，请检查模型配置和 API Key。",
+        f"> ⚠️ 分析管道执行未能完成",
+        f"> 请检查报错查明是基础设施依赖（如 ElasticSearch、网络等）故障，还是 AI 模型调用异常。",
         f"> 当前该业务线的错误日志将仅通过原始日志摘要通知。",
     ]
     return "\n".join(lines)

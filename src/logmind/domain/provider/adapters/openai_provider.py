@@ -45,12 +45,19 @@ class OpenAIProvider(BaseProvider):
 
     def _build_payload(self, request: ChatRequest, stream: bool = False) -> dict:
         """Build the API request payload."""
-        return {
-            "model": request.model or self.default_model,
-            "messages": [
+        # Use raw messages if provided (for tool calling flows)
+        raw_messages = request.extra_params.pop("_raw_messages", None)
+        if raw_messages:
+            messages = raw_messages
+        else:
+            messages = [
                 {"role": m.role, "content": m.content}
                 for m in request.messages
-            ],
+            ]
+
+        payload = {
+            "model": request.model or self.default_model,
+            "messages": messages,
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "top_p": request.top_p,
@@ -58,8 +65,14 @@ class OpenAIProvider(BaseProvider):
             **request.extra_params,
         }
 
+        # Add tools for function calling
+        if request.tools:
+            payload["tools"] = request.tools
+
+        return payload
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
-        """Synchronous chat completion."""
+        """Synchronous chat completion (supports function calling)."""
         payload = self._build_payload(request)
         resp = await self._client.post("/v1/chat/completions", json=payload)
         resp.raise_for_status()
@@ -67,9 +80,23 @@ class OpenAIProvider(BaseProvider):
 
         choice = data["choices"][0]
         usage = data.get("usage", {})
+        message = choice.get("message", {})
+
+        # Parse tool calls if present
+        tool_calls = None
+        if message.get("tool_calls"):
+            tool_calls = []
+            for tc in message["tool_calls"]:
+                tool_calls.append({
+                    "id": tc.get("id", ""),
+                    "function": {
+                        "name": tc["function"]["name"],
+                        "arguments": tc["function"]["arguments"],
+                    },
+                })
 
         return ChatResponse(
-            content=choice["message"]["content"],
+            content=message.get("content") or "",
             model=data.get("model", request.model or self.default_model),
             usage=TokenUsage(
                 prompt_tokens=usage.get("prompt_tokens", 0),
@@ -77,6 +104,7 @@ class OpenAIProvider(BaseProvider):
                 total_tokens=usage.get("total_tokens", 0),
             ),
             finish_reason=choice.get("finish_reason"),
+            tool_calls=tool_calls,
             raw_response=data,
         )
 

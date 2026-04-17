@@ -18,6 +18,7 @@ from logmind.core.exceptions import AllProvidersFailedError, ProviderError
 from logmind.core.logging import get_logger
 from logmind.domain.provider.base import BaseProvider, ChatRequest, ChatResponse
 from logmind.domain.provider.factory import create_provider
+import logmind.domain.provider.adapters  # Eagerly load to run decorators
 from logmind.domain.provider.models import ProviderConfig
 from logmind.shared.encryption import decrypt_value
 

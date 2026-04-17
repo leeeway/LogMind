@@ -17,15 +17,17 @@
 <br/>
 
 > LogMind 对接企业已有的 ELK 日志基础设施，通过 AI 大模型自动识别错误模式、追踪异常根因、生成修复建议，并将告警推送至企业微信 / 钉钉 / 飞书。  
-> 支持 **Java (K8s)** 和 **C# (.NET/VM)** 混合架构，提供灵活的 **AI 开关**：开启时进行深度智能分析，关闭时自动降级为轻量化异常通知。
+> 支持 **Java (K8s)** 和 **C# (.NET/VM)** 混合架构，提供灵活的 **AI 开关**：开启时进行深度智能分析，关闭时自动降级为轻量化异常通知。  
+> 内置 **AI Agent 自主推理**：AI 可主动调用 ES 工具进行多步查询，像真正的 SRE 一样逐步缩小排查范围，而不仅仅是分析一次性日志快照。
 
 ---
 
-## 📑 目录
+### 📑 目录
 
 - [核心能力](#-核心能力)
 - [架构设计](#-架构设计)
 - [功能矩阵](#-功能矩阵)
+- [成本控制配置](#-成本控制配置)
 - [快速开始](#-快速开始)
 - [业务线配置指南](#-业务线配置指南)
 - [通知模板说明](#-通知模板说明)
@@ -48,6 +50,29 @@
 - 开箱即用对接 OpenAI / Claude / Gemini / DeepSeek / 内网私有模型
 - **AI 开关**：按业务线独立控制，关闭即零 Token 消耗
 - AI 异常自动降级：模型故障时自动切换为原始日志通知，告警不丢失
+
+### 🧠 AI Agent 自主推理（多步工具调用）
+
+区别于传统「一次性 Prompt-Response」模式，LogMind 内置 Agent 推理循环。AI 拥有主动查询能力，可在一次分析中发起多步工具调用：
+
+| Agent Tool | 作用 |
+|-----------|------|
+| `search_logs` | 自由构造条件搜索更多日志（关键词、级别、域名、时间段） |
+| `get_log_context` | 查看某个时间点前后 N 分钟的完整上下文 |
+| `count_error_patterns` | 按异常类型 / 域名 / 时间段聚合统计错误频率 |
+| `list_available_indices` | 发现其他相关服务的 ES 索引 |
+| `search_knowledge_base`| **(🆕 新增)** 根据相关性智能检索内部知识库、SOP 和历史故障处理手册 |
+
+**典型推理链**：发现大量连接超时 → 调用 `count_error_patterns` 确认频率 → 调用 `search_logs` 查上游服务 → 调用 `get_log_context` 追溯发生前后环境 → 给出根因结论。
+
+### 💰 错误指纹去重 (Token 节省)
+
+基于 Redis 的跨任务错误指纹缓存，避免对同样的错误模式重复调用 AI：
+
+- 每条错误生成唯一指纹（异常类 + 消息哈希）
+- 指纹命中（TTL 内已分析）→ 自动跳过 AI 推理，`token_usage = 0`
+- 指纹全部命中时任务标记完成但**不发告警通知**，降低噪音
+- TTL 过期后同类错误会被重新分析（默认 6 小时）
 
 ### 🌐 多语言日志智能解析
 
@@ -110,8 +135,9 @@ graph TD
 sequenceDiagram
     participant Beat as Celery Beat
     participant Worker as Worker
+    participant FP as 指纹缓存(Redis)
     participant ES as Elasticsearch
-    participant LLM as AI 模型
+    participant LLM as AI Agent
     participant WH as Webhook
 
     Beat->>Worker: scheduled_log_patrol()
@@ -119,22 +145,31 @@ sequenceDiagram
     Worker->>ES: 查询各业务线 ERROR 日志
     ES-->>Worker: 返回日志数据
 
-    alt 无错误日志
-        Worker-->>Beat: ✅ 巡检通过
-    else 发现错误日志
-        Worker->>Worker: 预处理 (去重 + 堆栈合并)
+    Worker->>Worker: 预处理 (去重 + 堆栈合并)
+
+    Worker->>FP: 批量查询错误指纹
+    FP-->>Worker: 已见/未见指纹列表
+
+    alt 全部指纹已见 (近期已分析)
+        Worker-->>Beat: ✅ 跳过 (token_usage=0，不通知)
+    else 存在新错误模式
+        Worker->>FP: 写入新指纹 (TTL=6h)
 
         alt ai_enabled = true
-            Worker->>LLM: 发送分析 Prompt
-            alt AI 正常响应
-                LLM-->>Worker: 返回根因分析
-                Worker->>Worker: 持久化分析结果
-                opt 发现 Critical 问题
-                    Worker->>WH: 🔴 AI 分析告警
+            loop Agent 推理循环 (最多 5 步)
+                Worker->>LLM: 发送消息 + 可用工具
+                alt AI 需要更多信息
+                    LLM-->>Worker: tool_calls (search_logs / count_error_patterns...)
+                    Worker->>ES: 执行工具查询
+                    ES-->>Worker: 查询结果
+                    Worker->>LLM: 追加工具结果
+                else AI 完成推理
+                    LLM-->>Worker: 最终 JSON 分析结论
                 end
-            else AI 调用失败
-                Worker->>WH: 🛑 AI 流程异常通知
-                Worker->>WH: ⚠️ 降级: 发送原始日志摘要
+            end
+            Worker->>Worker: 持久化分析结果
+            opt 发现 Critical/Warning 问题
+                Worker->>WH: 🔴 AI 分析告警
             end
         else ai_enabled = false
             Worker->>WH: ⚠️ 日志异常告警 (含日志摘要)
@@ -157,10 +192,13 @@ sequenceDiagram
 | | C# .NET 堆栈异常合并 | ✅ |
 | | Filebeat multiline 感知 | ✅ |
 | **AI 分析** | 多模型支持 (OpenAI/Claude/DeepSeek...) | ✅ |
-| | 配置化 Prompt 模板 (YAML) | ✅ |
+| | 配置化 Prompt 模板 (YAML + DB) | ✅ |
 | | Java / C# 双语言堆栈分析 Prompt | ✅ |
 | | 业务线级 AI 开关 | ✅ |
 | | AI 失败降级通知 | ✅ |
+| | **🆕 AI Agent 多步推理** | ✅ |
+| | **🆕 Function Calling 工具调用 (4 个 ES 工具)** | ✅ |
+| | **🆕 错误指纹去重 (跨任务 Redis 缓存)** | ✅ |
 | **告警通知** | 企业微信 Webhook | ✅ |
 | | 钉钉 Webhook | ✅ |
 | | 飞书 Webhook | ✅ |
@@ -171,7 +209,26 @@ sequenceDiagram
 | | API Key Fernet 加密存储 | ✅ |
 | | Celery Beat 定时巡检 | ✅ |
 | | 巡检冷却控制 | ✅ |
-| **RAG** | 知识库向量化检索 | 🔲 规划中 |
+| **🆕 RAG 增强** | 知识库文本文档分块 (Chunking) | ✅ |
+| | ES 8.x `dense_vector` 原生向量存储 | ✅ |
+| | Agent 智能 KNN 检索 (按需唤醒) | ✅ |
+
+---
+
+## 💰 成本控制配置
+
+LogMind 内置多层 Token 消耗控制机制，通过 `.env` 配置：
+
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `ANALYSIS_MAX_LOGS_PER_TASK` | `500` | 单次分析最大抓取日志数 |
+| `ANALYSIS_COOLDOWN_MINUTES` | `30` | 同一业务线两次自动巡检最小间隔（分钟） |
+| `ANALYSIS_FINGERPRINT_ENABLED` | `true` | 是否启用错误指纹去重 |
+| `ANALYSIS_FINGERPRINT_TTL_HOURS` | `6` | 错误指纹缓存 TTL（小时） |
+| `ANALYSIS_AGENT_ENABLED` | `true` | 是否启用 Agent 多步推理（关闭则退回一次性分析） |
+| `ANALYSIS_AGENT_MAX_STEPS` | `5` | Agent 最大工具调用步数（超出自动停止） |
+
+> **关闭 Agent 不影响分析功能**，只影响分析深度。设置 `ANALYSIS_AGENT_ENABLED=false` 可立即降低 Token 消耗 30-50%。
 
 ---
 
@@ -421,11 +478,16 @@ LogMind/
 │   ├── domain/                  # 业务领域层 (DDD)
 │   │   ├── tenant/              # 租户 + 用户 + 业务线
 │   │   ├── log/                 # ES 日志查询与解析
-│   │   ├── analysis/            # AI 分析 Pipeline (8 阶段)
+│   │   ├── analysis/            # AI 分析 Pipeline
+│   │   │   ├── pipeline.py      # 8 阶段流水线定义
+│   │   │   ├── agent_stage.py   # 🆕 AI Agent 多步推理 Stage
+│   │   │   ├── agent_tools.py   # 🆕 ES 工具定义 (4 个 Function Calling 工具)
+│   │   │   ├── fingerprint_stage.py # 🆕 错误指纹去重 Stage
+│   │   │   └── tasks.py         # Celery 任务入口
 │   │   ├── alert/               # 告警规则 + Webhook 通知
 │   │   ├── provider/            # AI 模型提供商管理
 │   │   ├── prompt/              # Prompt 模板引擎
-│   │   ├── rag/                 # RAG 知识库 (规划中)
+│   │   ├── rag/                 # 🆕 RAG 知识库与向量检索 (ES knn_search)
 │   │   └── dashboard/           # 仪表盘统计
 │   ├── shared/                  # 通用组件
 │   └── main.py                  # FastAPI 入口
@@ -452,7 +514,10 @@ LogMind/
 - [x] 业务线级 AI 开关 + AI 异常降级通知
 - [x] 模板化 Webhook 多平台推送 (企业微信 / 钉钉 / 飞书)
 - [x] Java + C# 堆栈异常智能合并与分析
-- [x] Prompt 模板化管理 (YAML 配置)
+- [x] Prompt 模板化管理 (YAML + DB 双源)
+- [x] **AI Agent 多步推理** (Function Calling + ES 工具)
+- [x] **错误指纹去重** (Redis 跨任务去重，节省 Token)
+- [x] **RAG 知识库检索** (ES 原生向量检索 + Agent Tool 唤醒)
 
 ### v1.1 — 近期计划
 
@@ -461,22 +526,22 @@ LogMind/
 - [ ] 日志趋势分析看板
 - [ ] Python / Go 堆栈解析深度支持
 - [ ] 告警静默 / 聚合 / 升级策略
+- [ ] RAG 文档管理界面 (本地上传/同步)
 
-### v1.2 — 中期目标
+### v1.2 — 中期目标 (运维深度集成)
 
-- [ ] RAG 知识库接入 (企业 SOP / 代码仓库 / 历史 Postmortem)
-- [ ] 多 ES 集群联邦查询
-- [ ] Webhook 扩展：Teams / Slack / Email
-- [ ] 告警 On-Call 值班排班集成
-- [ ] 分析成本核算与 Token 预算控制面板
+- [ ] 容器生态打通：K8s 事件流 (Event) / ConfigMap 变更关联分析
+- [ ] 部署系统关联：查询近期发布记录，判断是否由于发版导致
+- [ ] 多 ES 集群联邦查询支持
+- [ ] Webhook 扩展：企业级飞书卡片进阶、Teams / Slack / Email
 
-### v2.0 — 远期愿景
+### v2.0 — 远期愿景 (Auto-Remediation 自动自愈)
 
-- [ ] AI 自愈建议 → 自动生成 Fix PR (GitHub / GitLab)
-- [ ] Kubernetes 事件流 (Event) 关联分析
+- [ ] Agent 自治行动工具：`restart_pod`, `scale_deployment`
+- [ ] 交互式自动修复：通过企微发送审批卡片，运维人员点击"同意"后执行
+- [ ] AI 自愈建议 → 自动生成 Fix PR (对接 GitLab/GitHub)
 - [ ] 跨服务分布式链路追踪 (Trace) 关联
-- [ ] 自然语言日志查询 (Text-to-DSL)
-- [ ] 运行时风险预警 (异常指标趋势预测)
+- [ ] 自然语言日志查询 (Text-to-DSL 对话式监控)
 
 ---
 

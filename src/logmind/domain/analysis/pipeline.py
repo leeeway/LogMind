@@ -449,27 +449,6 @@ class LogPreprocessStage(PipelineStage):
         return str(source)[:500]
 
 
-# ── Stage 3: RAG Retrieve ────────────────────────────────
-
-class RAGRetrieveStage(PipelineStage):
-    """Retrieve relevant context from RAG knowledge base."""
-
-    name = "rag_retrieve"
-    is_critical = False  # Non-critical — analysis proceeds without RAG
-
-    def __init__(self, rag_service=None):
-        self.rag_service = rag_service
-
-    async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        if not self.rag_service:
-            return ctx  # RAG not configured
-
-        # TODO: Implement RAG retrieval in Phase 4
-        # Extract key error messages and search knowledge base
-        logger.info("rag_stage_skipped", reason="not_implemented", task_id=ctx.task_id)
-        return ctx
-
-
 # ── Stage 4: Prompt Build ────────────────────────────────
 
 class PromptBuildStage(PipelineStage):
@@ -564,7 +543,7 @@ class PromptBuildStage(PipelineStage):
         tech_hint = f"（技术栈: {tech_stack}）" if tech_stack else ""
 
         base = f"""你是一名资深 SRE 工程师和日志分析专家。
-分析应用服务日志{tech_hint}，识别错误模式并给出根因分析。
+分析应用服务日志{tech_hint}，识别错误模式、异常趋势并给出根因分析。
 
 ## 输出要求
 请以 JSON 数组格式输出，每个元素包含：
@@ -573,7 +552,11 @@ class PromptBuildStage(PipelineStage):
 - content: 详细分析说明
 - confidence_score: 置信度 0.0~1.0
 
-只输出 JSON 数组，不要输出其他内容。只关注严重问题 (ERROR/CRITICAL)。"""
+## 重要规则
+1. 只输出 JSON 数组，不要输出其他内容（不要包裹在 markdown 代码块中）。
+2. 数组中必须至少包含一个元素。分析所有错误模式，包括高频重复错误、异常堆栈、连接超时等。
+3. 即使日志中没有严重问题，也请输出至少一条 info 级别的总结说明当前系统健康状况。
+4. 对相同类型的错误请合并分析，说明出现频率和影响范围。"""
 
         if ctx.has_stack_traces:
             if ctx.language == "csharp":
@@ -633,7 +616,7 @@ class PromptBuildStage(PipelineStage):
 {ctx.processed_logs}
 ```
 
-请分析以上日志，只聚焦严重错误，输出 JSON 数组格式的分析结果。"""
+请全面分析以上日志中的所有错误模式和异常趋势，输出 JSON 数组格式的分析结果。数组中至少包含一个元素。"""
 
 
 # ── Stage 5: AI Inference ────────────────────────────────
@@ -687,6 +670,13 @@ class ResultParseStage(PipelineStage):
     name = "result_parse"
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
+        logger.info(
+            "result_parse_input",
+            ai_response_length=len(ctx.ai_response),
+            ai_response_preview=ctx.ai_response[:500],
+            task_id=ctx.task_id,
+        )
+
         try:
             # Try to extract JSON from the response
             content = ctx.ai_response.strip()
@@ -700,7 +690,11 @@ class ResultParseStage(PipelineStage):
             parsed = json.loads(content)
 
             if isinstance(parsed, dict):
-                parsed = [parsed]
+                # Support {"results": [...]} wrapper format
+                if "results" in parsed and isinstance(parsed["results"], list):
+                    parsed = parsed["results"]
+                else:
+                    parsed = [parsed]
 
             ctx.analysis_results = []
             for item in parsed:
@@ -712,14 +706,33 @@ class ResultParseStage(PipelineStage):
                     "structured_data": json.dumps(item, ensure_ascii=False),
                 })
 
+            # If AI returned content but parsed to zero results, fallback to summary
+            if not ctx.analysis_results:
+                logger.warning("result_parse_empty_fallback", task_id=ctx.task_id)
+                # Generate meaningful summary instead of forwarding raw AI response
+                summary_text = (
+                    f"AI 分析了 {ctx.log_count} 条日志（业务线: {ctx.business_line_name}），"
+                    f"未发现需要立即处理的严重问题。\n\n"
+                    f"日志来源: {ctx.domain or ctx.host_name or '未知'}\n"
+                    f"时间范围: {ctx.time_from} ~ {ctx.time_to}\n"
+                    f"建议持续关注日志趋势，如有异常请手动复查。"
+                )
+                ctx.analysis_results = [{
+                    "result_type": "summary",
+                    "content": summary_text,
+                    "severity": "info",
+                    "confidence_score": 0.8,
+                    "structured_data": "{}",
+                }]
+
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             # Fallback: treat entire response as a single result
             logger.warning("result_parse_fallback", error=str(e), task_id=ctx.task_id)
             ctx.analysis_results = [{
                 "result_type": "summary",
                 "content": ctx.ai_response,
-                "severity": "info",
-                "confidence_score": 0.5,
+                "severity": "warning",
+                "confidence_score": 0.8,
                 "structured_data": "{}",
             }]
 
@@ -740,20 +753,28 @@ class AlertEvalStage(PipelineStage):
     is_critical = False
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        # Check for critical severity results → fire alerts
-        critical_results = [
+        # Check for critical or warning severity results → fire alerts
+        alertable_results = [
             r for r in ctx.analysis_results
-            if r.get("severity") == "critical" and r.get("confidence_score", 0) >= 0.7
+            if r.get("severity") in ("critical", "warning")
+            and r.get("confidence_score", 0) >= 0.5
         ]
 
-        if critical_results:
-            ctx.alerts_fired = critical_results
+        # Also include summary type results (fallback from parse stage)
+        summary_results = [
+            r for r in ctx.analysis_results
+            if r.get("result_type") == "summary"
+        ]
+
+        all_alertable = alertable_results or summary_results or ctx.analysis_results
+
+        if all_alertable:
+            ctx.alerts_fired = all_alertable
             logger.warning(
-                "critical_alerts_detected",
-                count=len(critical_results),
+                "alerts_detected",
+                count=len(all_alertable),
                 task_id=ctx.task_id,
             )
-            # Alert notification will be handled by the alert domain
 
         return ctx
 

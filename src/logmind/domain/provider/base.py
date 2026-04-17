@@ -36,6 +36,7 @@ class ChatRequest:
     max_tokens: int = 4096
     top_p: float = 0.9
     stream: bool = False
+    tools: list[dict] | None = None   # OpenAI Function Calling tools
     extra_params: dict = field(default_factory=dict)
 
 
@@ -54,6 +55,7 @@ class ChatResponse:
     model: str
     usage: TokenUsage
     finish_reason: str | None = None
+    tool_calls: list[dict] | None = None  # Parsed tool calls from response
     raw_response: dict | None = None
 
 

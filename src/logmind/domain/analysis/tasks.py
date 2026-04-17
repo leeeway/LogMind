@@ -45,7 +45,6 @@ async def _execute_analysis(task_id: str):
     from logmind.core.database import get_db_context
     from logmind.domain.analysis.models import LogAnalysisTask
     from logmind.domain.analysis.pipeline import (
-        AIInferenceStage,
         AlertEvalStage,
         AnalysisPipeline,
         LogFetchStage,
@@ -53,9 +52,10 @@ async def _execute_analysis(task_id: str):
         PersistStage,
         PipelineContext,
         PromptBuildStage,
-        RAGRetrieveStage,
         ResultParseStage,
     )
+    from logmind.domain.analysis.agent_stage import AgentInferenceStage
+    from logmind.domain.analysis.fingerprint_stage import ErrorFingerprintStage
     from logmind.domain.log.service import log_service
     from logmind.domain.prompt.engine import prompt_engine
     from logmind.domain.prompt.models import PromptTemplate
@@ -93,13 +93,13 @@ async def _execute_analysis(task_id: str):
 
     # 3. Build pipeline — dynamically based on ai_enabled
     if ai_enabled:
-        # Full AI pipeline
+        # Full AI pipeline with fingerprint dedup
         stages = [
             LogFetchStage(log_service),
             LogPreprocessStage(),
-            RAGRetrieveStage(),
+            ErrorFingerprintStage(),
             PromptBuildStage(prompt_engine, prompt_repo),
-            AIInferenceStage(provider_manager),
+            AgentInferenceStage(provider_manager),
             ResultParseStage(),
             AlertEvalStage(),
             PersistStage(),
@@ -137,8 +137,31 @@ async def _execute_analysis(task_id: str):
     )
 
     # 5. Execute pipeline
+    from logmind.core.elasticsearch import close_celery_es_client
     try:
         ctx = await pipeline.run(ctx)
+
+        # Check if fingerprint stage filtered out ALL logs (no new errors)
+        fingerprint_new = ctx.log_metadata.get("fingerprint_new")
+        if ai_enabled and fingerprint_new is not None and fingerprint_new == 0:
+            # All errors were previously analyzed — skip notification
+            logger.info(
+                "task_skipped_all_fingerprinted",
+                task_id=task_id,
+                filtered=ctx.log_metadata.get("fingerprint_filtered", 0),
+            )
+            async with get_db_context() as session:
+                task = await session.get(LogAnalysisTask, task_id)
+                task.status = "completed"
+                task.log_count = ctx.log_count
+                task.token_usage = 0
+                task.completed_at = datetime.now(timezone.utc)
+                task.error_message = (
+                    f"跳过分析: 全部 {ctx.log_metadata.get('fingerprint_filtered', 0)} 条错误"
+                    f"已在近期分析过（指纹去重）"
+                )
+                await session.flush()
+            return  # No notification needed
 
         if ai_enabled:
             # ── AI mode: update task + send AI alert ──────
@@ -188,6 +211,8 @@ async def _execute_analysis(task_id: str):
             # Fallback: if we have preprocessed logs, send them directly
             if ctx.processed_logs and ctx.log_count > 0:
                 await _send_error_log_notification(ctx, webhook_url)
+    finally:
+        await close_celery_es_client()
 
 
 async def _send_ai_alerts(ctx, webhook_url: str):

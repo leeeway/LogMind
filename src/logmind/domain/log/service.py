@@ -91,7 +91,12 @@ class LogService:
     """Elasticsearch log query and aggregation service."""
 
     def __init__(self):
-        self.es = get_es_client()
+        pass
+
+    @property
+    def es(self):
+        from logmind.core.elasticsearch import get_es_client
+        return get_es_client()
 
     async def search_logs(self, request: LogQueryRequest) -> LogQueryResponse:
         """
@@ -329,6 +334,80 @@ class LogService:
             ]
         except Exception as e:
             logger.error("list_indices_failed", error=str(e))
+            return []
+
+    # ── RAG Vector Search (Knowledge Base) ───────────
+
+    async def create_kb_index_if_not_exists(self, kb_id: str, vector_dim: int = 1536) -> str:
+        """Create an Elasticsearch index for storing knowledge base embeddings."""
+        index_name = f"logmind-kb-{kb_id}"
+        exists = await self.es.indices.exists(index=index_name)
+        if not exists:
+            mapping = {
+                "properties": {
+                    "doc_id": {"type": "keyword"},
+                    "kb_id": {"type": "keyword"},
+                    "content": {"type": "text"},
+                    "metadata": {"type": "object"},
+                    "chunk_index": {"type": "integer"},
+                    "embedding": {
+                        "type": "dense_vector",
+                        "dims": vector_dim,
+                        "index": True,
+                        "similarity": "cosine"
+                    }
+                }
+            }
+            await self.es.indices.create(index=index_name, mappings=mapping)
+            logger.info("kb_index_created", index=index_name)
+        return index_name
+
+    async def insert_chunks(self, index_name: str, chunks: list[dict]):
+        """Bulk insert embedding chunks into ES index."""
+        from elasticsearch.helpers import async_bulk
+        
+        actions = [
+            {
+                "_index": index_name,
+                "_source": chunk
+            }
+            for chunk in chunks
+        ]
+        success, failed = await async_bulk(self.es, actions)
+        logger.info("kb_chunks_inserted", index=index_name, success=success, failed=len(failed) if failed else 0)
+        return success
+
+    async def knn_search(self, kb_id: str, query_vector: list[float], k: int = 3) -> list[dict]:
+        """Perform KNN search on knowledge base index."""
+        index_name = f"logmind-kb-{kb_id}"
+        exists = await self.es.indices.exists(index=index_name)
+        if not exists:
+            return []
+
+        try:
+            resp = await self.es.search(
+                index=index_name,
+                knn={
+                    "field": "embedding",
+                    "query_vector": query_vector,
+                    "k": k,
+                    "num_candidates": 100
+                },
+                source=["content", "metadata", "doc_id"]
+            )
+            hits = resp.get("hits", {}).get("hits", [])
+            results = []
+            for hit in hits:
+                source = hit["_source"]
+                results.append({
+                    "score": hit["_score"],
+                    "content": source.get("content"),
+                    "metadata": source.get("metadata"),
+                    "doc_id": source.get("doc_id")
+                })
+            return results
+        except Exception as e:
+            logger.error("knn_search_failed", kb_id=kb_id, error=str(e))
             return []
 
     # ── Helpers ──────────────────────────────────────────

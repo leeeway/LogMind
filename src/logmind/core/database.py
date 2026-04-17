@@ -13,18 +13,26 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import sys
 from logmind.core.config import get_settings
 
 settings = get_settings()
+is_celery = "celery" in sys.argv[0] or (len(sys.argv) > 1 and "celery" in sys.argv[1])
 
-engine = create_async_engine(
-    settings.database_url,
-    echo=settings.database_echo,
-    pool_size=settings.database_pool_size,
-    max_overflow=settings.database_max_overflow,
-    pool_pre_ping=True,
-    pool_recycle=3600,
-)
+engine_kwargs = {
+    "echo": settings.database_echo,
+}
+
+if is_celery:
+    from sqlalchemy.pool import NullPool
+    engine_kwargs["poolclass"] = NullPool
+else:
+    engine_kwargs["pool_size"] = settings.database_pool_size
+    engine_kwargs["max_overflow"] = settings.database_max_overflow
+    engine_kwargs["pool_pre_ping"] = True
+    engine_kwargs["pool_recycle"] = 3600
+
+engine = create_async_engine(settings.database_url, **engine_kwargs)
 
 async_session_factory = async_sessionmaker(
     engine,

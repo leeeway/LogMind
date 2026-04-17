@@ -5,16 +5,28 @@ Async ES client for log retrieval and vector search.
 Supports configurable arbitrary index patterns per business line.
 """
 
+import sys
 from functools import lru_cache
-
 from elasticsearch import AsyncElasticsearch
-
 from logmind.core.config import get_settings
 
+is_celery = "celery" in sys.argv[0] or (len(sys.argv) > 1 and "celery" in sys.argv[1])
+_celery_es_client = None
 
-@lru_cache
 def get_es_client() -> AsyncElasticsearch:
     """Create a cached Elasticsearch async client."""
+    global _celery_es_client
+    if is_celery:
+        if _celery_es_client is None:
+            _celery_es_client = _create_es_client()
+        return _celery_es_client
+    return _get_cached_es_client()
+
+@lru_cache
+def _get_cached_es_client() -> AsyncElasticsearch:
+    return _create_es_client()
+
+def _create_es_client() -> AsyncElasticsearch:
     settings = get_settings()
 
     kwargs: dict = {
@@ -27,6 +39,13 @@ def get_es_client() -> AsyncElasticsearch:
         kwargs["basic_auth"] = (settings.es_username, settings.es_password)
 
     return AsyncElasticsearch(**kwargs)
+
+async def close_celery_es_client() -> None:
+    """Close ES client after Celery task completes."""
+    global _celery_es_client
+    if _celery_es_client:
+        await _celery_es_client.close()
+        _celery_es_client = None
 
 
 async def close_es() -> None:

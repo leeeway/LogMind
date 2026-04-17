@@ -13,7 +13,7 @@ run: ## Run FastAPI dev server
 	uvicorn logmind.main:app --host 0.0.0.0 --port 8000 --reload --app-dir src
 
 worker: ## Run Celery worker
-	cd src && celery -A logmind.core.celery_app worker --loglevel=info --concurrency=4
+	cd src && celery -A logmind.core.celery_app worker --loglevel=info --concurrency=4 -Q celery,analysis,alert,rag
 
 beat: ## Run Celery beat scheduler
 	cd src && celery -A logmind.core.celery_app beat --loglevel=info
