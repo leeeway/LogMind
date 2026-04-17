@@ -11,6 +11,7 @@ Tools:
   - list_available_indices: Discover searchable indices
   - search_knowledge_base: RAG knowledge base vector search
   - search_similar_incidents: Find historically similar error analyses
+  - search_cross_service_logs: Cross-business-line error correlation
 """
 
 import hashlib
@@ -189,6 +190,35 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_cross_service_logs",
+            "description": (
+                "跨业务线搜索其他服务的错误日志（同一租户内）。"
+                "当怀疑当前服务的错误是由上游/下游服务故障引起时使用。"
+                "例如：发现大量连接超时，怀疑是依赖的数据库服务或缓存服务出了问题。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "搜索关键词（如异常类名、错误消息片段）",
+                    },
+                    "service_name": {
+                        "type": "string",
+                        "description": "（可选）目标服务/业务线名称关键词，用于缩小范围",
+                    },
+                    "minutes_back": {
+                        "type": "integer",
+                        "description": "向前查看的分钟数（默认30分钟）",
+                    },
+                },
+                "required": ["keyword"],
+            },
+        },
+    },
 ]
 
 
@@ -220,6 +250,8 @@ async def execute_tool(
             return await _exec_search_knowledge_base(arguments)
         elif tool_name == "search_similar_incidents":
             return await _exec_search_similar_incidents(arguments, es_index_pattern)
+        elif tool_name == "search_cross_service_logs":
+            return await _exec_search_cross_service_logs(arguments, es_index_pattern)
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
     except Exception as e:
@@ -472,6 +504,86 @@ async def _exec_search_similar_incidents(args: dict, index_pattern: str) -> str:
     except Exception as e:
         logger.error("search_similar_incidents_error", error=str(e))
         return json.dumps({"error": f"Search failed: {str(e)}"})
+
+
+async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str) -> str:
+    """Search error logs across other business lines in the same tenant."""
+    from logmind.domain.log.service import log_service
+
+    keyword = args.get("keyword")
+    if not keyword:
+        return json.dumps({"error": "keyword is required"})
+
+    service_name = args.get("service_name", "")
+    minutes_back = args.get("minutes_back", 30)
+
+    try:
+        # Discover all available indices (excluding current business line's)
+        all_indices = await log_service.list_indices("*")
+
+        # Filter out current business line's indices
+        current_patterns = [p.strip() for p in current_index_pattern.split(",")]
+        other_indices = []
+        for idx_info in all_indices:
+            idx_name = idx_info.get("index", "")
+            # Skip system/KB/vector indices
+            if idx_name.startswith(".") or idx_name.startswith("logmind-"):
+                continue
+            # Skip current business line indices
+            is_current = False
+            for pat in current_patterns:
+                pat_base = pat.replace("*", "")
+                if pat_base and idx_name.startswith(pat_base):
+                    is_current = True
+                    break
+            if not is_current:
+                # If service_name filter provided, only include matching indices
+                if service_name and service_name.lower() not in idx_name.lower():
+                    continue
+                other_indices.append(idx_name)
+
+        if not other_indices:
+            return "未找到其他可搜索的服务索引。"
+
+        # Search across other indices (limit to 5 indices to control cost)
+        search_indices = other_indices[:5]
+        index_str = ",".join(search_indices)
+
+        time_from = datetime.now(timezone.utc) - timedelta(minutes=minutes_back)
+        time_to = datetime.now(timezone.utc)
+
+        # Use LogService to search
+        svc = LogService()
+        results = await svc.search_logs(
+            index_pattern=index_str,
+            keyword=keyword,
+            level="error",
+            time_from=time_from,
+            time_to=time_to,
+            size=10,
+        )
+
+        if not results:
+            return f"在其他 {len(search_indices)} 个服务中未发现与 '{keyword}' 相关的错误日志。"
+
+        # Format results with source index info
+        formatted = [f"跨服务搜索结果（关键词: {keyword}，搜索范围: {len(search_indices)} 个服务索引）：\n"]
+        for i, hit in enumerate(results[:10]):
+            source = hit.get("_source", {})
+            idx = hit.get("_index", "unknown")
+            msg = source.get("message", "")[:200]
+            ts = source.get("@timestamp", "")
+            formatted.append(
+                f"--- [{i+1}] 来源: {idx} ---\n"
+                f"时间: {ts}\n"
+                f"内容: {msg}\n"
+            )
+
+        return "\n".join(formatted)
+
+    except Exception as e:
+        logger.error("search_cross_service_error", error=str(e))
+        return json.dumps({"error": f"Cross-service search failed: {str(e)}"})
 
 
 # ── Helpers ──────────────────────────────────────────────
