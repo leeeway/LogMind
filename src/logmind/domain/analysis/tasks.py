@@ -56,6 +56,7 @@ async def _execute_analysis(task_id: str):
     )
     from logmind.domain.analysis.agent_stage import AgentInferenceStage
     from logmind.domain.analysis.fingerprint_stage import ErrorFingerprintStage
+    from logmind.domain.analysis.semantic_dedup import SemanticDedupStage
     from logmind.domain.log.service import log_service
     from logmind.domain.prompt.engine import prompt_engine
     from logmind.domain.prompt.models import PromptTemplate
@@ -93,11 +94,12 @@ async def _execute_analysis(task_id: str):
 
     # 3. Build pipeline — dynamically based on ai_enabled
     if ai_enabled:
-        # Full AI pipeline with fingerprint dedup
+        # Full AI pipeline with fingerprint dedup + semantic dedup (Phase 3)
         stages = [
             LogFetchStage(log_service),
             LogPreprocessStage(),
-            ErrorFingerprintStage(),
+            ErrorFingerprintStage(),        # Layer 1: Fast MD5 fingerprint dedup
+            SemanticDedupStage(),            # Layer 2: Vector semantic dedup (Phase 3)
             PromptBuildStage(prompt_engine, prompt_repo),
             AgentInferenceStage(provider_manager),
             ResultParseStage(),
@@ -180,6 +182,41 @@ async def _execute_analysis(task_id: str):
             # Fire AI analysis alerts
             if ctx.alerts_fired:
                 await _send_ai_alerts(ctx, webhook_url)
+
+            # Phase 3: Index analysis conclusions into vector store for future dedup
+            if ctx.analysis_results and not ctx.semantic_dedup_hit:
+                try:
+                    from logmind.domain.analysis.analysis_indexer import index_analysis_result
+                    # Combine all analysis results into a single content block
+                    combined_content = "\n\n".join(
+                        f"[{r.get('severity', 'info').upper()}] {r.get('content', '')}"
+                        for r in ctx.analysis_results
+                    )
+                    # Use the error signature extracted by SemanticDedupStage
+                    error_sig = ctx.error_signature
+                    if not error_sig:
+                        # Fallback: generate signature now
+                        from logmind.domain.analysis.semantic_dedup import extract_error_signature
+                        error_sig = extract_error_signature(ctx.processed_logs, ctx.language)
+                    if error_sig and len(error_sig) >= 20:
+                        top_severity = "info"
+                        for r in ctx.analysis_results:
+                            s = r.get("severity", "info")
+                            if s == "critical":
+                                top_severity = "critical"
+                                break
+                            elif s == "warning" and top_severity != "critical":
+                                top_severity = "warning"
+                        index_analysis_result.delay(
+                            task_id=task_id,
+                            business_line_id=ctx.business_line_id,
+                            error_signature=error_sig,
+                            analysis_content=combined_content[:3000],
+                            severity=top_severity,
+                        )
+                        logger.info("analysis_index_dispatched", task_id=task_id)
+                except Exception as e:
+                    logger.warning("analysis_index_dispatch_failed", error=str(e))
         else:
             # ── AI-off mode: send direct error notification ──
             async with get_db_context() as session:

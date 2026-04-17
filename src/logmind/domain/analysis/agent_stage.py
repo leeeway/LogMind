@@ -167,18 +167,22 @@ class AgentInferenceStage(PipelineStage):
         """
         agent_instructions = """## 你的工作方式
 你是一名拥有 Elasticsearch 查询能力的 SRE 分析师。
-你可以调用工具来主动搜索更多日志、查看上下文、统计错误频率。
+你可以调用工具来主动搜索更多日志、查看上下文、统计错误频率，
+并参考历史分析记录来加速诊断。
 
-### 分析策略
-1. 先阅读已提供的日志摘要，识别主要错误模式
-2. 如果需要更多信息（例如查看错误前后的上下文、统计频率、搜索关联服务日志），请调用工具
-3. 根据收集到的所有信息，给出最终分析结论
+### 智能分析策略
+1. **先查历史**: 首先调用 search_similar_incidents 工具，看看历史上是否分析过类似错误模式
+2. **如有历史**: 参考历史结论，验证其是否仍然适用于当前情况，避免重复无效分析
+3. **如无历史**: 按正常流程使用 search_logs、get_log_context 等工具调查
+4. **趋势感知**: 调用 count_error_patterns 对比当前错误频率，判断偶发还是频发
 
 ### 工具使用原则
 - 只在需要更多信息时调用工具，不要为了调用而调用
-- 优先使用 count_error_patterns 了解全局情况
+- 优先使用 search_similar_incidents 查看历史经验
+- 使用 count_error_patterns 了解全局情况
 - 使用 search_logs 深入调查具体错误
 - 使用 get_log_context 理解错误发生的完整场景
+- 使用 search_knowledge_base 查阅内部 SOP 文档
 
 ### 最终输出
 当你完成分析后，直接输出 JSON 数组格式的分析结果（不要再调用工具）。

@@ -410,6 +410,104 @@ class LogService:
             logger.error("knn_search_failed", kb_id=kb_id, error=str(e))
             return []
 
+    # ── Analysis Vector Index (Phase 3 Semantic Dedup) ──
+
+    async def create_analysis_vector_index(self, vector_dim: int = 1536) -> str:
+        """Create ES index for storing analysis result embeddings (semantic dedup)."""
+        index_name = "logmind-analysis-vectors"
+        exists = await self.es.indices.exists(index=index_name)
+        if not exists:
+            mapping = {
+                "properties": {
+                    "business_line_id": {"type": "keyword"},
+                    "error_signature": {"type": "text"},
+                    "analysis_content": {"type": "text"},
+                    "severity": {"type": "keyword"},
+                    "task_id": {"type": "keyword"},
+                    "embedding": {
+                        "type": "dense_vector",
+                        "dims": vector_dim,
+                        "index": True,
+                        "similarity": "cosine"
+                    },
+                    "created_at": {"type": "date"},
+                    "ttl_expire_at": {"type": "date"},
+                }
+            }
+            await self.es.indices.create(index=index_name, mappings=mapping)
+            logger.info("analysis_vector_index_created", index=index_name)
+        return index_name
+
+    async def insert_analysis_vector(self, doc: dict) -> bool:
+        """Insert a single analysis embedding vector into the index."""
+        index_name = "logmind-analysis-vectors"
+        try:
+            await self.create_analysis_vector_index()
+            await self.es.index(index=index_name, body=doc)
+            logger.info("analysis_vector_inserted", task_id=doc.get("task_id"))
+            return True
+        except Exception as e:
+            logger.error("analysis_vector_insert_failed", error=str(e))
+            return False
+
+    async def knn_search_analysis_history(
+        self,
+        business_line_id: str,
+        query_vector: list[float],
+        k: int = 1,
+        min_score: float = 0.92,
+    ) -> list[dict]:
+        """
+        KNN search for historically analyzed errors matching the given embedding.
+
+        Returns matches above min_score with their analysis conclusions.
+        Filters by business_line_id and excludes expired records.
+        """
+        index_name = "logmind-analysis-vectors"
+        exists = await self.es.indices.exists(index=index_name)
+        if not exists:
+            return []
+
+        try:
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            resp = await self.es.search(
+                index=index_name,
+                knn={
+                    "field": "embedding",
+                    "query_vector": query_vector,
+                    "k": k,
+                    "num_candidates": 50,
+                    "filter": {
+                        "bool": {
+                            "must": [
+                                {"term": {"business_line_id": business_line_id}},
+                                {"range": {"ttl_expire_at": {"gte": now_iso}}},
+                            ]
+                        }
+                    }
+                },
+                source=["analysis_content", "severity", "error_signature", "task_id", "created_at"],
+                min_score=min_score,
+            )
+            hits = resp.get("hits", {}).get("hits", [])
+            results = []
+            for hit in hits:
+                source = hit["_source"]
+                results.append({
+                    "score": hit["_score"],
+                    "analysis_content": source.get("analysis_content", ""),
+                    "severity": source.get("severity", "info"),
+                    "error_signature": source.get("error_signature", ""),
+                    "task_id": source.get("task_id", ""),
+                    "created_at": source.get("created_at", ""),
+                })
+            return results
+        except Exception as e:
+            logger.error("knn_search_analysis_history_failed", error=str(e))
+            return []
+
     # ── Helpers ──────────────────────────────────────────
 
     @staticmethod

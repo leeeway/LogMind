@@ -9,10 +9,15 @@ Tools:
   - get_log_context: Get surrounding logs for a specific timestamp
   - count_error_patterns: Aggregate error counts by type/domain
   - list_available_indices: Discover searchable indices
+  - search_knowledge_base: RAG knowledge base vector search
+  - search_similar_incidents: Find historically similar error analyses
 """
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+
+import redis.asyncio as aioredis
 
 from logmind.core.logging import get_logger
 from logmind.domain.log.service import LogService
@@ -164,6 +169,26 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_similar_incidents",
+            "description": (
+                "搜索历史上与当前错误模式相似的 AI 分析记录。"
+                "帮助参考过去的根因分析结论和修复建议，避免重复分析。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "error_pattern": {
+                        "type": "string",
+                        "description": "错误模式描述（如异常类名+核心堆栈信息，或错误消息关键词）",
+                    },
+                },
+                "required": ["error_pattern"],
+            },
+        },
+    },
 ]
 
 
@@ -193,6 +218,8 @@ async def execute_tool(
             return await _exec_list_indices(arguments)
         elif tool_name == "search_knowledge_base":
             return await _exec_search_knowledge_base(arguments)
+        elif tool_name == "search_similar_incidents":
+            return await _exec_search_similar_incidents(arguments, es_index_pattern)
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
     except Exception as e:
@@ -331,27 +358,27 @@ async def _exec_list_indices(args: dict) -> str:
 
 
 async def _exec_search_knowledge_base(args: dict) -> str:
-    """Execute search_knowledge_base tool."""
-    from logmind.domain.provider.manager import provider_manager
-    from logmind.domain.provider.base import EmbeddingRequest
+    """Execute search_knowledge_base tool (with Embedding Redis cache)."""
+    from logmind.domain.analysis.semantic_dedup import cached_embed
+    from logmind.core.config import get_settings
     from logmind.domain.log.service import log_service
 
     query = args.get("query")
     if not query:
         return json.dumps({"error": "query is required"})
 
-    kb_id = args.get("kb_id", "default")  # Fallback to 'default' kb if not provided
-
-    # Get OpenAI provider for embedding
-    provider = provider_manager.get_provider("openai")
-    if not provider:
-        return json.dumps({"error": "OpenAI embedding provider not configured"})
+    kb_id = args.get("kb_id", "default")
+    settings = get_settings()
 
     try:
-        # Embed the query
-        req = EmbeddingRequest(texts=[query])
-        resp = await provider.embed(req)
-        query_vector = resp.embeddings[0]
+        # Embed the query (with Redis cache — avoids repeated API calls)
+        query_vector = await cached_embed(
+            text=query,
+            redis_url=settings.redis_url,
+            cache_ttl=settings.analysis_embedding_cache_ttl_seconds,
+        )
+        if query_vector is None:
+            return json.dumps({"error": "Embedding provider not available"})
 
         # Search ES
         results = await log_service.knn_search(kb_id, query_vector, k=3)
@@ -374,6 +401,76 @@ async def _exec_search_knowledge_base(args: dict) -> str:
 
     except Exception as e:
         logger.error("search_knowledge_base_error", error=str(e))
+        return json.dumps({"error": f"Search failed: {str(e)}"})
+
+
+async def _exec_search_similar_incidents(args: dict, index_pattern: str) -> str:
+    """Execute search_similar_incidents tool — find historically similar analyses."""
+    from logmind.domain.analysis.semantic_dedup import cached_embed
+    from logmind.core.config import get_settings
+    from logmind.domain.log.service import log_service
+
+    error_pattern = args.get("error_pattern")
+    if not error_pattern:
+        return json.dumps({"error": "error_pattern is required"})
+
+    settings = get_settings()
+
+    try:
+        # Embed the error pattern (with Redis cache)
+        query_vector = await cached_embed(
+            text=error_pattern,
+            redis_url=settings.redis_url,
+            cache_ttl=settings.analysis_embedding_cache_ttl_seconds,
+        )
+        if query_vector is None:
+            return json.dumps({"error": "Embedding provider not available"})
+
+        # Search all business lines with a lower threshold for broader results
+        # Note: we search globally (no biz_id filter) since the agent may
+        # want to see incidents across services
+        index_name = "logmind-analysis-vectors"
+        exists = await log_service.es.indices.exists(index=index_name)
+        if not exists:
+            return "暂无历史分析记录。系统将在后续分析中逐步积累。"
+
+        from datetime import timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        resp = await log_service.es.search(
+            index=index_name,
+            knn={
+                "field": "embedding",
+                "query_vector": query_vector,
+                "k": 3,
+                "num_candidates": 50,
+                "filter": {
+                    "range": {"ttl_expire_at": {"gte": now_iso}}
+                },
+            },
+            source=["analysis_content", "severity", "error_signature", "task_id", "created_at"],
+        )
+
+        hits = resp.get("hits", {}).get("hits", [])
+        if not hits:
+            return "未找到与当前错误模式相似的历史分析记录。"
+
+        formatted = []
+        for i, hit in enumerate(hits):
+            src = hit["_source"]
+            score = hit["_score"]
+            formatted.append(
+                f"--- 历史事件 {i + 1} (相似度: {score:.2f}) ---\n"
+                f"严重级别: {src.get('severity', 'unknown')}\n"
+                f"分析时间: {src.get('created_at', '未知')}\n"
+                f"错误签名: {src.get('error_signature', '')[:100]}\n"
+                f"历史结论:\n{src.get('analysis_content', '无内容')[:800]}\n"
+            )
+
+        return "\n".join(formatted)
+
+    except Exception as e:
+        logger.error("search_similar_incidents_error", error=str(e))
         return json.dumps({"error": f"Search failed: {str(e)}"})
 
 

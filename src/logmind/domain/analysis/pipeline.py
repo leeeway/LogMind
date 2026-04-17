@@ -131,6 +131,10 @@ class PipelineContext:
     # Error tracking
     errors: list[str] = field(default_factory=list)
 
+    # Semantic dedup (Phase 3)
+    semantic_dedup_hit: bool = False
+    error_signature: str = ""
+
 
 # ── Stage Base ───────────────────────────────────────────
 
@@ -825,6 +829,13 @@ class AnalysisPipeline:
         """Execute all pipeline stages in order."""
         for stage in self.stages:
             try:
+                # Semantic dedup hit → skip AI inference stages
+                if ctx.semantic_dedup_hit and stage.name in (
+                    'prompt_build', 'ai_inference'
+                ):
+                    logger.info("stage_skipped_semantic_dedup", stage=stage.name, task_id=ctx.task_id)
+                    continue
+
                 logger.info("pipeline_stage_start", stage=stage.name, task_id=ctx.task_id)
                 ctx = await stage.execute(ctx)
                 logger.info("pipeline_stage_done", stage=stage.name, task_id=ctx.task_id)
