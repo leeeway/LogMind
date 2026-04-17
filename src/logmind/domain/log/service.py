@@ -131,6 +131,7 @@ class LogService:
         # ── Severity filter — language-aware ─────────────
         if request.severity:
             severity_should = [
+                # Standard level fields (exact term match, no false positives)
                 {"term": {"level": request.severity}},
                 {"term": {"log.level": request.severity}},
                 {"term": {"severity": request.severity}},
@@ -142,19 +143,30 @@ class LogService:
             for ft in filetype_values:
                 severity_should.append({"term": {"gy.filetype": ft}})
 
-            # C# / mixed-level filetypes: match level keyword in message content
-            # This is needed because C# logs put all levels in a single file (sys.log.txt)
-            msg_keywords = _SEVERITY_MSG_KEYWORDS.get(request.severity.lower(), [])
-            if msg_keywords:
-                # Use query_string to match level keywords in message
-                # Only when language hint is provided or as a general fallback
-                keyword_query = " OR ".join(msg_keywords)
-                severity_should.append({
-                    "query_string": {
-                        "default_field": "message",
-                        "query": keyword_query,
-                    }
-                })
+            # C# / mixed-level: match level markers in message content
+            # IMPORTANT: Use phrase matching with brackets/delimiters to avoid
+            # false positives from JSON field names like "error":"" or "errorMessage":""
+            if request.severity.lower() in ("error", "critical"):
+                severity_should.extend([
+                    # Standard log format: [ERROR], [FATAL], [CRITICAL]
+                    {"match_phrase": {"message": "[ERROR]"}},
+                    {"match_phrase": {"message": "[FATAL]"}},
+                    {"match_phrase": {"message": "[CRITICAL]"}},
+                    # C# NLog format: "] ERROR " (after thread ID bracket)
+                    {"match_phrase": {"message": "] ERROR "}},
+                    {"match_phrase": {"message": "] FATAL "}},
+                    # Java/C# exception indicators (high-confidence error markers)
+                    {"match_phrase": {"message": "Exception:"}},
+                    {"match_phrase": {"message": "Caused by:"}},
+                    {"match_phrase": {"message": "Traceback (most recent"}},
+                ])
+            elif request.severity.lower() == "warning":
+                severity_should.extend([
+                    {"match_phrase": {"message": "[WARN]"}},
+                    {"match_phrase": {"message": "[WARNING]"}},
+                    {"match_phrase": {"message": "] WARN "}},
+                    {"match_phrase": {"message": "] WARNING "}},
+                ])
 
             filter_clauses.append({
                 "bool": {

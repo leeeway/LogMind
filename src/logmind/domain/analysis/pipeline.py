@@ -453,6 +453,145 @@ class LogPreprocessStage(PipelineStage):
         return str(source)[:500]
 
 
+# ── Stage 2.5: Log Quality Filter ────────────────────────
+
+class LogQualityFilterStage(PipelineStage):
+    """
+    Smart log quality filter — second layer of severity validation.
+
+    Catches false-positive logs that passed ES query but are actually INFO/DEBUG:
+    - Validates message-level severity against file-level severity
+    - Detects business JSON response noise
+    - Updates processed_logs and log_count after filtering
+
+    Non-critical: if filtering fails, the original logs pass through unchanged.
+    """
+
+    name = "log_quality_filter"
+    is_critical = False
+
+    # Regex to extract actual log level from message content
+    _MSG_LEVEL_PATTERNS = [
+        # [ERROR], [INFO], [WARN], etc.
+        re.compile(r"\[(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\]", re.IGNORECASE),
+        # NLog/log4net: timestamp [thread] LEVEL class
+        re.compile(
+            r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.\d]*\s+"
+            r"\[[\w\-]+\]\s+"
+            r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b",
+            re.IGNORECASE,
+        ),
+        # Java Logback: [timestamp] [thread] LEVEL class
+        re.compile(
+            r"\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.\d]*\]\s+"
+            r"\[[\w\-]+\]\s+"
+            r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b",
+            re.IGNORECASE,
+        ),
+    ]
+
+    # Business noise patterns — logs that are clearly routine operations
+    _NOISE_INDICATORS = [
+        re.compile(r'"status"\s*:\s*true', re.IGNORECASE),
+        re.compile(r'"success"\s*:\s*true', re.IGNORECASE),
+        re.compile(r'"errorMessage"\s*:\s*"[^"]*成功', re.IGNORECASE),
+    ]
+
+    # Severity weight for comparison  
+    _SEVERITY_RANK = {
+        "TRACE": 0, "DEBUG": 1, "INFO": 2,
+        "WARN": 3, "WARNING": 3,
+        "ERROR": 4, "FATAL": 5, "CRITICAL": 5,
+    }
+
+    async def execute(self, ctx: PipelineContext) -> PipelineContext:
+        if not ctx.processed_logs or not ctx.raw_logs:
+            return ctx
+
+        threshold = (ctx.severity_threshold or "error").upper()
+        threshold_rank = self._SEVERITY_RANK.get(threshold, 4)
+
+        filtered_lines = []
+        total_original = 0
+        filtered_out = 0
+
+        for line in ctx.processed_logs.split("\n"):
+            total_original += 1
+
+            # 1. Extract the actual severity from the message content
+            actual_level = self._extract_message_level(line)
+
+            if actual_level:
+                actual_rank = self._SEVERITY_RANK.get(actual_level.upper(), -1)
+                if actual_rank >= 0 and actual_rank < threshold_rank:
+                    # Message content says INFO/DEBUG but we're looking for ERROR
+                    filtered_out += 1
+                    continue
+
+            # 2. Check for business noise (JSON success responses)
+            if self._is_business_noise(line):
+                filtered_out += 1
+                continue
+
+            filtered_lines.append(line)
+
+        if filtered_out > 0:
+            logger.info(
+                "log_quality_filter_applied",
+                task_id=ctx.task_id,
+                original_lines=total_original,
+                filtered_out=filtered_out,
+                remaining=len(filtered_lines),
+            )
+
+            ctx.processed_logs = "\n".join(filtered_lines)
+            ctx.log_metadata["quality_filtered"] = filtered_out
+            ctx.log_metadata["quality_remaining"] = len(filtered_lines)
+
+            # If ALL logs were filtered out, no real errors remain
+            if not filtered_lines or all(l.strip() == "" for l in filtered_lines):
+                ctx.processed_logs = ""
+                ctx.log_count = 0
+                logger.info(
+                    "log_quality_filter_all_removed",
+                    task_id=ctx.task_id,
+                    reason="All logs were INFO/DEBUG or business noise",
+                )
+
+        return ctx
+
+    def _extract_message_level(self, line: str) -> str | None:
+        """Extract log level from a formatted log line's message content."""
+        for pattern in self._MSG_LEVEL_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                return match.group(1).upper()
+        return None
+
+    def _is_business_noise(self, line: str) -> bool:
+        """Detect routine business operation logs (not actual errors)."""
+        # Must match multiple noise indicators to be confident
+        noise_score = 0
+        for pattern in self._NOISE_INDICATORS:
+            if pattern.search(line):
+                noise_score += 1
+
+        # Also check: if the line is clearly [INFO] level content
+        if noise_score >= 2:
+            return True
+
+        # Single noise indicator + no error indicators = likely noise
+        if noise_score >= 1:
+            has_error_indicator = any(kw in line for kw in [
+                "Exception", "Error:", "FATAL", "CRITICAL",
+                "Caused by:", "Traceback", "panic:",
+            ])
+            if not has_error_indicator:
+                return True
+
+        return False
+
+
 # ── Stage 4: Prompt Build ────────────────────────────────
 
 class PromptBuildStage(PipelineStage):

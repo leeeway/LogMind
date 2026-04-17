@@ -49,6 +49,7 @@ async def _execute_analysis(task_id: str):
         AnalysisPipeline,
         LogFetchStage,
         LogPreprocessStage,
+        LogQualityFilterStage,
         PersistStage,
         PipelineContext,
         PromptBuildStage,
@@ -94,12 +95,13 @@ async def _execute_analysis(task_id: str):
 
     # 3. Build pipeline — dynamically based on ai_enabled
     if ai_enabled:
-        # Full AI pipeline with fingerprint dedup + semantic dedup (Phase 3)
+        # Full AI pipeline with quality filter + fingerprint dedup + semantic dedup
         stages = [
             LogFetchStage(log_service),
             LogPreprocessStage(),
-            ErrorFingerprintStage(),        # Layer 1: Fast MD5 fingerprint dedup
-            SemanticDedupStage(),            # Layer 2: Vector semantic dedup (Phase 3)
+            LogQualityFilterStage(),            # Layer 0: Smart quality filter (removes INFO noise)
+            ErrorFingerprintStage(),             # Layer 1: Fast MD5 fingerprint dedup
+            SemanticDedupStage(),                # Layer 2: Vector semantic dedup
             PromptBuildStage(prompt_engine, prompt_repo),
             AgentInferenceStage(provider_manager),
             ResultParseStage(),
@@ -111,6 +113,7 @@ async def _execute_analysis(task_id: str):
         stages = [
             LogFetchStage(log_service),
             LogPreprocessStage(),
+            LogQualityFilterStage(),            # Smart quality filter for AI-off mode too
         ]
 
     pipeline = AnalysisPipeline(stages=stages)
@@ -164,6 +167,26 @@ async def _execute_analysis(task_id: str):
                 )
                 await session.flush()
             return  # No notification needed
+
+        # Check if log quality filter removed ALL logs (all were INFO/noise)
+        if ctx.log_count == 0 or not ctx.processed_logs.strip():
+            logger.info(
+                "task_skipped_quality_filtered",
+                task_id=task_id,
+                quality_filtered=ctx.log_metadata.get("quality_filtered", 0),
+            )
+            async with get_db_context() as session:
+                task = await session.get(LogAnalysisTask, task_id)
+                task.status = "completed"
+                task.log_count = 0
+                task.token_usage = 0
+                task.completed_at = datetime.now(timezone.utc)
+                task.error_message = (
+                    f"跳过分析: {ctx.log_metadata.get('quality_filtered', 0)} 条日志"
+                    f"经质量过滤后为 INFO/业务噪声日志"
+                )
+                await session.flush()
+            return  # No real errors, no notification
 
         if ai_enabled:
             # ── AI mode: update task + send AI alert ──────

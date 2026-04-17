@@ -69,14 +69,29 @@
 **典型推理链**：  
 发现大量连接超时 → 调用 `search_similar_incidents` 查看历史是否有相似事件 → 调用 `search_cross_service_logs` 检查上游服务是否有异常 → 调用 `count_error_patterns` 确认频率趋势 → 调用 `search_knowledge_base` 查阅 SOP → 给出根因结论和修复建议。
 
-### 🧬 三层智能去重 (Token 节省)
+### 🔍 智能日志质量过滤（误报消除）
 
-LogMind 通过三层递进式去重机制，最大程度减少对同类错误的重复 AI 分析：
+日志采集系统（Filebeat）可能因文件级别映射将 INFO 日志混入 ERROR 查询结果。LogMind 通过 **双层防护** 消除误报：
+
+1. **ES 查询层**：使用精准短语匹配 `[ERROR]`、`] ERROR `、`Exception:` 替代散列关键词搜索，避免 JSON 响应中 `"error":""` 字段名被误匹配
+2. **Pipeline 层**：`LogQualityFilterStage` 对每条日志做消息级别二次验证 + 业务噪声检测
+   - `gy.filetype=error.log` 但 message 解析为 `[INFO]` → 过滤
+   - `{"status":true,"success":true}` 纯业务成功响应 → 过滤
+   - 过滤后无有效错误 → 跳过分析和通知，零 Token 消耗
+
+### 🧬 四层智能成本控制
+
+LogMind 通过四层递进式机制，最大程度降低无效分析和 Token 消耗：
 
 ```
                           ┌─────────────────────┐
-    新错误日志 ──────────▶│  Layer 1: MD5 指纹   │  字面完全相同 → 跳过 (零成本)
-                          │  Redis 缓存, TTL=6h  │
+    ES 查询结果 ─────────▶│ Layer 0: 质量过滤    │  INFO/噪声 → 丢弃 (消除误报)
+                          │ 消息级别二次验证      │
+                          └────────┬────────────┘
+                                   │ 有效错误
+                          ┌────────▼────────────┐
+                          │ Layer 1: MD5 指纹    │  字面完全相同 → 跳过 (零成本)
+                          │ Redis 缓存, TTL=6h   │
                           └────────┬────────────┘
                                    │ 未命中
                           ┌────────▼────────────┐
@@ -90,13 +105,14 @@ LogMind 通过三层递进式去重机制，最大程度减少对同类错误的
                           └─────────────────────┘
 ```
 
-| 层级 | 机制 | 成本 | 精度 |
+| 层级 | 机制 | 成本 | 效果 |
 |------|------|------|------|
-| **Layer 1** | Redis MD5 指纹缓存 | 零 API 调用 | 仅匹配完全相同 |
-| **Layer 2** | ES 向量 KNN 搜索 | 1 次 Embedding | 语义相似即命中 |
-| **Layer 3** | 完整 Agent 推理 | 完整 LLM 调用 | 最高精度 |
+| **Layer 0** | 消息级别验证 + 噪声检测 | 零 | 消除 INFO 误报，减少无效通知 |
+| **Layer 1** | Redis MD5 指纹缓存 | 零 API 调用 | 跳过完全相同的错误 |
+| **Layer 2** | ES 向量 KNN 搜索 | 1 次 Embedding | 跳过语义相似的错误 |
+| **Layer 3** | 完整 Agent 推理 | 完整 LLM 调用 | 全新错误深度分析 |
 
-> **实测效果**：在有历史分析积累的场景下，可减少 **40-60%** 重复 LLM 调用。Embedding 结果 Redis 缓存后，向量搜索的 API 成本也大幅降低。
+> **实测效果**：消除 100% INFO 日志误报，配合向量去重可减少 **40-60%** 重复 LLM 调用。
 
 ### 📚 RAG 知识库
 
@@ -253,10 +269,12 @@ sequenceDiagram
 | | AI Agent 多步推理 (Function Calling) | ✅ |
 | | Agent ES 工具 (7 个工具) | ✅ |
 | | 🆕 跨业务线关联分析 | ✅ |
+| **智能过滤** | 🆕 Layer 0: 日志质量过滤 (消息级别验证) | ✅ |
+| | 🆕 Layer 0: 业务噪声检测 (JSON 成功响应) | ✅ |
 | **智能去重** | Layer 1: Redis MD5 错误指纹 | ✅ |
-| | 🆕 Layer 2: 向量语义匹配 (ES KNN) | ✅ |
-| | 🆕 Layer 3: 分析记忆自动回写 | ✅ |
-| | 🆕 Embedding Redis 缓存 | ✅ |
+| | Layer 2: 向量语义匹配 (ES KNN) | ✅ |
+| | Layer 3: 分析记忆自动回写 | ✅ |
+| | Embedding Redis 缓存 | ✅ |
 | **RAG 知识库** | 文本文档分块 (Chunking) | ✅ |
 | | ES 8.x `dense_vector` 原生向量存储 | ✅ |
 | | Agent 智能 KNN 检索 (按需唤醒) | ✅ |
@@ -569,12 +587,12 @@ LogMind/
 │   │   ├── tenant/              # 租户 + 用户 + 业务线
 │   │   ├── log/                 # ES 日志查询、解析与向量搜索
 │   │   ├── analysis/            # AI 分析 Pipeline
-│   │   │   ├── pipeline.py      # 9 阶段流水线定义
+│   │   │   ├── pipeline.py      # 10 阶段流水线 (含 LogQualityFilterStage)
 │   │   │   ├── agent_stage.py   # AI Agent 多步推理 Stage
 │   │   │   ├── agent_tools.py   # 7 个 Agent 工具 (Function Calling)
 │   │   │   ├── fingerprint_stage.py # Layer 1: MD5 指纹去重
-│   │   │   ├── semantic_dedup.py    # 🆕 Layer 2: 向量语义去重
-│   │   │   ├── analysis_indexer.py  # 🆕 Layer 3: 分析结论自动回写
+│   │   │   ├── semantic_dedup.py    # Layer 2: 向量语义去重
+│   │   │   ├── analysis_indexer.py  # Layer 3: 分析结论自动回写
 │   │   │   └── tasks.py         # Celery 任务入口
 │   │   ├── alert/               # 告警规则 + 并行巡检调度
 │   │   ├── provider/            # AI 模型提供商管理
