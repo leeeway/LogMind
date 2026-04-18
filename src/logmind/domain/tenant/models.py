@@ -112,6 +112,31 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Supports WeChat Work, DingTalk, Feishu, or any webhook accepting JSON POST.
     webhook_url: Mapped[str] = mapped_column(String(500), default="")
 
+    # ── Priority Decision Engine ───────────────────────
+    # Business importance weight (1-10)
+    # 10 = core revenue (authentication/payment), 5 = normal, 1 = internal tool
+    business_weight: Mapped[int] = mapped_column(Integer, default=5)
+
+    # Whether this is a critical path (login/payment/registration)
+    # Core paths get +10 priority score boost
+    is_core_path: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Estimated DAU for impact assessment
+    estimated_dau: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Night silence policy
+    # "always": notify any priority immediately
+    # "p0_only": at night, only P0 notifies immediately, P1/P2 delayed to morning
+    # "silent": fully silent at night, all delayed to morning
+    night_policy: Mapped[str] = mapped_column(String(20), default="p0_only")
+
+    # Night hours window (HH:MM-HH:MM, local time based on Celery timezone)
+    night_hours: Mapped[str] = mapped_column(String(20), default="22:00-08:00")
+
+    # Auto-remediation Runbook config (JSON)
+    # Phase B: {"actions": [{"type": "webhook", "url": "...", "trigger_on": ["P0"]}]}
+    auto_remediation_config: Mapped[str] = mapped_column(Text, default="{}")
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Relationships

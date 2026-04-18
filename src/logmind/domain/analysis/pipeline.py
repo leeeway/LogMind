@@ -125,8 +125,16 @@ class PipelineContext:
     # Stage 6: Result Parse
     analysis_results: list[dict] = field(default_factory=list)
 
-    # Stage 7: Alert
+    # Stage 7: Alert / Priority Decision
     alerts_fired: list[dict] = field(default_factory=list)
+    priority_decision: dict = field(default_factory=dict)  # PriorityDecision as dict
+
+    # Business line priority config (loaded from DB)
+    business_weight: int = 5
+    is_core_path: bool = False
+    estimated_dau: int = 0
+    night_policy: str = "p0_only"
+    night_hours: str = "22:00-08:00"
 
     # Error tracking
     errors: list[str] = field(default_factory=list)
@@ -887,39 +895,115 @@ class ResultParseStage(PipelineStage):
         return ctx
 
 
-# ── Stage 7: Alert Eval ──────────────────────────────────
+# ── Stage 7: Priority Decision ───────────────────────────
 
-class AlertEvalStage(PipelineStage):
-    """Evaluate analysis results against alert rules."""
+class PriorityDecisionStage(PipelineStage):
+    """
+    AI-driven alert priority decision engine.
 
-    name = "alert_eval"
+    Replaces the simple AlertEvalStage with multi-dimensional scoring:
+      - AI severity (30%)
+      - Error frequency anomaly (25%)
+      - Business weight (25%)
+      - Core path bonus (10%)
+      - AI confidence (10%)
+
+    Outputs: P0/P1/P2 priority + notification action decisions.
+    Non-critical: fallback to "P1, always notify" if decision fails.
+    """
+
+    name = "priority_decision"
     is_critical = False
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
-        # Check for critical or warning severity results → fire alerts
-        alertable_results = [
-            r for r in ctx.analysis_results
-            if r.get("severity") in ("critical", "warning")
-            and r.get("confidence_score", 0) >= 0.5
-        ]
+        from logmind.domain.analysis.priority_engine import (
+            PriorityDecisionEngine,
+            PriorityFactors,
+        )
 
-        # Also include summary type results (fallback from parse stage)
-        summary_results = [
-            r for r in ctx.analysis_results
-            if r.get("result_type") == "summary"
-        ]
+        engine = PriorityDecisionEngine()
 
-        all_alertable = alertable_results or summary_results or ctx.analysis_results
+        # Determine top severity and confidence from analysis results
+        top_severity = "info"
+        top_confidence = 0.5
+        unique_errors = set()
 
-        if all_alertable:
-            ctx.alerts_fired = all_alertable
-            logger.warning(
-                "alerts_detected",
-                count=len(all_alertable),
-                task_id=ctx.task_id,
-            )
+        for r in ctx.analysis_results:
+            sev = r.get("severity", "info")
+            if self._severity_rank(sev) > self._severity_rank(top_severity):
+                top_severity = sev
+            conf = r.get("confidence_score", 0.5)
+            if conf > top_confidence:
+                top_confidence = conf
+            # Count unique error types from result_type
+            if r.get("result_type") in ("anomaly", "root_cause"):
+                unique_errors.add(r.get("content", "")[:80])
+
+        # Get error frequency from log metadata (if available)
+        current_errors = ctx.log_count
+        baseline_errors = ctx.log_metadata.get("baseline_error_count", 0)
+        # If no baseline, assume current is 1x (neutral)
+        if baseline_errors == 0:
+            baseline_errors = max(current_errors, 1)
+
+        factors = PriorityFactors(
+            ai_severity=top_severity,
+            confidence=top_confidence,
+            current_error_count=current_errors,
+            baseline_error_count=baseline_errors,
+            business_weight=ctx.business_weight,
+            is_core_path=ctx.is_core_path,
+            estimated_dau=ctx.estimated_dau,
+            log_count=ctx.log_count,
+            has_stack_traces=ctx.has_stack_traces,
+            unique_error_types=max(len(unique_errors), 1),
+        )
+
+        decision = engine.decide(
+            factors=factors,
+            night_policy=ctx.night_policy,
+            night_hours=ctx.night_hours,
+        )
+
+        # Store decision in context
+        ctx.priority_decision = {
+            "priority": decision.priority,
+            "score": decision.score,
+            "should_notify": decision.actions.should_notify,
+            "should_wake": decision.actions.should_wake,
+            "delay_until_morning": decision.actions.delay_until_morning,
+            "include_in_digest": decision.actions.include_in_digest,
+            "reason": decision.actions.reason,
+            "factors": decision.factors_summary,
+        }
+
+        # Populate alerts_fired for backward compatibility
+        # Only fire alerts if the decision says we should notify
+        if decision.actions.should_notify:
+            alertable_results = [
+                r for r in ctx.analysis_results
+                if r.get("severity") in ("critical", "warning", "error")
+                and r.get("confidence_score", 0) >= 0.4
+            ]
+            if not alertable_results:
+                alertable_results = ctx.analysis_results[:1]  # At least send summary
+
+            ctx.alerts_fired = alertable_results
+
+        logger.info(
+            "priority_decision_result",
+            priority=decision.priority,
+            score=decision.score,
+            should_notify=decision.actions.should_notify,
+            reason=decision.actions.reason,
+            task_id=ctx.task_id,
+        )
 
         return ctx
+
+    @staticmethod
+    def _severity_rank(severity: str) -> int:
+        return {"info": 0, "warning": 1, "error": 2, "critical": 3}.get(severity, 0)
 
 
 # ── Stage 8: Persist ─────────────────────────────────────

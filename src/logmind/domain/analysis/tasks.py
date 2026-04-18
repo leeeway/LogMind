@@ -58,13 +58,13 @@ async def _execute_analysis(task_id: str):
     from logmind.core.database import get_db_context
     from logmind.domain.analysis.models import LogAnalysisTask
     from logmind.domain.analysis.pipeline import (
-        AlertEvalStage,
         AnalysisPipeline,
         LogFetchStage,
         LogPreprocessStage,
         LogQualityFilterStage,
         PersistStage,
         PipelineContext,
+        PriorityDecisionStage,
         PromptBuildStage,
         ResultParseStage,
     )
@@ -112,13 +112,13 @@ async def _execute_analysis(task_id: str):
         stages = [
             LogFetchStage(log_service),
             LogPreprocessStage(),
-            LogQualityFilterStage(),            # Layer 0: Smart quality filter (removes INFO noise)
-            ErrorFingerprintStage(),             # Layer 1: Fast MD5 fingerprint dedup
+            LogQualityFilterStage(),            # Layer 0: Smart quality filter
+            ErrorFingerprintStage(),             # Layer 1: Fast MD5 dedup
             SemanticDedupStage(),                # Layer 2: Vector semantic dedup
             PromptBuildStage(prompt_engine, prompt_repo),
             AgentInferenceStage(provider_manager),
             ResultParseStage(),
-            AlertEvalStage(),
+            PriorityDecisionStage(),             # P0/P1/P2 priority decision
             PersistStage(),
         ]
     else:
@@ -152,6 +152,12 @@ async def _execute_analysis(task_id: str):
         extra_filters=query_params.get("extra_filters", {}),
         provider_config_id=task.provider_config_id or "",
         prompt_template_id=task.prompt_template_id or "",
+        # Priority Decision Engine config from BusinessLine
+        business_weight=biz.business_weight,
+        is_core_path=biz.is_core_path,
+        estimated_dau=biz.estimated_dau,
+        night_policy=biz.night_policy,
+        night_hours=biz.night_hours,
     )
 
     # 5. Execute pipeline
@@ -215,9 +221,35 @@ async def _execute_analysis(task_id: str):
                     task.error_message = "; ".join(ctx.errors)
                 await session.flush()
 
-            # Fire AI analysis alerts (with aggregation)
-            if ctx.alerts_fired:
+            # Fire alerts based on priority decision
+            priority = ctx.priority_decision.get("priority", "P1")
+            should_notify = ctx.priority_decision.get("should_notify", True)
+            delay_morning = ctx.priority_decision.get("delay_until_morning", False)
+            reason = ctx.priority_decision.get("reason", "")
+
+            if should_notify and ctx.alerts_fired:
+                logger.info(
+                    "sending_priority_alert",
+                    priority=priority,
+                    reason=reason,
+                    task_id=ctx.task_id,
+                )
                 await _send_ai_alerts(ctx, webhook_url)
+            elif delay_morning:
+                logger.info(
+                    "alert_delayed_to_morning",
+                    priority=priority,
+                    reason=reason,
+                    task_id=ctx.task_id,
+                )
+                # P1/P2 at night — stored for morning digest
+            else:
+                logger.info(
+                    "alert_suppressed",
+                    priority=priority,
+                    reason=reason,
+                    task_id=ctx.task_id,
+                )
 
             # Phase 3: Index analysis conclusions into vector store for future dedup
             if ctx.analysis_results and not ctx.semantic_dedup_hit:
@@ -296,6 +328,13 @@ async def _send_ai_alerts(ctx, webhook_url: str):
     for alert in ctx.alerts_fired:
         severity = alert.get("severity", "warning")
         content = alert.get("content", "")
+
+        # Prepend priority label to alert content
+        priority = ctx.priority_decision.get("priority", "P1")
+        score = ctx.priority_decision.get("score", 0)
+        priority_icons = {"P0": "🔴", "P1": "🟡", "P2": "🟢"}
+        priority_label = f"{priority_icons.get(priority, '')} [{priority}|{score}分]"
+        content = f"{priority_label} {content}"
 
         # Check aggregation window
         should_send, agg_count = await alert_aggregator.should_send(
