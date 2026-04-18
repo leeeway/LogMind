@@ -283,12 +283,17 @@ sequenceDiagram
 | **告警通知** | 企业微信 / 钉钉 / 飞书 Webhook | ✅ |
 | | 模板化通知 (3 种场景) | ✅ |
 | | 业务线独立 Webhook URL | ✅ |
+| | 🆕 告警智能聚合 (Redis 窗口去重) | ✅ |
+| | 🆕 每日/每周分析报告推送 | ✅ |
+| **自学习** | 🆕 分析结论反馈 API (✅有帮助 / ❌不准确) | ✅ |
 | **平台能力** | 多租户隔离 | ✅ |
 | | JWT 认证 + 角色鉴权 | ✅ |
 | | API Key Fernet 加密存储 | ✅ |
 | | Celery Beat 定时巡检 | ✅ |
-| | 🆕 Fan-out 多业务线并行巡检 | ✅ |
+| | Fan-out 多业务线并行巡检 | ✅ |
 | | 巡检冷却控制 | ✅ |
+| | 🆕 Agent 安全保护 (Token上限+连续失败退出) | ✅ |
+| | 🆕 Celery 任务超时保护 (5分钟) | ✅ |
 
 ---
 
@@ -308,6 +313,8 @@ LogMind 内置多层 Token 消耗控制机制，通过 `.env` 配置：
 | `ANALYSIS_EMBEDDING_CACHE_TTL_SECONDS` | `3600` | 🆕 Embedding 向量 Redis 缓存 TTL |
 | `ANALYSIS_AGENT_ENABLED` | `true` | 是否启用 Agent 多步推理 |
 | `ANALYSIS_AGENT_MAX_STEPS` | `5` | Agent 最大工具调用步数 |
+| `ANALYSIS_AGENT_MAX_TOKENS` | `30000` | 🆕 Agent 单次分析 Token 消耗上限 |
+| `ANALYSIS_TASK_TIMEOUT` | `300` | 🆕 Celery 任务软超时 (秒) |
 
 > **关闭 Agent 不影响分析功能**，只影响分析深度。设置 `ANALYSIS_AGENT_ENABLED=false` 可立即降低 Token 消耗 30-50%。  
 > **向量语义去重**可单独开关，不影响 MD5 指纹去重。两层级联兼顾速度和精度。
@@ -513,6 +520,7 @@ docker-compose --env-file .env.production up -d --build
 | `PUT` | `/api/v1/business-lines/{id}` | 更新业务线（可单独切换 AI 开关） |
 | `POST` | `/api/v1/analysis/tasks` | 手动触发分析任务 |
 | `GET` | `/api/v1/analysis/tasks/{id}` | 获取分析任务结果 |
+| `PUT` | `/api/v1/analysis/results/{id}/feedback` | 🆕 提交分析结论反馈 (自学习) |
 | `POST` | `/api/v1/providers` | 注册 AI 模型提供商 |
 | `POST` | `/api/v1/alerts/rules` | 创建告警规则 |
 | `GET` | `/api/v1/alerts/history` | 查看告警历史 |
@@ -632,7 +640,7 @@ LogMind/
 - [x] Redis 错误指纹去重 (Layer 1)
 - [x] RAG 知识库检索 (ES 原生向量 + Agent Tool)
 
-### v1.2 — 智能去重 + 高并发扩展 ✅ ← 当前
+### v1.2 — 智能去重 + 高并发扩展 
 
 - [x] 向量语义去重 (Layer 2 — ES KNN)
 - [x] 分析记忆自动回写 (Layer 3 — 闭环)
@@ -642,7 +650,15 @@ LogMind/
 - [x] Fan-out 多业务线并行巡检
 - [x] Knowledge Base 完整 CRUD API
 
-### v1.3 — 近期计划
+### v1.3 — 安全加固 + 运维增强 ✅ ← 当前
+
+- [x] Agent 循环安全加固 (连续失败退出 + Token 上限)
+- [x] Celery 任务超时保护 (5 分钟)
+- [x] 告警智能聚合 (Redis 窗口 5 分钟去重)
+- [x] 每日/每周分析报告推送
+- [x] 分析结论反馈 API (自学习闭环)
+
+### v1.4 — 近期计划
 
 - [ ] Web 管理界面 (Vue.js / React Dashboard)
 - [ ] 告警规则引擎增强 (关键词 / 正则 / 阈值触发)

@@ -25,13 +25,26 @@ logger = get_logger(__name__)
     max_retries=2,
     default_retry_delay=60,
     acks_late=True,
+    soft_time_limit=300,  # 5 minutes — raises SoftTimeLimitExceeded
+    time_limit=360,       # 6 minutes — hard kill
 )
 def run_analysis_task(self, task_id: str):
     """
     Async Celery task: Execute a log analysis pipeline.
+
+    Time limits:
+      - soft_time_limit=300s: raises SoftTimeLimitExceeded, allowing graceful cleanup
+      - time_limit=360s: hard kill if soft limit handler hangs
     """
+    from celery.exceptions import SoftTimeLimitExceeded
+
     logger.info("celery_task_started", task_id=task_id)
-    asyncio.run(_execute_analysis(task_id))
+    try:
+        asyncio.run(_execute_analysis(task_id))
+    except SoftTimeLimitExceeded:
+        logger.error("celery_task_timeout", task_id=task_id)
+        # Mark task as failed in DB
+        asyncio.run(_mark_task_timeout(task_id))
 
 
 async def _execute_analysis(task_id: str):
@@ -202,7 +215,7 @@ async def _execute_analysis(task_id: str):
                     task.error_message = "; ".join(ctx.errors)
                 await session.flush()
 
-            # Fire AI analysis alerts
+            # Fire AI analysis alerts (with aggregation)
             if ctx.alerts_fired:
                 await _send_ai_alerts(ctx, webhook_url)
 
@@ -276,10 +289,32 @@ async def _execute_analysis(task_id: str):
 
 
 async def _send_ai_alerts(ctx, webhook_url: str):
-    """Send AI analysis alert notifications for critical findings."""
+    """Send AI analysis alert notifications for critical findings (with aggregation)."""
+    from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_ai_alert
 
     for alert in ctx.alerts_fired:
+        severity = alert.get("severity", "warning")
+        content = alert.get("content", "")
+
+        # Check aggregation window
+        should_send, agg_count = await alert_aggregator.should_send(
+            business_line_id=ctx.business_line_id,
+            severity=severity,
+            error_signature=ctx.error_signature,
+            alert_summary=content[:200],
+        )
+
+        if not should_send:
+            logger.info(
+                "ai_alert_aggregated",
+                count=agg_count,
+                biz=ctx.business_line_name,
+                severity=severity,
+                task_id=ctx.task_id,
+            )
+            continue
+
         try:
             await notify_ai_alert(
                 business_line=ctx.business_line_name,
@@ -287,8 +322,8 @@ async def _send_ai_alerts(ctx, webhook_url: str):
                 branch=ctx.branch,
                 host_name=ctx.host_name,
                 language=ctx.language,
-                severity=alert.get("severity", "warning"),
-                content=alert.get("content", ""),
+                severity=severity,
+                content=content,
                 task_id=ctx.task_id,
                 log_count=ctx.log_count,
                 webhook_url=webhook_url or None,
@@ -298,8 +333,26 @@ async def _send_ai_alerts(ctx, webhook_url: str):
 
 
 async def _send_error_log_notification(ctx, webhook_url: str):
-    """Send direct error log notification (AI disabled mode)."""
+    """Send direct error log notification (AI disabled mode), with aggregation."""
+    from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_error_logs
+
+    # Check aggregation window
+    should_send, agg_count = await alert_aggregator.should_send(
+        business_line_id=ctx.business_line_id,
+        severity="error",
+        error_signature=None,  # No AI signature in AI-off mode
+        alert_summary=ctx.processed_logs[:200] if ctx.processed_logs else "",
+    )
+
+    if not should_send:
+        logger.info(
+            "error_log_alert_aggregated",
+            count=agg_count,
+            biz=ctx.business_line_name,
+            task_id=ctx.task_id,
+        )
+        return
 
     # Build a concise error summary from preprocessed logs
     error_summary = ctx.processed_logs
@@ -363,3 +416,22 @@ async def _cleanup_old_tasks():
             delete(LogAnalysisTask).where(LogAnalysisTask.created_at < cutoff)
         )
         logger.info("old_tasks_cleaned", cutoff=cutoff.isoformat())
+
+
+async def _mark_task_timeout(task_id: str):
+    """Mark a task as failed due to Celery soft time limit exceeded."""
+    from logmind.core.database import get_db_context
+    from logmind.domain.analysis.models import LogAnalysisTask
+
+    try:
+        async with get_db_context() as session:
+            task = await session.get(LogAnalysisTask, task_id)
+            if task:
+                task.status = "failed"
+                task.error_message = "分析超时: 任务执行超过 5 分钟被终止"
+                task.completed_at = datetime.now(timezone.utc)
+                await session.flush()
+                logger.info("task_marked_timeout", task_id=task_id)
+    except Exception as e:
+        logger.error("mark_timeout_failed", task_id=task_id, error=str(e))
+

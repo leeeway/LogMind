@@ -60,4 +60,16 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=3, minute=0),
         "options": {"queue": "analysis"},
     },
+    # Daily analysis digest report — every day at 9:00 AM
+    "daily-digest": {
+        "task": "logmind.domain.alert.tasks.send_daily_digest",
+        "schedule": crontab(hour=9, minute=0),
+        "options": {"queue": "alert"},
+    },
+    # Weekly analysis digest report — Monday at 9:00 AM
+    "weekly-digest": {
+        "task": "logmind.domain.alert.tasks.send_weekly_digest",
+        "schedule": crontab(hour=9, minute=0, day_of_week=1),
+        "options": {"queue": "alert"},
+    },
 }

@@ -2,6 +2,10 @@
 Analysis Domain — ORM Models
 
 Models: LogAnalysisTask, AnalysisResult
+
+AnalysisResult includes feedback fields for self-learning:
+  feedback_score: +1 (helpful) / -1 (inaccurate) / None (no feedback)
+  feedback_comment: Optional text from operator
 """
 
 from datetime import datetime
@@ -66,6 +70,12 @@ class AnalysisResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Structured data (JSON text)
     structured_data: Mapped[str] = mapped_column(Text, default="{}")
     source_log_refs: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
+
+    # Self-learning feedback from operators
+    feedback_score: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None
+    )  # +1 = helpful, -1 = inaccurate, None = no feedback
+    feedback_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     task = relationship("LogAnalysisTask", back_populates="results")

@@ -97,3 +97,43 @@ async def get_analysis_task(task_id: str, session: DBSession, user: CurrentUser)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return AnalysisTaskResponse.model_validate(task)
+
+
+@router.put("/results/{result_id}/feedback", response_model=MessageResponse)
+async def submit_result_feedback(
+    result_id: str,
+    session: DBSession,
+    user: CurrentUser,
+    score: int = 1,
+    comment: str | None = None,
+):
+    """
+    Submit feedback on an analysis result for self-learning.
+
+    - score=1: This analysis was helpful/accurate ✅
+    - score=-1: This analysis was inaccurate/unhelpful ❌
+
+    Feedback is used to improve future analysis quality:
+    - Positive feedback reinforces the analysis memory
+    - Negative feedback flags the historical conclusion for review
+    """
+    from logmind.domain.analysis.models import AnalysisResult
+
+    result = await session.get(AnalysisResult, result_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Analysis result not found")
+
+    # Verify the result belongs to the user's tenant
+    task = await task_repo.get_by_id(session, result.task_id, tenant_id=user.tenant_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Analysis result not found")
+
+    if score not in (-1, 0, 1):
+        raise HTTPException(status_code=400, detail="Score must be -1, 0, or 1")
+
+    result.feedback_score = score
+    result.feedback_comment = comment
+    await session.flush()
+
+    return MessageResponse(message=f"Feedback recorded: score={score}")
+
