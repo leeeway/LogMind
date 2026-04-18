@@ -444,6 +444,13 @@ class LogService:
                     },
                     "created_at": {"type": "date"},
                     "ttl_expire_at": {"type": "date"},
+                    # ── Known Issue Library fields ──────────
+                    "status": {"type": "keyword"},      # open / resolved / ignored
+                    "hit_count": {"type": "integer"},    # cumulative match count
+                    "first_seen": {"type": "date"},      # first time this issue was seen
+                    "last_seen": {"type": "date"},        # last time this issue was matched
+                    "resolved_at": {"type": "date"},      # when issue was marked resolved
+                    "feedback_quality": {"type": "keyword"},  # verified / poor / null
                 }
             }
             await self.es.indices.create(index=index_name, mappings=mapping)
@@ -473,7 +480,7 @@ class LogService:
         KNN search for historically analyzed errors matching the given embedding.
 
         Returns matches above min_score with their analysis conclusions.
-        Filters by business_line_id and excludes expired records.
+        Filters by business_line_id, excludes expired and poor-quality records.
         """
         index_name = "logmind-analysis-vectors"
         exists = await self.es.indices.exists(index=index_name)
@@ -496,11 +503,19 @@ class LogService:
                             "must": [
                                 {"term": {"business_line_id": business_line_id}},
                                 {"range": {"ttl_expire_at": {"gte": now_iso}}},
-                            ]
+                            ],
+                            "must_not": [
+                                # Exclude entries marked as poor quality by feedback
+                                {"term": {"feedback_quality": "poor"}},
+                            ],
                         }
                     }
                 },
-                source=["analysis_content", "severity", "error_signature", "task_id", "created_at"],
+                source=[
+                    "analysis_content", "severity", "error_signature", "task_id",
+                    "created_at", "status", "hit_count", "first_seen", "last_seen",
+                    "resolved_at", "feedback_quality",
+                ],
                 min_score=min_score,
             )
             hits = resp.get("hits", {}).get("hits", [])
@@ -508,17 +523,91 @@ class LogService:
             for hit in hits:
                 source = hit["_source"]
                 results.append({
+                    "doc_id": hit["_id"],
                     "score": hit["_score"],
                     "analysis_content": source.get("analysis_content", ""),
                     "severity": source.get("severity", "info"),
                     "error_signature": source.get("error_signature", ""),
                     "task_id": source.get("task_id", ""),
                     "created_at": source.get("created_at", ""),
+                    "status": source.get("status", "open"),
+                    "hit_count": source.get("hit_count", 1),
+                    "first_seen": source.get("first_seen", ""),
+                    "last_seen": source.get("last_seen", ""),
+                    "resolved_at": source.get("resolved_at"),
+                    "feedback_quality": source.get("feedback_quality"),
                 })
             return results
         except Exception as e:
             logger.error("knn_search_analysis_history_failed", error=str(e))
             return []
+
+    async def update_analysis_vector_hit(self, doc_id: str, ttl_hours: int = 168) -> bool:
+        """
+        Update a known issue's hit_count and last_seen on match.
+        Also renews TTL to prevent expiration of frequently-seen issues.
+        """
+        index_name = "logmind-analysis-vectors"
+        try:
+            from datetime import datetime, timedelta, timezone
+            now = datetime.now(timezone.utc)
+            new_expire = now + timedelta(hours=ttl_hours)
+
+            await self.es.update(
+                index=index_name,
+                id=doc_id,
+                body={
+                    "script": {
+                        "source": """
+                            ctx._source.hit_count = (ctx._source.hit_count ?: 0) + 1;
+                            ctx._source.last_seen = params.now;
+                            ctx._source.ttl_expire_at = params.new_expire;
+                        """,
+                        "params": {
+                            "now": now.isoformat(),
+                            "new_expire": new_expire.isoformat(),
+                        },
+                    }
+                },
+            )
+            return True
+        except Exception as e:
+            logger.warning("analysis_vector_hit_update_failed", doc_id=doc_id, error=str(e))
+            return False
+
+    async def update_analysis_vector_status(
+        self, doc_id: str, status: str, feedback_quality: str | None = None
+    ) -> bool:
+        """
+        Update a known issue's status or feedback quality.
+
+        Used by feedback API to mark issues as verified/poor.
+        """
+        index_name = "logmind-analysis-vectors"
+        try:
+            from datetime import datetime, timezone
+            update_fields = {"status": status}
+            if status == "resolved":
+                update_fields["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            if feedback_quality is not None:
+                update_fields["feedback_quality"] = feedback_quality
+
+            # If verified, extend TTL to 365 days (effectively permanent)
+            if feedback_quality == "verified":
+                from datetime import timedelta
+                update_fields["ttl_expire_at"] = (
+                    datetime.now(timezone.utc) + timedelta(days=365)
+                ).isoformat()
+
+            await self.es.update(
+                index=index_name,
+                id=doc_id,
+                body={"doc": update_fields},
+            )
+            return True
+        except Exception as e:
+            logger.warning("analysis_vector_status_update_failed", doc_id=doc_id, error=str(e))
+            return False
 
     # ── Helpers ──────────────────────────────────────────
 

@@ -977,6 +977,23 @@ class PriorityDecisionStage(PipelineStage):
             "factors": decision.factors_summary,
         }
 
+        # ── Regression Override ─────────────────────────
+        # If SemanticDedupStage detected a regression (resolved issue reappeared),
+        # force-upgrade to P0 regardless of scoring result.
+        if ctx.log_metadata.get("is_regression"):
+            ctx.priority_decision["priority"] = "P0"
+            ctx.priority_decision["should_notify"] = True
+            ctx.priority_decision["should_wake"] = True
+            ctx.priority_decision["reason"] = (
+                f"🔄 [回归] 已修复的问题再次出现 — 自动升级为 P0 "
+                f"(原始评分: {decision.score})"
+            )
+            logger.warning(
+                "regression_priority_upgrade",
+                original_priority=decision.priority,
+                task_id=ctx.task_id,
+            )
+
         # Populate alerts_fired for backward compatibility
         # Only fire alerts if the decision says we should notify
         if decision.actions.should_notify:

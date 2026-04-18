@@ -223,19 +223,74 @@ class SemanticDedupStage(PipelineStage):
 
             if matches:
                 match = matches[0]
+                doc_id = match.get("doc_id", "")
+                match_status = match.get("status", "open")
+                hit_count = match.get("hit_count", 1)
+                is_regression = match_status == "resolved"
+
                 logger.info(
                     "semantic_dedup_hit",
                     score=match["score"],
                     historical_task=match.get("task_id", "")[:8],
+                    status=match_status,
+                    hit_count=hit_count,
+                    is_regression=is_regression,
                     task_id=ctx.task_id,
                 )
 
+                # ── Regression Detection ─────────────────
+                # If the issue was marked as resolved but re-appeared,
+                # it's a REGRESSION — don't reuse stale conclusions,
+                # force full re-analysis and flag for P0 upgrade.
+                if is_regression:
+                    logger.warning(
+                        "regression_detected",
+                        historical_task=match.get("task_id", "")[:8],
+                        resolved_at=match.get("resolved_at", ""),
+                        task_id=ctx.task_id,
+                    )
+                    ctx.semantic_dedup_hit = False
+                    ctx.log_metadata["is_regression"] = True
+                    ctx.log_metadata["regression_historical_task"] = match.get("task_id", "")
+                    ctx.log_metadata["regression_resolved_at"] = match.get("resolved_at", "")
+
+                    # Update the vector entry: reopen + increment hit count
+                    try:
+                        await log_service.update_analysis_vector_hit(
+                            doc_id=doc_id,
+                            ttl_hours=settings.analysis_semantic_dedup_ttl_hours,
+                        )
+                        await log_service.update_analysis_vector_status(
+                            doc_id=doc_id, status="open"
+                        )
+                    except Exception:
+                        pass
+                    # Continue to full Agent analysis (don't skip)
+                    return ctx
+
+                # ── Normal Hit: Reuse historical conclusions ──
+                # Update hit_count + last_seen + renew TTL
+                try:
+                    await log_service.update_analysis_vector_hit(
+                        doc_id=doc_id,
+                        ttl_hours=settings.analysis_semantic_dedup_ttl_hours,
+                    )
+                except Exception as e:
+                    logger.warning("hit_count_update_failed", error=str(e))
+
                 # Reuse historical analysis conclusions
+                verified_label = ""
+                if match.get("feedback_quality") == "verified":
+                    verified_label = " ✅ 已验证"
+
                 ctx.analysis_results = [{
                     "result_type": "root_cause",
                     "content": (
-                        f"[语义去重命中] 本次错误模式与历史分析任务 {match.get('task_id', '')[:8]}... "
-                        f"高度相似（相似度: {match['score']:.2f}），以下为历史分析结论：\n\n"
+                        f"[已知问题命中{verified_label}] 本次错误模式与历史分析 "
+                        f"{match.get('task_id', '')[:8]}... "
+                        f"高度相似（相似度: {match['score']:.2f}，"
+                        f"累计出现: {hit_count + 1} 次），"
+                        f"以下为历史分析结论：\n\n"
                         f"{match['analysis_content']}"
                     ),
                     "severity": match.get("severity", "warning"),
@@ -244,6 +299,9 @@ class SemanticDedupStage(PipelineStage):
                         "dedup_source": "semantic",
                         "historical_task_id": match.get("task_id", ""),
                         "similarity_score": match["score"],
+                        "hit_count": hit_count + 1,
+                        "status": match_status,
+                        "feedback_quality": match.get("feedback_quality"),
                     }, ensure_ascii=False),
                 }]
                 ctx.semantic_dedup_hit = True
@@ -251,12 +309,17 @@ class SemanticDedupStage(PipelineStage):
                 ctx.log_metadata["semantic_dedup_hit"] = True
                 ctx.log_metadata["semantic_dedup_score"] = match["score"]
                 ctx.log_metadata["semantic_dedup_historical_task"] = match.get("task_id", "")
+                ctx.log_metadata["known_issue_hit_count"] = hit_count + 1
+                ctx.log_metadata["is_regression"] = False
             else:
                 logger.info("semantic_dedup_miss", task_id=ctx.task_id)
                 ctx.semantic_dedup_hit = False
+                ctx.log_metadata["is_regression"] = False
+                ctx.log_metadata["is_first_seen"] = True
 
         except Exception as e:
             # Non-critical: if anything fails, let all logs through
             logger.warning("semantic_dedup_error", error=str(e), task_id=ctx.task_id)
 
         return ctx
+

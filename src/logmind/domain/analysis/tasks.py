@@ -329,12 +329,24 @@ async def _send_ai_alerts(ctx, webhook_url: str):
         severity = alert.get("severity", "warning")
         content = alert.get("content", "")
 
-        # Prepend priority label to alert content
+        # Prepend priority + issue status labels to alert content
         priority = ctx.priority_decision.get("priority", "P1")
         score = ctx.priority_decision.get("score", 0)
         priority_icons = {"P0": "🔴", "P1": "🟡", "P2": "🟢"}
         priority_label = f"{priority_icons.get(priority, '')} [{priority}|{score}分]"
-        content = f"{priority_label} {content}"
+
+        # Issue status label: first-seen / regression / known-issue
+        issue_label = ""
+        if ctx.log_metadata.get("is_regression"):
+            resolved_at = ctx.log_metadata.get("regression_resolved_at", "")[:10]
+            issue_label = f"🔄 [回归] 上次修复于 {resolved_at} | "
+        elif ctx.log_metadata.get("is_first_seen"):
+            issue_label = "🆕 [首次发现] "
+        elif ctx.log_metadata.get("known_issue_hit_count", 0) > 1:
+            hit_count = ctx.log_metadata["known_issue_hit_count"]
+            issue_label = f"📋 [已知问题|第{hit_count}次] "
+
+        content = f"{priority_label} {issue_label}{content}"
 
         # Check aggregation window
         should_send, agg_count = await alert_aggregator.should_send(

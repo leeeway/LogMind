@@ -60,6 +60,13 @@ async def _async_index_analysis(
             "embedding": vector,
             "created_at": now.isoformat(),
             "ttl_expire_at": expire_at.isoformat(),
+            # Known Issue Library fields
+            "status": "open",
+            "hit_count": 1,
+            "first_seen": now.isoformat(),
+            "last_seen": now.isoformat(),
+            "resolved_at": None,
+            "feedback_quality": None,
         }
 
         # 3. Insert into ES

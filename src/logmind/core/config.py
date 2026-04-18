@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     # ── Semantic Dedup (Phase 3) ──────────────────────────
     analysis_semantic_dedup_enabled: bool = True
     analysis_semantic_dedup_threshold: float = 0.92
-    analysis_semantic_dedup_ttl_hours: int = 24
+    analysis_semantic_dedup_ttl_hours: int = 168  # 7 days (was 24h)
     analysis_embedding_cache_ttl_seconds: int = 3600
 
     @field_validator("analysis_severity_threshold")

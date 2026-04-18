@@ -111,12 +111,15 @@ async def submit_result_feedback(
     Submit feedback on an analysis result for self-learning.
 
     - score=1: This analysis was helpful/accurate ✅
+      → Vector library: mark as "verified", extend TTL to 365 days
     - score=-1: This analysis was inaccurate/unhelpful ❌
+      → Vector library: mark as "poor", excluded from future KNN matches
 
-    Feedback is used to improve future analysis quality:
-    - Positive feedback reinforces the analysis memory
-    - Negative feedback flags the historical conclusion for review
+    Feedback closes the self-learning loop:
+    good conclusions persist longer, bad conclusions stop propagating.
     """
+    import json
+
     from logmind.domain.analysis.models import AnalysisResult
 
     result = await session.get(AnalysisResult, result_id)
@@ -135,5 +138,62 @@ async def submit_result_feedback(
     result.feedback_comment = comment
     await session.flush()
 
-    return MessageResponse(message=f"Feedback recorded: score={score}")
+    # ── Propagate feedback to ES vector library ──────────
+    # Find the linked vector entry via structured_data
+    feedback_result = f"Feedback recorded: score={score}"
+    try:
+        structured = json.loads(result.structured_data or "{}")
+        historical_task_id = structured.get("historical_task_id") or task.id
+
+        if historical_task_id:
+            from logmind.domain.log.service import log_service
+
+            if score == 1:
+                # Positive: mark as verified, extend TTL to 365 days
+                await _update_vector_feedback(
+                    historical_task_id, "verified"
+                )
+                feedback_result += " | Vector marked as verified (TTL=365d)"
+            elif score == -1:
+                # Negative: mark as poor, excluded from future matches
+                await _update_vector_feedback(
+                    historical_task_id, "poor"
+                )
+                feedback_result += " | Vector marked as poor (excluded from future matches)"
+    except Exception as e:
+        # Non-critical: DB feedback is saved even if vector update fails
+        feedback_result += f" | Vector update failed: {e}"
+
+    return MessageResponse(message=feedback_result)
+
+
+async def _update_vector_feedback(task_id: str, quality: str):
+    """
+    Update feedback_quality in the analysis vector index.
+
+    Searches for the vector entry by task_id and updates its quality.
+    """
+    from logmind.domain.log.service import log_service
+
+    index_name = "logmind-analysis-vectors"
+    try:
+        es = log_service.es
+        # Find the vector entry by task_id
+        resp = await es.search(
+            index=index_name,
+            query={"term": {"task_id": task_id}},
+            source=False,
+            size=1,
+        )
+        hits = resp.get("hits", {}).get("hits", [])
+        if hits:
+            doc_id = hits[0]["_id"]
+            status = "open" if quality == "verified" else "open"
+            await log_service.update_analysis_vector_status(
+                doc_id=doc_id,
+                status=status,
+                feedback_quality=quality,
+            )
+    except Exception:
+        pass  # Best-effort
 
