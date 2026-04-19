@@ -483,6 +483,7 @@ class LogQualityFilterStage(PipelineStage):
     Catches false-positive logs that passed ES query but are actually INFO/DEBUG:
     - Validates message-level severity against file-level severity
     - Detects business JSON response noise
+    - Detects "shallow errors": log.error() used for non-error content
     - Updates processed_logs and log_count after filtering
 
     Non-critical: if filtering fails, the original logs pass through unchanged.
@@ -516,6 +517,8 @@ class LogQualityFilterStage(PipelineStage):
         re.compile(r'"status"\s*:\s*true', re.IGNORECASE),
         re.compile(r'"success"\s*:\s*true', re.IGNORECASE),
         re.compile(r'"errorMessage"\s*:\s*"[^"]*成功', re.IGNORECASE),
+        re.compile(r'"message"\s*:\s*"[^"]*成功', re.IGNORECASE),
+        re.compile(r'获取成功', re.IGNORECASE),
     ]
 
     # Severity weight for comparison  
@@ -524,6 +527,30 @@ class LogQualityFilterStage(PipelineStage):
         "WARN": 3, "WARNING": 3,
         "ERROR": 4, "FATAL": 5, "CRITICAL": 5,
     }
+
+    # ── Real error indicators ────────────────────────────────
+    # If an ERROR-level log contains NONE of these, it's likely a misused
+    # log.error() call (e.g. "限制缓存 key:xxx,获取结果:xxx") and should
+    # be de-prioritized.
+    _REAL_ERROR_INDICATORS = [
+        # Exception class names (Java/C#)
+        re.compile(r'[A-Z]\w*(?:Exception|Error|Fault|Failure)\b'),
+        # Stack trace markers
+        re.compile(r'\bat\s+[\w.$]+\([\w.]+:\d+\)'),       # Java: at com.xxx.Class(File.java:123)
+        re.compile(r'\bat\s+[\w.]+\s+in\s+\S+:line\s+\d+'),  # C#: at Xxx in File.cs:line 96
+        # HTTP error status codes
+        re.compile(r'\b[45]\d{2}\b'),                        # 400, 404, 500, 503, etc.
+        # Failure/crash keywords
+        re.compile(
+            r'(?i)\b(?:fail(?:ed|ure)?|crash|panic|abort|killed|refused|rejected'
+            r'|timeout|timed?\s*out|unreachable|connection\s+reset|broken\s+pipe'
+            r'|denied|forbidden|unauthorized|overflow|deadlock|OOM|OutOfMemory'
+            r'|fatal|null\s*pointer|segfault|core\s+dump)\b'
+        ),
+        # C# specific
+        re.compile(r'--- End of (?:inner )?exception'),
+        re.compile(r'System\.\w+Exception'),
+    ]
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         if not ctx.processed_logs or not ctx.raw_logs:
@@ -535,6 +562,7 @@ class LogQualityFilterStage(PipelineStage):
         filtered_lines = []
         total_original = 0
         filtered_out = 0
+        shallow_error_count = 0
 
         for line in ctx.processed_logs.split("\n"):
             total_original += 1
@@ -554,6 +582,13 @@ class LogQualityFilterStage(PipelineStage):
                 filtered_out += 1
                 continue
 
+            # 3. Check for "shallow error" — log.error() with no real error content
+            #    e.g. log.error("限制缓存 key:{},获取结果:{}", key, limit)
+            if threshold_rank >= 4 and self._is_shallow_error(line):
+                filtered_out += 1
+                shallow_error_count += 1
+                continue
+
             filtered_lines.append(line)
 
         if filtered_out > 0:
@@ -562,12 +597,14 @@ class LogQualityFilterStage(PipelineStage):
                 task_id=ctx.task_id,
                 original_lines=total_original,
                 filtered_out=filtered_out,
+                shallow_errors=shallow_error_count,
                 remaining=len(filtered_lines),
             )
 
             ctx.processed_logs = "\n".join(filtered_lines)
             ctx.log_metadata["quality_filtered"] = filtered_out
             ctx.log_metadata["quality_remaining"] = len(filtered_lines)
+            ctx.log_metadata["quality_shallow_errors"] = shallow_error_count
 
             # If ALL logs were filtered out, no real errors remain
             if not filtered_lines or all(l.strip() == "" for l in filtered_lines):
@@ -576,7 +613,7 @@ class LogQualityFilterStage(PipelineStage):
                 logger.info(
                     "log_quality_filter_all_removed",
                     task_id=ctx.task_id,
-                    reason="All logs were INFO/DEBUG or business noise",
+                    reason="All logs were INFO/DEBUG, business noise, or shallow errors",
                 )
 
         return ctx
@@ -611,6 +648,35 @@ class LogQualityFilterStage(PipelineStage):
                 return True
 
         return False
+
+    def _is_shallow_error(self, line: str) -> bool:
+        """
+        Detect "shallow errors" — log.error() calls that log routine content.
+
+        Strategy: if the line is at ERROR level but contains ZERO real error
+        indicators (no exceptions, no stack traces, no failure keywords, no
+        HTTP error codes), it's likely a misused log.error().
+
+        Examples that should be filtered:
+          - log.error("限制缓存 key:{},获取结果:{}", key, limit)
+          - log.error("查询结果,账号：{},结果：{}", account, result)
+
+        Examples that should NOT be filtered:
+          - log.error("请求超时", e)  → contains "timeout" keyword
+          - log.error("NullPointerException: null")  → contains Exception class
+        """
+        # Only apply to lines that appear to be ERROR-level
+        level = self._extract_message_level(line)
+        if not level or level != "ERROR":
+            return False
+
+        # Check if ANY real error indicator is present
+        for pattern in self._REAL_ERROR_INDICATORS:
+            if pattern.search(line):
+                return False  # Has real error content → keep it
+
+        # ERROR level + no error indicators = shallow error → filter out
+        return True
 
 
 # ── Stage 4: Prompt Build ────────────────────────────────

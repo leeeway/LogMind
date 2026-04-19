@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 
 # ── Sensitive key names (case-insensitive, used in key-value pair detection) ──
 # These are generic field names that commonly appear across systems.
+# Derived from real production logs (tong-kernel, interface.security, actionv3).
 _SENSITIVE_KEYS = frozenset({
     # Authentication tokens
     "access_token", "accesstoken", "refresh_token", "refreshtoken",
@@ -38,13 +39,14 @@ _SENSITIVE_KEYS = frozenset({
     "mobile", "mobile_no", "mobileno", "cellphone", "tel",
     "id_card", "idcard", "id_number", "idnumber", "identity",
     "email", "mail", "e_mail",
-    # Device/user identifiers
+    # Account / user identifiers
+    "account", "account_no", "accountno",
+    "user_id", "userid", "member_id", "memberid",
     "device_id", "deviceid", "device_token", "devicetoken",
     "unique_id", "uniqueid", "uid", "openid", "unionid",
     "imei", "imsi", "mac_address", "macaddress",
     # Financial
     "bank_card", "bankcard", "card_no", "cardno",
-    "account_no", "accountno",
 })
 
 

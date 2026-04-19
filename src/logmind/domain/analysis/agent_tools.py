@@ -314,11 +314,15 @@ async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
 
     window = args.get("window_minutes", 5)
     size = min(args.get("size", 30), 50)
+    # Default to 'warning' severity to avoid pulling in INFO/DEBUG noise
+    # that often contains sensitive business data (SQL queries, tokens, etc.)
+    severity = args.get("severity", "warning")
 
     request = LogQueryRequest(
         index_pattern=index_pattern,
         time_from=ts - timedelta(minutes=window),
         time_to=ts + timedelta(minutes=window),
+        severity=severity,
         size=size,
     )
 
@@ -332,11 +336,13 @@ async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
             "level": log.level,
             "message": mask_sensitive(log.message[:500]),
             "domain": log.domain,
+            "filetype": log.filetype,
         })
 
     return json.dumps({
         "center_timestamp": ts.isoformat(),
         "window_minutes": window,
+        "severity_filter": severity,
         "total_hits": result.total,
         "logs": logs,
     }, ensure_ascii=False, default=str)
