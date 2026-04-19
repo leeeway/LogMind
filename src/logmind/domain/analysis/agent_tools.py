@@ -508,6 +508,7 @@ async def _exec_search_similar_incidents(args: dict, index_pattern: str) -> str:
 
 async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str) -> str:
     """Search error logs across other business lines in the same tenant."""
+    from logmind.domain.log.schemas import LogQueryRequest
     from logmind.domain.log.service import log_service
 
     keyword = args.get("keyword")
@@ -525,7 +526,8 @@ async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str
         current_patterns = [p.strip() for p in current_index_pattern.split(",")]
         other_indices = []
         for idx_info in all_indices:
-            idx_name = idx_info.get("index", "")
+            # A2 fix: list_indices returns ESIndexInfo objects, use .name attribute
+            idx_name = idx_info.name
             # Skip system/KB/vector indices
             if idx_name.startswith(".") or idx_name.startswith("logmind-"):
                 continue
@@ -552,31 +554,29 @@ async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str
         time_from = datetime.now(timezone.utc) - timedelta(minutes=minutes_back)
         time_to = datetime.now(timezone.utc)
 
-        # Use LogService to search
+        # A1 fix: search_logs requires LogQueryRequest, not kwargs
         svc = LogService()
-        results = await svc.search_logs(
+        request = LogQueryRequest(
             index_pattern=index_str,
-            keyword=keyword,
-            level="error",
             time_from=time_from,
             time_to=time_to,
+            query=keyword,
+            severity="error",
             size=10,
         )
+        result = await svc.search_logs(request)
 
-        if not results:
+        if not result.logs:
             return f"在其他 {len(search_indices)} 个服务中未发现与 '{keyword}' 相关的错误日志。"
 
-        # Format results with source index info
+        # Format results using LogQueryResponse.logs (LogEntry objects)
         formatted = [f"跨服务搜索结果（关键词: {keyword}，搜索范围: {len(search_indices)} 个服务索引）：\n"]
-        for i, hit in enumerate(results[:10]):
-            source = hit.get("_source", {})
-            idx = hit.get("_index", "unknown")
-            msg = source.get("message", "")[:200]
-            ts = source.get("@timestamp", "")
+        for i, log in enumerate(result.logs[:10]):
             formatted.append(
-                f"--- [{i+1}] 来源: {idx} ---\n"
-                f"时间: {ts}\n"
-                f"内容: {msg}\n"
+                f"--- [{i+1}] 来源: {log.domain or '未知'} ---\n"
+                f"时间: {log.timestamp}\n"
+                f"级别: {log.level}\n"
+                f"内容: {log.message[:200]}\n"
             )
 
         return "\n".join(formatted)

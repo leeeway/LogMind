@@ -69,6 +69,7 @@ async def _execute_analysis(task_id: str):
         ResultParseStage,
     )
     from logmind.domain.analysis.agent_stage import AgentInferenceStage
+    from logmind.domain.analysis.baseline_stage import ErrorBaselineStage
     from logmind.domain.analysis.fingerprint_stage import ErrorFingerprintStage
     from logmind.domain.analysis.semantic_dedup import SemanticDedupStage
     from logmind.domain.log.service import log_service
@@ -113,6 +114,7 @@ async def _execute_analysis(task_id: str):
             LogFetchStage(log_service),
             LogPreprocessStage(),
             LogQualityFilterStage(),            # Layer 0: Smart quality filter
+            ErrorBaselineStage(log_service),     # Historical baseline for frequency scoring
             ErrorFingerprintStage(),             # Layer 1: Fast MD5 dedup
             SemanticDedupStage(),                # Layer 2: Vector semantic dedup
             PromptBuildStage(prompt_engine, prompt_repo),

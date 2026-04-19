@@ -1,15 +1,18 @@
 """
-AI Analysis Pipeline — 8-Stage Log Analysis
+AI Analysis Pipeline — 11-Stage Log Analysis
 
 Stages:
-1. LogFetchStage     — Fetch logs from ES
-2. LogPreprocessStage — Clean, deduplicate, truncate, merge stack traces
-3. RAGRetrieveStage   — Retrieve relevant knowledge
-4. PromptBuildStage   — Assemble prompt from template
-5. AIInferenceStage   — Call AI provider
-6. ResultParseStage   — Parse AI output to structured results
-7. AlertEvalStage     — Evaluate alert rules
-8. PersistStage       — Save results to DB
+ 1. LogFetchStage         — Fetch logs from ES
+ 2. LogPreprocessStage    — Clean, deduplicate, truncate, merge stack traces
+ 3. LogQualityFilterStage — Filter false-positive INFO/noise logs
+ 4. ErrorBaselineStage    — Query historical error frequency baseline
+ 5. ErrorFingerprintStage — Fast MD5 fingerprint dedup (Redis)
+ 6. SemanticDedupStage    — Vector-level semantic dedup (ES KNN)
+ 7. PromptBuildStage      — Assemble prompt from template
+ 8. AgentInferenceStage   — Multi-step AI Agent with tool calling
+ 9. ResultParseStage      — Parse AI output to structured results
+10. PriorityDecisionStage — P0/P1/P2 priority scoring + night policy
+11. PersistStage          — Save results to DB
 
 Language-aware processing:
   - Java: gy.filetype-based level, Java stack traces (at ..., Caused by:)
