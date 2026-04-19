@@ -75,13 +75,29 @@ Detect connection timeouts → call `search_similar_incidents` to check history 
 
 ### 🔍 Intelligent Log Quality Filtering (False Positive Elimination)
 
-Log collection systems (Filebeat) may mix INFO logs into ERROR query results due to file-level severity mapping. LogMind eliminates false positives with **two-layer protection**:
+Log collection systems (Filebeat) may mix INFO logs into ERROR query results due to file-level severity mapping. LogMind eliminates false positives with **three-layer protection**:
 
 1. **ES Query Layer**: Uses exact phrase matching `[ERROR]`, `] ERROR `, `Exception:` instead of loose keyword queries, avoiding false matches on JSON fields like `"error":""`
-2. **Pipeline Layer**: `LogQualityFilterStage` performs secondary message-level validation + business noise detection
+2. **Pipeline Layer**: `LogQualityFilterStage` performs secondary message-level validation + business noise detection + shallow error detection
    - `gy.filetype=error.log` but message parses as `[INFO]` → filtered
    - `{"status":true,"success":true}` pure business success response → filtered
+   - 🆕 `log.error("cache limit key:{},result:{}")` ERROR logs with no exception indicators → filtered (shallow error detection)
    - No valid errors after filtering → skip analysis and notification, zero token cost
+
+### 🔐 Sensitive Data Protection (LLM Safety Shield)
+
+Sensitive information commonly found in logs (tokens, phone numbers, accounts, ID cards, etc.) is automatically masked before being sent to external LLMs. Based on **universal data format matching**, all sites are automatically covered without per-site configuration:
+
+| Data Type | Masking Result | Detection Method |
+|-----------|---------------|------------------|
+| Phone Number | `18135940826` → `181****0826` | Format detection + KV key names |
+| Token/UUID | `a97f57ef-9889-...` → `a97f****c4f1` | 44 universal sensitive key names |
+| Account | `wyfa199613` → `wyf****9613` | KV key names (`account`, `userId`) |
+| ID Card | `110101199001011234` → `110101********1234` | 18-digit format detection |
+| Email | `admin@gyyx.cn` → `adm****@gyyx.cn` | Email format detection |
+| Error Stack | `NullPointerException: null` | ✅ **Fully preserved** |
+
+Masking is applied at two levels: Pipeline main flow (all logs) + Agent tool return results (context queries).
 
 ### 🧬 Four-Layer Intelligent Cost Control
 
@@ -89,8 +105,8 @@ LogMind uses a four-layer progressive mechanism to minimize wasteful analysis an
 
 ```
                           ┌─────────────────────┐
-    ES Query Results ────▶│ Layer 0: Quality     │  INFO/noise → discard (eliminate false positives)
-                          │ Message-level verify  │
+     ES Query Results ────▶│ Layer 0: Quality     │  INFO/noise/shallow ERROR → discard
+                           │ 3-layer verify+mask  │
                           └────────┬────────────┘
                                    │ Valid errors
                           ┌────────▼────────────┐
@@ -111,12 +127,12 @@ LogMind uses a four-layer progressive mechanism to minimize wasteful analysis an
 
 | Layer | Mechanism | Cost | Effect |
 |-------|-----------|------|--------|
-| **Layer 0** | Message-level verify + noise detection | Zero | Eliminate INFO false positives |
+| **Layer 0** | Message-level verify + noise detection + shallow ERROR + masking | Zero | Eliminate INFO false positives + filter misused log.error() |
 | **Layer 1** | Redis MD5 fingerprint cache | Zero API calls | Skip identical errors |
 | **Layer 2** | ES vector KNN search | 1 Embedding call | Skip semantically similar errors |
 | **Layer 3** | Full Agent reasoning | Full LLM calls | Deep analysis for new errors |
 
-> **Real-world results**: Eliminates 100% INFO log false positives; combined with vector dedup, reduces **40-60%** redundant LLM calls.
+> **Real-world results**: Eliminates 100% INFO log false positives, filters routine logs from misused `log.error()`, combined with vector dedup reduces **40-60%** redundant LLM calls.
 
 ### 🎯 Alert Priority Decision Engine (P0/P1/P2)
 
@@ -319,6 +335,10 @@ sequenceDiagram
 | | 🆕 Cross-service correlation analysis | ✅ |
 | **Smart Filtering** | 🆕 Layer 0: Log quality filter (message-level verify) | ✅ |
 | | 🆕 Layer 0: Business noise detection (JSON success response) | ✅ |
+| | 🆕 Layer 0: Shallow ERROR detection (misused log.error filter) | ✅ |
+| **Sensitive Data Protection** | 🆕 Universal sensitive data masking engine (pre-LLM sanitization) | ✅ |
+| | 🆕 44 universal sensitive key names + 5 data format auto-detection | ✅ |
+| | 🆕 Pipeline + Agent tool dual-layer masking | ✅ |
 | **Smart Dedup** | Layer 1: Redis MD5 error fingerprint | ✅ |
 | | Layer 2: Vector semantic matching (ES KNN) | ✅ |
 | | Layer 3: Analysis memory auto write-back | ✅ |
@@ -652,10 +672,11 @@ LogMind/
 │   │   ├── tenant/              # Tenant + User + Business Line
 │   │   ├── log/                 # ES log query, parsing & vector search
 │   │   ├── analysis/            # AI Analysis Pipeline
-│   │   │   ├── pipeline.py      # 10-stage pipeline (incl. PriorityDecisionStage)
+│   │   │   ├── pipeline.py      # 10-stage pipeline (incl. 3-layer quality filter + PriorityDecisionStage)
 │   │   │   ├── agent_stage.py   # AI Agent multi-step reasoning Stage (with safety guards)
-│   │   │   ├── agent_tools.py   # 7 Agent tools (Function Calling)
-│   │   │   ├── priority_engine.py  # 🆕 P0/P1/P2 priority decision engine
+│   │   │   ├── agent_tools.py   # 7 Agent tools (Function Calling + masking)
+│   │   │   ├── sensitive_masker.py # 🆕 Universal sensitive data masking engine
+│   │   │   ├── priority_engine.py  # P0/P1/P2 priority decision engine
 │   │   │   ├── fingerprint_stage.py # Layer 1: MD5 fingerprint dedup
 │   │   │   ├── semantic_dedup.py    # Layer 2: Vector semantic dedup
 │   │   │   ├── analysis_indexer.py  # Layer 3: Analysis conclusion auto write-back
@@ -724,7 +745,7 @@ LogMind/
 - [x] Business line weight + critical path configuration
 - [x] Priority labels in alert messages
 
-### v1.5 — AI Auto-Sedimentation Known Issue Library ✅ ← Current
+### v1.5 — AI Auto-Sedimentation Known Issue Library ✅
 
 - [x] ES vector index extension (status/hit count/feedback quality)
 - [x] TTL 24h → 7 days + auto-renewal on hit
@@ -732,7 +753,34 @@ LogMind/
 - [x] Feedback → vector library linkage (+1 verified/TTL 365d, -1 excluded)
 - [x] Notification labels (🆕 First seen / 🔄 Regression / 📋 Known issue)
 
-### v1.6 — Near-Term Plans
+### v1.6 — Observability Enhancement ✅
+
+- [x] Pipeline per-stage execution metrics (stage_metrics)
+- [x] Agent tool call chain modeling (AgentToolCall)
+- [x] Execution trace API (`/api/v1/analysis/tasks/{id}/trace`)
+
+### v1.7 — Stability Remediation ✅
+
+- [x] Cleanup FK constraint fix (AgentToolCall → AnalysisResult → Task)
+- [x] Alert aggregator Redis connection fix (`get_redis_client()` unified)
+- [x] Redis connection leak fix (fingerprint_stage + semantic_dedup)
+- [x] AI-off path stage_metrics persistence
+
+### v1.8 — Security Hardening + Data Protection ✅
+
+- [x] Universal sensitive data masking engine (44 key names + 5 formats, auto-covers all sites)
+- [x] Pipeline masking + Agent tool return result masking (dual-layer protection)
+- [x] Agent tool LogService singleton unified (eliminated 5 instantiations)
+- [x] Agent `get_log_context` severity filter added (prevents pulling INFO/DEBUG)
+
+### v1.9 — Production Log Compatibility ✅ ← Current
+
+- [x] C# mixed-level file (`sys.log.txt`) filetype mapping activated
+- [x] Shallow ERROR detection (misused log.error filtering)
+- [x] Sensitive field completion (account/userId/memberId — from real production logs)
+- [x] Business noise detection enhancement (Chinese success response patterns)
+
+### v2.0 — Near-Term Plans
 
 - [ ] Web management dashboard (Vue.js / React)
 - [ ] Alert rule engine enhancement (keyword / regex / threshold triggers)
