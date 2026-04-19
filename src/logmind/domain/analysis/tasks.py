@@ -314,6 +314,7 @@ async def _execute_analysis(task_id: str):
                 task.log_count = ctx.log_count
                 task.token_usage = 0  # No AI used
                 task.completed_at = datetime.now(timezone.utc)
+                task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
                 await session.flush()
 
             # Send direct webhook notification if errors found
@@ -474,22 +475,46 @@ def cleanup_old_tasks():
 
 
 async def _cleanup_old_tasks():
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
 
     from logmind.core.database import get_db_context
-    from logmind.domain.analysis.models import AnalysisResult, LogAnalysisTask
+    from logmind.domain.analysis.models import (
+        AgentToolCall,
+        AnalysisResult,
+        LogAnalysisTask,
+    )
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
     async with get_db_context() as session:
-        # Delete old results first (FK constraint)
-        await session.execute(
-            delete(AnalysisResult).where(AnalysisResult.created_at < cutoff)
+        # Subquery: find task IDs older than cutoff
+        old_task_ids = (
+            select(LogAnalysisTask.id)
+            .where(LogAnalysisTask.created_at < cutoff)
+            .scalar_subquery()
         )
-        await session.execute(
+
+        # Delete in FK-safe order: children first, then parent
+        # 1. AgentToolCall (FK → log_analysis_task)
+        r1 = await session.execute(
+            delete(AgentToolCall).where(AgentToolCall.task_id.in_(old_task_ids))
+        )
+        # 2. AnalysisResult (FK → log_analysis_task)
+        r2 = await session.execute(
+            delete(AnalysisResult).where(AnalysisResult.task_id.in_(old_task_ids))
+        )
+        # 3. LogAnalysisTask (parent)
+        r3 = await session.execute(
             delete(LogAnalysisTask).where(LogAnalysisTask.created_at < cutoff)
         )
-        logger.info("old_tasks_cleaned", cutoff=cutoff.isoformat())
+
+        logger.info(
+            "old_tasks_cleaned",
+            cutoff=cutoff.isoformat(),
+            deleted_tool_calls=r1.rowcount,
+            deleted_results=r2.rowcount,
+            deleted_tasks=r3.rowcount,
+        )
 
 
 async def _mark_task_timeout(task_id: str):

@@ -51,10 +51,10 @@ class AlertAggregator:
           - (True, 1): First occurrence — send the notification
           - (False, N): Already N occurrences in window — don't send
         """
-        from logmind.core.redis import get_redis
+        from logmind.core.redis import get_redis_client
 
         try:
-            redis = get_redis()
+            redis = get_redis_client()
             agg_key = self._make_agg_key(business_line_id, severity, error_signature)
 
             existing = await redis.get(agg_key)
@@ -109,10 +109,10 @@ class AlertAggregator:
         error_signature: str | None = None,
     ) -> int:
         """Get the current aggregated count for an alert signature."""
-        from logmind.core.redis import get_redis
+        from logmind.core.redis import get_redis_client
 
         try:
-            redis = get_redis()
+            redis = get_redis_client()
             agg_key = self._make_agg_key(business_line_id, severity, error_signature)
             existing = await redis.get(agg_key)
             if existing:

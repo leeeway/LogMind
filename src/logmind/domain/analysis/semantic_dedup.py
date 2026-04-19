@@ -19,8 +19,6 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 
-import redis.asyncio as aioredis
-
 from logmind.core.config import get_settings
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
@@ -94,23 +92,26 @@ def extract_error_signature(processed_logs: str, language: str = "java") -> str:
 
 async def cached_embed(
     text: str,
-    redis_url: str,
+    redis_url: str = "",
     cache_ttl: int = 3600,
 ) -> list[float] | None:
     """
     Embed text using OpenAI, with Redis caching to avoid repeated API calls.
 
     Returns the embedding vector, or None if embedding fails.
+    Uses the shared Redis connection pool (no standalone connections).
     """
+    from logmind.core.redis import get_redis_client
+
     cache_key = f"logmind:emb_cache:{hashlib.md5(text.encode()).hexdigest()}"
+    r = None
 
     try:
-        r = aioredis.from_url(redis_url, decode_responses=True)
+        r = get_redis_client()
         # Check cache first
         cached = await r.get(cache_key)
         if cached:
             logger.info("embedding_cache_hit", key=cache_key[:40])
-            await r.aclose()
             return json.loads(cached)
     except Exception as e:
         logger.warning("embedding_cache_read_error", error=str(e))
@@ -150,21 +151,17 @@ async def cached_embed(
         resp = await provider.embed(req)
         vector = resp.embeddings[0]
 
-        # Write to cache
+        # Write to cache (pool-based client, no manual close needed)
         if r:
             try:
                 await r.setex(cache_key, cache_ttl, json.dumps(vector))
             except Exception:
                 pass
-            finally:
-                await r.aclose()
 
         return vector
 
     except Exception as e:
         logger.error("embedding_failed", error=str(e))
-        if r:
-            await r.aclose()
         return None
 
 

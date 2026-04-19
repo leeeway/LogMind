@@ -12,8 +12,6 @@ Fingerprint rules:
 import hashlib
 import re
 
-import redis.asyncio as aioredis
-
 from logmind.core.config import get_settings
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
@@ -78,7 +76,8 @@ class ErrorFingerprintStage(PipelineStage):
         ttl_seconds = settings.analysis_fingerprint_ttl_hours * 3600
 
         try:
-            r = aioredis.from_url(settings.redis_url, decode_responses=True)
+            from logmind.core.redis import get_redis_client
+            r = get_redis_client()
 
             # Split processed logs into individual entries
             log_lines = ctx.processed_logs.split("\n")
@@ -93,7 +92,6 @@ class ErrorFingerprintStage(PipelineStage):
                     fingerprints[fp] = line
 
             if not fingerprints:
-                await r.aclose()
                 return ctx
 
             # Batch check which fingerprints already exist in Redis
@@ -121,8 +119,6 @@ class ErrorFingerprintStage(PipelineStage):
                 for key in new_fp_keys:
                     pipe.setex(key, ttl_seconds, "1")
                 await pipe.execute()
-
-            await r.aclose()
 
             # Update context
             original_count = len([l for l in log_lines if l.strip()])
