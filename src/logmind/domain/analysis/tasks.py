@@ -186,6 +186,7 @@ async def _execute_analysis(task_id: str):
                     f"跳过分析: 全部 {ctx.log_metadata.get('fingerprint_filtered', 0)} 条错误"
                     f"已在近期分析过（指纹去重）"
                 )
+                task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
                 await session.flush()
             return  # No notification needed
 
@@ -206,6 +207,7 @@ async def _execute_analysis(task_id: str):
                     f"跳过分析: {ctx.log_metadata.get('quality_filtered', 0)} 条日志"
                     f"经质量过滤后为 INFO/业务噪声日志"
                 )
+                task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
                 await session.flush()
             return  # No real errors, no notification
 
@@ -219,8 +221,25 @@ async def _execute_analysis(task_id: str):
                 task.provider_config_id = ctx.provider_config_id
                 task.prompt_template_id = ctx.prompt_template_id
                 task.completed_at = datetime.now(timezone.utc)
+                task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
                 if ctx.errors:
                     task.error_message = "; ".join(ctx.errors)
+
+                # Persist Agent tool call chain
+                if ctx.tool_call_records:
+                    from logmind.domain.analysis.models import AgentToolCall
+                    for rec in ctx.tool_call_records:
+                        session.add(AgentToolCall(
+                            task_id=task_id,
+                            step=rec["step"],
+                            tool_name=rec["tool_name"],
+                            arguments=rec["arguments"],
+                            result_preview=rec["result_preview"],
+                            result_length=rec["result_length"],
+                            duration_ms=rec["duration_ms"],
+                            success=rec["success"],
+                        ))
+
                 await session.flush()
 
             # Fire alerts based on priority decision
@@ -309,6 +328,8 @@ async def _execute_analysis(task_id: str):
             task.status = "failed"
             task.error_message = str(e)
             task.completed_at = datetime.now(timezone.utc)
+            # Persist whatever stage metrics we collected before failure
+            task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
             await session.flush()
 
         # If AI was enabled but failed, send pipeline error notification

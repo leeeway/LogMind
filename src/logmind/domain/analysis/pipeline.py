@@ -21,6 +21,7 @@ Language-aware processing:
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -145,6 +146,12 @@ class PipelineContext:
     # Semantic dedup (Phase 3)
     semantic_dedup_hit: bool = False
     error_signature: str = ""
+
+    # Observability: per-stage execution metrics
+    # Each entry: {"stage": str, "duration_ms": int, "status": "ok"|"skipped"|"error", "error": str|None}
+    stage_metrics: list[dict] = field(default_factory=list)
+    # Agent tool call records (collected by AgentInferenceStage)
+    tool_call_records: list[dict] = field(default_factory=list)
 
 
 # ── Stage Base ───────────────────────────────────────────
@@ -1058,34 +1065,69 @@ class PersistStage(PipelineStage):
 
 class AnalysisPipeline:
     """
-    Orchestrates the 8-stage log analysis pipeline.
+    Orchestrates the 11-stage log analysis pipeline.
 
     Each stage receives and returns a PipelineContext.
     Critical stages abort the pipeline on failure;
     non-critical stages log errors and continue.
+
+    Stage metrics (name, duration_ms, status) are collected in
+    ctx.stage_metrics for persistence and observability.
     """
 
     def __init__(self, stages: list[PipelineStage]):
         self.stages = stages
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
-        """Execute all pipeline stages in order."""
+        """Execute all pipeline stages in order, recording per-stage metrics."""
         for stage in self.stages:
-            try:
-                # Semantic dedup hit → skip AI inference stages
-                if ctx.semantic_dedup_hit and stage.name in (
-                    'prompt_build', 'ai_inference'
-                ):
-                    logger.info("stage_skipped_semantic_dedup", stage=stage.name, task_id=ctx.task_id)
-                    continue
+            # Semantic dedup hit → skip AI inference stages
+            if ctx.semantic_dedup_hit and stage.name in (
+                'prompt_build', 'ai_inference'
+            ):
+                logger.info("stage_skipped_semantic_dedup", stage=stage.name, task_id=ctx.task_id)
+                ctx.stage_metrics.append({
+                    "stage": stage.name,
+                    "duration_ms": 0,
+                    "status": "skipped",
+                    "error": None,
+                })
+                continue
 
+            t0 = time.monotonic()
+            try:
                 logger.info("pipeline_stage_start", stage=stage.name, task_id=ctx.task_id)
                 ctx = await stage.execute(ctx)
-                logger.info("pipeline_stage_done", stage=stage.name, task_id=ctx.task_id)
+                duration_ms = int((time.monotonic() - t0) * 1000)
+
+                logger.info(
+                    "pipeline_stage_done",
+                    stage=stage.name,
+                    duration_ms=duration_ms,
+                    task_id=ctx.task_id,
+                )
+                ctx.stage_metrics.append({
+                    "stage": stage.name,
+                    "duration_ms": duration_ms,
+                    "status": "ok",
+                    "error": None,
+                })
             except Exception as e:
+                duration_ms = int((time.monotonic() - t0) * 1000)
                 error_msg = f"Stage [{stage.name}] failed: {e}"
-                logger.error("pipeline_stage_failed", stage=stage.name, error=str(e))
+                logger.error(
+                    "pipeline_stage_failed",
+                    stage=stage.name,
+                    duration_ms=duration_ms,
+                    error=str(e),
+                )
                 ctx.errors.append(error_msg)
+                ctx.stage_metrics.append({
+                    "stage": stage.name,
+                    "duration_ms": duration_ms,
+                    "status": "error",
+                    "error": str(e)[:500],
+                })
 
                 if stage.is_critical:
                     from logmind.core.exceptions import PipelineError

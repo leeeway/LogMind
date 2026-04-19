@@ -43,12 +43,17 @@ class LogAnalysisTask(Base, UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Observability: per-stage execution metrics (JSON text)
+    # Format: [{"stage": "log_fetch", "duration_ms": 123, "status": "ok"}, ...]
+    stage_metrics: Mapped[str] = mapped_column(Text, default="[]")
+
     # Timing
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     results = relationship("AnalysisResult", back_populates="task", lazy="selectin")
+    tool_calls = relationship("AgentToolCall", back_populates="task", lazy="selectin")
 
 
 class AnalysisResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -79,3 +84,34 @@ class AnalysisResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Relationships
     task = relationship("LogAnalysisTask", back_populates="results")
+
+
+class AgentToolCall(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """
+    Record of a single tool invocation by the AI Agent.
+
+    Provides full observability into the Agent's reasoning chain:
+    what tools were called, with what arguments, what was returned,
+    and how long each call took.
+    """
+
+    __tablename__ = "agent_tool_call"
+
+    task_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("log_analysis_task.id"), nullable=False, index=True
+    )
+    step: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )  # Agent loop iteration (1-based)
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    arguments: Mapped[str] = mapped_column(Text, default="{}")  # JSON
+    result_preview: Mapped[str] = mapped_column(
+        Text, default=""
+    )  # First 500 chars of tool result
+    result_length: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    success: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Relationships
+    task = relationship("LogAnalysisTask", back_populates="tool_calls")
+

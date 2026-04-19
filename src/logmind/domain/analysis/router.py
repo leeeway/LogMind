@@ -13,6 +13,9 @@ from logmind.domain.analysis.schemas import (
     AnalysisTaskCreate,
     AnalysisTaskResponse,
     AnalysisTaskSummary,
+    StageMetric,
+    TaskTraceResponse,
+    ToolCallRecord,
 )
 from logmind.domain.analysis.tasks import run_analysis_task
 from logmind.shared.base_repository import BaseRepository
@@ -97,6 +100,64 @@ async def get_analysis_task(task_id: str, session: DBSession, user: CurrentUser)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return AnalysisTaskResponse.model_validate(task)
+
+
+@router.get("/tasks/{task_id}/trace", response_model=TaskTraceResponse)
+async def get_task_trace(task_id: str, session: DBSession, user: CurrentUser):
+    """
+    Get the full execution trace for an analysis task.
+
+    Returns:
+      - Per-stage timing metrics (duration_ms, status, error)
+      - Agent tool call chain (tool_name, arguments, result_preview, duration_ms)
+
+    Useful for:
+      - Debugging why a task was slow or failed
+      - Understanding what tools the Agent used and in what order
+      - Performance monitoring and optimization
+    """
+    task = await task_repo.get_by_id(session, task_id, tenant_id=user.tenant_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Parse stage_metrics from JSON
+    try:
+        stages_raw = json.loads(task.stage_metrics or "[]")
+    except (json.JSONDecodeError, TypeError):
+        stages_raw = []
+
+    stages = [StageMetric(**s) for s in stages_raw if isinstance(s, dict)]
+    total_duration = sum(s.duration_ms for s in stages)
+
+    # Build tool call records from relationship
+    tool_call_items = [
+        ToolCallRecord(
+            id=tc.id,
+            step=tc.step,
+            tool_name=tc.tool_name,
+            arguments=tc.arguments or "{}",
+            result_preview=tc.result_preview or "",
+            result_length=tc.result_length or 0,
+            duration_ms=tc.duration_ms or 0,
+            success=tc.success,
+            created_at=tc.created_at,
+        )
+        for tc in sorted(task.tool_calls, key=lambda x: (x.step, x.created_at))
+    ]
+
+    # Extract errors from error_message
+    errors = []
+    if task.error_message:
+        errors = [e.strip() for e in task.error_message.split(";") if e.strip()]
+
+    return TaskTraceResponse(
+        task_id=task.id,
+        status=task.status,
+        total_duration_ms=total_duration,
+        stages=stages,
+        tool_calls=tool_call_items,
+        errors=errors,
+    )
 
 
 @router.put("/results/{result_id}/feedback", response_model=MessageResponse)

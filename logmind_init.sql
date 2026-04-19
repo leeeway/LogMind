@@ -109,6 +109,7 @@ CREATE TABLE log_analysis_task (
 	token_usage INTEGER NOT NULL, 
 	cost_usd FLOAT NOT NULL, 
 	error_message TEXT, 
+	stage_metrics TEXT NOT NULL DEFAULT '[]',
 	started_at TIMESTAMP WITH TIME ZONE, 
 	completed_at TIMESTAMP WITH TIME ZONE, 
 	id VARCHAR(36) NOT NULL, 
@@ -117,6 +118,24 @@ CREATE TABLE log_analysis_task (
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id)
 );
+
+CREATE TABLE agent_tool_call (
+	task_id VARCHAR(36) NOT NULL, 
+	step INTEGER NOT NULL, 
+	tool_name VARCHAR(100) NOT NULL, 
+	arguments TEXT NOT NULL DEFAULT '{}', 
+	result_preview TEXT NOT NULL DEFAULT '', 
+	result_length INTEGER NOT NULL DEFAULT 0, 
+	duration_ms INTEGER NOT NULL DEFAULT 0, 
+	success BOOLEAN NOT NULL DEFAULT TRUE, 
+	id VARCHAR(36) NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id),
+	FOREIGN KEY(task_id) REFERENCES log_analysis_task (id)
+);
+
+CREATE INDEX ix_agent_tool_call_task_id ON agent_tool_call (task_id);
 
 CREATE TABLE prompt_template (
 	name VARCHAR(100) NOT NULL, 

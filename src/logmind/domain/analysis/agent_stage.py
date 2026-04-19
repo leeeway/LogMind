@@ -18,6 +18,7 @@ Safety mechanisms:
 """
 
 import json
+import time
 
 from logmind.core.config import get_settings
 from logmind.core.logging import get_logger
@@ -150,16 +151,35 @@ class AgentInferenceStage(PipelineStage):
                         except json.JSONDecodeError:
                             func_args = {}
 
-                        result = await execute_tool(
-                            tool_name=func_name,
-                            arguments=func_args,
-                            es_index_pattern=ctx.es_index_pattern,
-                            time_from=ctx.time_from,
-                            time_to=ctx.time_to,
-                        )
+                        # ── Observability: time each tool call ──
+                        t0 = time.monotonic()
+                        tool_success = True
+                        try:
+                            result = await execute_tool(
+                                tool_name=func_name,
+                                arguments=func_args,
+                                es_index_pattern=ctx.es_index_pattern,
+                                time_from=ctx.time_from,
+                                time_to=ctx.time_to,
+                            )
+                        except Exception as tool_exc:
+                            result = json.dumps({"error": str(tool_exc)})
+                            tool_success = False
+                        tool_duration_ms = int((time.monotonic() - t0) * 1000)
 
                         if len(result) > 8000:
                             result = result[:8000] + "\n... (truncated)"
+
+                        # Record for persistence
+                        ctx.tool_call_records.append({
+                            "step": step,
+                            "tool_name": func_name,
+                            "arguments": json.dumps(func_args, ensure_ascii=False, default=str)[:2000],
+                            "result_preview": result[:500],
+                            "result_length": len(result),
+                            "duration_ms": tool_duration_ms,
+                            "success": tool_success,
+                        })
 
                         messages.append({
                             "role": "tool",
@@ -171,6 +191,8 @@ class AgentInferenceStage(PipelineStage):
                             "agent_tool_result",
                             tool=func_name,
                             result_length=len(result),
+                            duration_ms=tool_duration_ms,
+                            success=tool_success,
                             task_id=ctx.task_id,
                         )
 

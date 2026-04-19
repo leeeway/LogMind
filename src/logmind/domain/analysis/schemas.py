@@ -61,3 +61,44 @@ class AnalysisTaskSummary(BaseSchema):
     token_usage: int
     created_at: datetime
     completed_at: datetime | None
+
+
+# ── Observability / Trace Schemas ────────────────────────
+
+class StageMetric(BaseSchema):
+    """Timing and status for a single pipeline stage."""
+    stage: str
+    duration_ms: int = 0
+    status: str = "ok"  # ok / skipped / error
+    error: str | None = None
+
+
+class ToolCallRecord(BaseSchema):
+    """Record of a single Agent tool invocation."""
+    id: str
+    step: int
+    tool_name: str
+    arguments: str = "{}"
+    result_preview: str = ""
+    result_length: int = 0
+    duration_ms: int = 0
+    success: bool = True
+    created_at: datetime
+
+
+class TaskTraceResponse(BaseSchema):
+    """
+    Full execution trace for an analysis task.
+
+    Includes pipeline stage timings and agent tool call chain.
+    Used for debugging, performance analysis, and observability.
+    """
+    task_id: str
+    status: str
+    total_duration_ms: int = Field(
+        0, description="End-to-end pipeline duration (sum of stages)"
+    )
+    stages: list[StageMetric]
+    tool_calls: list[ToolCallRecord]
+    errors: list[str] = Field(default_factory=list)
+
