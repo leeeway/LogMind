@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import redis.asyncio as aioredis
 
 from logmind.core.logging import get_logger
-from logmind.domain.log.service import LogService
+from logmind.domain.log.service import log_service
 
 logger = get_logger(__name__)
 
@@ -262,8 +262,8 @@ async def execute_tool(
 async def _exec_search_logs(args: dict, index_pattern: str, default_from, default_to) -> str:
     """Execute search_logs tool."""
     from logmind.domain.log.schemas import LogQueryRequest
+    from logmind.domain.analysis.sensitive_masker import mask_sensitive
 
-    service = LogService()
     size = min(args.get("size", 20), 50)  # Cap at 50
 
     # Parse time range
@@ -283,15 +283,15 @@ async def _exec_search_logs(args: dict, index_pattern: str, default_from, defaul
         size=size,
     )
 
-    result = await service.search_logs(request)
+    result = await log_service.search_logs(request)
 
-    # Format for AI consumption (compact)
+    # Format for AI consumption (compact) — mask sensitive data
     logs = []
     for log in result.logs:
         logs.append({
             "timestamp": log.timestamp,
             "level": log.level,
-            "message": log.message[:500],
+            "message": mask_sensitive(log.message[:500]),
             "domain": log.domain,
             "filetype": log.filetype,
         })
@@ -306,6 +306,7 @@ async def _exec_search_logs(args: dict, index_pattern: str, default_from, defaul
 async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
     """Execute get_log_context tool."""
     from logmind.domain.log.schemas import LogQueryRequest
+    from logmind.domain.analysis.sensitive_masker import mask_sensitive
 
     ts = _parse_time(args.get("timestamp"))
     if not ts:
@@ -314,7 +315,6 @@ async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
     window = args.get("window_minutes", 5)
     size = min(args.get("size", 30), 50)
 
-    service = LogService()
     request = LogQueryRequest(
         index_pattern=index_pattern,
         time_from=ts - timedelta(minutes=window),
@@ -322,14 +322,15 @@ async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
         size=size,
     )
 
-    result = await service.search_logs(request)
+    result = await log_service.search_logs(request)
 
+    # Mask sensitive data before returning to Agent/LLM
     logs = []
     for log in result.logs:
         logs.append({
             "timestamp": log.timestamp,
             "level": log.level,
-            "message": log.message[:500],
+            "message": mask_sensitive(log.message[:500]),
             "domain": log.domain,
         })
 
@@ -343,7 +344,6 @@ async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
 
 async def _exec_count_error_patterns(args: dict, index_pattern: str, default_from, default_to) -> str:
     """Execute count_error_patterns tool."""
-    service = LogService()
 
     t_from = _parse_time(args.get("time_from")) or default_from
     t_to = _parse_time(args.get("time_to")) or default_to
@@ -351,7 +351,7 @@ async def _exec_count_error_patterns(args: dict, index_pattern: str, default_fro
     if not t_from or not t_to:
         return json.dumps({"error": "time range is required"})
 
-    stats = await service.get_log_stats(index_pattern, t_from, t_to)
+    stats = await log_service.get_log_stats(index_pattern, t_from, t_to)
 
     group_by = args.get("group_by", "filetype")
 
@@ -375,10 +375,9 @@ async def _exec_count_error_patterns(args: dict, index_pattern: str, default_fro
 
 async def _exec_list_indices(args: dict) -> str:
     """Execute list_available_indices tool."""
-    service = LogService()
     pattern = args.get("pattern", "*")
 
-    indices = await service.list_indices(pattern)
+    indices = await log_service.list_indices(pattern)
 
     return json.dumps({
         "count": len(indices),
@@ -555,7 +554,6 @@ async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str
         time_to = datetime.now(timezone.utc)
 
         # A1 fix: search_logs requires LogQueryRequest, not kwargs
-        svc = LogService()
         request = LogQueryRequest(
             index_pattern=index_str,
             time_from=time_from,
@@ -564,19 +562,21 @@ async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str
             severity="error",
             size=10,
         )
-        result = await svc.search_logs(request)
+        result = await log_service.search_logs(request)
 
         if not result.logs:
             return f"在其他 {len(search_indices)} 个服务中未发现与 '{keyword}' 相关的错误日志。"
 
-        # Format results using LogQueryResponse.logs (LogEntry objects)
+        # Format results — mask sensitive data before returning to Agent/LLM
+        from logmind.domain.analysis.sensitive_masker import mask_sensitive
+
         formatted = [f"跨服务搜索结果（关键词: {keyword}，搜索范围: {len(search_indices)} 个服务索引）：\n"]
         for i, log in enumerate(result.logs[:10]):
             formatted.append(
                 f"--- [{i+1}] 来源: {log.domain or '未知'} ---\n"
                 f"时间: {log.timestamp}\n"
                 f"级别: {log.level}\n"
-                f"内容: {log.message[:200]}\n"
+                f"内容: {mask_sensitive(log.message[:200])}\n"
             )
 
         return "\n".join(formatted)

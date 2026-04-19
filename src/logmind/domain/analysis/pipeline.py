@@ -249,11 +249,14 @@ class LogPreprocessStage(PipelineStage):
                 unique_logs.append(log)
 
         # Phase 3: Format logs with business context
+        # Apply sensitive data masking before sending to LLM
+        from logmind.domain.analysis.sensitive_masker import mask_sensitive
+
         lines = []
         for log in unique_logs[:200]:  # Limit to 200 unique entries
             ts = log.get("@timestamp", "")
             level = self._extract_level(log)
-            msg = self._extract_message(log)
+            msg = mask_sensitive(self._extract_message(log))
 
             # GYYX gy.* context
             gy = log.get("gy", {}) if isinstance(log.get("gy"), dict) else {}
