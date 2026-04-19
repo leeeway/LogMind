@@ -22,13 +22,13 @@ system_prompt: |
   ### Java 堆栈异常
   如果日志中包含 Java 堆栈异常（at xxx.xxx.Class.method(File.java:123)）：
   - 追踪 Caused by 链，找到最底层的根因异常
-  - 重点关注业务代码（cn.gyyx.* 包名）中的异常位置
+  - 重点关注业务代码（cn.* 包名）中的异常位置
   - 区分业务逻辑错误 vs 框架/中间件异常
 
   ### C#/.NET 堆栈异常
   如果日志中包含 .NET 堆栈异常（at Namespace.Class.Method() in File.cs:line N）：
   - 追踪 InnerException 链（--- End of inner exception --- 标记）
-  - 重点关注 Gyyx.* 命名空间下的业务代码
+  - 重点关注 .* 命名空间下的业务代码
   - 区分业务异常 vs System.*/Microsoft.* 框架异常
   - 关注数据库操作异常（SqlException、连接池问题等）
 

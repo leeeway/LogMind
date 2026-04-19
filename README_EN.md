@@ -90,11 +90,11 @@ Sensitive information commonly found in logs (tokens, phone numbers, accounts, I
 
 | Data Type | Masking Result | Detection Method |
 |-----------|---------------|------------------|
-| Phone Number | `18135940826` → `181****0826` | Format detection + KV key names |
+| Phone Number | `18130826` → `181****0826` | Format detection + KV key names |
 | Token/UUID | `a97f57ef-9889-...` → `a97f****c4f1` | 44 universal sensitive key names |
-| Account | `wyfa199613` → `wyf****9613` | KV key names (`account`, `userId`) |
-| ID Card | `110101199001011234` → `110101********1234` | 18-digit format detection |
-| Email | `admin@gyyx.cn` → `adm****@gyyx.cn` | Email format detection |
+| Account | `wyfa1993` → `wyf****9613` | KV key names (`account`, `userId`) |
+| ID Card | `1101001011234` → `110101********1234` | 18-digit format detection |
+| Email | `admin@.cn` → `adm****@.cn` | Email format detection |
 | Error Stack | `NullPointerException: null` | ✅ **Fully preserved** |
 
 Masking is applied at two levels: Pipeline main flow (all logs) + Agent tool return results (context queries).
