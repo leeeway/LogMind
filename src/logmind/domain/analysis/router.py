@@ -188,10 +188,10 @@ async def _update_vector_feedback(task_id: str, quality: str):
         hits = resp.get("hits", {}).get("hits", [])
         if hits:
             doc_id = hits[0]["_id"]
-            status = "open" if quality == "verified" else "open"
+            # Update feedback_quality only; status is managed via Known Issues API
             await log_service.update_analysis_vector_status(
                 doc_id=doc_id,
-                status=status,
+                status=None,  # Don't change status through feedback
                 feedback_quality=quality,
             )
     except Exception:

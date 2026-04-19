@@ -156,6 +156,7 @@ def _register_routes(app: FastAPI):
     from logmind.domain.prompt.router import router as prompt_router
     from logmind.domain.log.router import router as log_router
     from logmind.domain.analysis.router import router as analysis_router
+    from logmind.domain.analysis.known_issues_router import router as known_issues_router
     from logmind.domain.alert.router import router as alert_router
     from logmind.domain.dashboard.router import router as dashboard_router
     from logmind.domain.rag.router import router as rag_router
@@ -167,6 +168,7 @@ def _register_routes(app: FastAPI):
     api_router.include_router(prompt_router)
     api_router.include_router(log_router)
     api_router.include_router(analysis_router)
+    api_router.include_router(known_issues_router)
     api_router.include_router(alert_router)
     api_router.include_router(dashboard_router)
     api_router.include_router(rag_router)

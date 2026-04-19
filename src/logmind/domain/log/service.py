@@ -576,7 +576,7 @@ class LogService:
             return False
 
     async def update_analysis_vector_status(
-        self, doc_id: str, status: str, feedback_quality: str | None = None
+        self, doc_id: str, status: str | None, feedback_quality: str | None = None
     ) -> bool:
         """
         Update a known issue's status or feedback quality.
@@ -586,7 +586,9 @@ class LogService:
         index_name = "logmind-analysis-vectors"
         try:
             from datetime import datetime, timezone
-            update_fields = {"status": status}
+            update_fields = {}
+            if status is not None:
+                update_fields["status"] = status
             if status == "resolved":
                 update_fields["resolved_at"] = datetime.now(timezone.utc).isoformat()
             if feedback_quality is not None:
