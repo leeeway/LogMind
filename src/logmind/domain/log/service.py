@@ -46,13 +46,20 @@ _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
 }
 
 # ── C# NLog/log4net filetypes (mixed-level log files) ───
-# These files contain ALL levels in one file; level is embedded in message
+# These files contain ALL levels in one file; level is embedded in message.
+# They are added to EVERY severity's filetype list so the ES query always
+# retrieves them. Actual level filtering happens in LogQualityFilterStage
+# via message-content regex.
 _MIXED_LEVEL_FILETYPES: set[str] = {
     "sys.log.txt",
     "sys.log",
     "app.log.txt",
     "application.log",
 }
+
+# Merge mixed-level filetypes into all severity levels
+for _sev in _SEVERITY_FILETYPE_MAP:
+    _SEVERITY_FILETYPE_MAP[_sev].extend(sorted(_MIXED_LEVEL_FILETYPES))
 
 # ── Level extraction regex patterns ─────────────────────
 # Pattern 1: Level in brackets — [ERROR], [WARN], [INFO]
