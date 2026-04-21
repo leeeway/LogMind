@@ -100,7 +100,9 @@ class ProviderManager:
                 errors.append(error_msg)
                 logger.warning("provider_chat_failed", provider=config.name, error=str(e))
                 # Invalidate cached instance on failure
-                _provider_cache.pop(config.id, None)
+                keys_to_remove = [k for k in _provider_cache.keys() if k.startswith(f"{config.id}_")]
+                for k in keys_to_remove:
+                    _provider_cache.pop(k, None)
                 continue
 
         raise AllProvidersFailedError(tenant_id)
@@ -161,9 +163,27 @@ class ProviderManager:
         return list(result.scalars().all())
 
     def _create_or_get_cached(self, config: ProviderConfig) -> BaseProvider:
-        """Create a provider instance or return cached one."""
-        if config.id in _provider_cache:
-            return _provider_cache[config.id]
+        """Create a provider instance or return cached one per event loop."""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            loop_id = id(loop)
+        except RuntimeError:
+            loop_id = 0
+
+        # Clean up cache for closed/dead event loops to prevent memory leaks in Celery
+        dead_keys = []
+        for key, (_, cached_loop, provider) in _provider_cache.items():
+            if cached_loop is not None and getattr(cached_loop, "is_closed", lambda: False)():
+                dead_keys.append(key)
+        for key in dead_keys:
+            # We cannot easily await provider.close() here if we aren't in an async function,
+            # but httpx warns if unclosed. We rely on GC closing the sockets since the loop is dead.
+            _provider_cache.pop(key, None)
+
+        cache_key = f"{config.id}_{loop_id}"
+        if cache_key in _provider_cache:
+            return _provider_cache[cache_key][2]
 
         # Decrypt API key
         api_key = ""
@@ -189,13 +209,13 @@ class ProviderManager:
             **model_params,
         )
 
-        _provider_cache[config.id] = provider
+        _provider_cache[cache_key] = (config.id, loop if 'loop' in locals() else None, provider)
         return provider
 
     @staticmethod
     async def clear_cache():
         """Close all cached providers and clear the cache."""
-        for provider in _provider_cache.values():
+        for _, _, provider in _provider_cache.values():
             await provider.close()
         _provider_cache.clear()
 

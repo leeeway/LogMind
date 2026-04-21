@@ -192,7 +192,7 @@ class LogFetchStage(PipelineStage):
             severity=ctx.severity_threshold,
             language=ctx.language,
             extra_filters=ctx.extra_filters,
-            size=500,  # Cost control: max logs per task
+            size=5000,  # Expand ES window so diversity sampler can see older rare errors
         )
         result = await self.log_service.search_logs(request)
         ctx.raw_logs = [log.raw for log in result.logs]
@@ -248,12 +248,23 @@ class LogPreprocessStage(PipelineStage):
                 seen.add(dedup_key)
                 unique_logs.append(log)
 
-        # Phase 3: Format logs with business context
+        # Phase 3: Diversity-aware sampling
+        # Group logs by error pattern to ensure ALL distinct error types
+        # get represented in the sample, not just the most frequent ones.
+        # This prevents high-frequency errors from drowning out critical
+        # low-frequency exceptions (e.g. SQL truncation in warn.log).
+        max_logs = 200
+        if len(unique_logs) > max_logs:
+            sampled_logs = self._diversity_sample(unique_logs, max_logs)
+        else:
+            sampled_logs = unique_logs
+
+        # Phase 4: Format logs with business context
         # Apply sensitive data masking before sending to LLM
         from logmind.domain.analysis.sensitive_masker import mask_sensitive
 
         lines = []
-        for log in unique_logs[:200]:  # Limit to 200 unique entries
+        for log in sampled_logs:
             ts = log.get("@timestamp", "")
             level = self._extract_level(log)
             msg = mask_sensitive(self._extract_message(log))
@@ -429,6 +440,69 @@ class LogPreprocessStage(PipelineStage):
         # For normal messages, use first 200 chars
         return msg[:200]
 
+    def _diversity_sample(self, logs: list[dict], max_count: int) -> list[dict]:
+        """
+        Diversity-aware log sampling — ensures all error types are represented.
+
+        Groups logs by their error pattern (exception class name or error signature),
+        then round-robin samples from each group. Low-frequency but critical errors
+        (e.g. SQL truncation appearing once) will always appear alongside high-frequency
+        errors (e.g. cookie failures appearing 100 times).
+
+        Example: 300 logs with 295 "cookie failure" + 5 "SQL truncation"
+        → Old: first 200 = all cookie failures (SQL truncation lost)
+        → New: 195 cookie failures + 5 SQL truncation (all types represented)
+        """
+        from collections import defaultdict
+
+        # Group by error pattern
+        groups: dict[str, list[dict]] = defaultdict(list)
+        for log in logs:
+            msg = self._extract_message(log)
+            # Use exception class as group key, fallback to normalized first line
+            exc_match = _EXCEPTION_CLASS_RE.search(msg)
+            if exc_match:
+                group_key = exc_match.group(1)
+            else:
+                # Normalize: strip numbers, IPs, UUIDs, thread IDs for coarse grouping
+                first_line = msg.split("\n")[0][:120]
+                group_key = re.sub(r'\b[0-9a-f]{8,}[-0-9a-f]*\b', '<ID>', first_line)
+                group_key = re.sub(r'\d+', '<N>', group_key)
+                group_key = group_key[:80]
+
+            groups[group_key].append(log)
+
+        # Round-robin sample: ensure every group gets at least 1 representative
+        result = []
+        group_list = list(groups.values())
+
+        # First pass: take 1 from each group (guarantee diversity)
+        for group in group_list:
+            if len(result) < max_count:
+                result.append(group[0])
+
+        # Second pass: fill remaining slots round-robin
+        idx = [1] * len(group_list)  # Start from index 1 (already took 0)
+        while len(result) < max_count:
+            added = False
+            for i, group in enumerate(group_list):
+                if idx[i] < len(group) and len(result) < max_count:
+                    result.append(group[idx[i]])
+                    idx[i] += 1
+                    added = True
+            if not added:
+                break  # All groups exhausted
+
+        logger.info(
+            "diversity_sample_applied",
+            total_unique=len(logs),
+            sampled=len(result),
+            groups=len(group_list),
+            group_sizes={k: len(v) for k, v in list(groups.items())[:10]},
+        )
+
+        return result
+
     @staticmethod
     def _extract_level(source: dict) -> str:
         """
@@ -573,9 +647,14 @@ class LogQualityFilterStage(PipelineStage):
             if actual_level:
                 actual_rank = self._SEVERITY_RANK.get(actual_level.upper(), -1)
                 if actual_rank >= 0 and actual_rank < threshold_rank:
-                    # Message content says INFO/DEBUG but we're looking for ERROR
-                    filtered_out += 1
-                    continue
+                    # Message level is below threshold (e.g. WARN when looking for ERROR)
+                    # BUT: allow through if the message contains real exception indicators
+                    # (Java devs frequently log SQL/Spring exceptions at WARN level)
+                    if actual_rank >= 3 and self._has_real_error_indicator(line):
+                        pass  # WARN with real exception → keep for analysis
+                    else:
+                        filtered_out += 1
+                        continue
 
             # 2. Check for business noise (JSON success responses)
             if self._is_business_noise(line):
@@ -677,6 +756,27 @@ class LogQualityFilterStage(PipelineStage):
 
         # ERROR level + no error indicators = shallow error → filter out
         return True
+
+    def _has_real_error_indicator(self, line: str) -> bool:
+        """
+        Check if a log line contains real error/exception indicators.
+
+        Used to rescue WARN-level logs that contain genuine exceptions
+        (e.g. Spring DataIntegrityViolationException, SQLServerException)
+        from being filtered by the level check.
+        """
+        # Reuse the compiled patterns from _REAL_ERROR_INDICATORS
+        for pattern in self._REAL_ERROR_INDICATORS:
+            if pattern.search(line):
+                return True
+
+        # Additional Chinese exception keywords common in Java apps
+        chinese_indicators = ["异常", "超时", "连接失败", "连接被拒", "截断"]
+        for kw in chinese_indicators:
+            if kw in line:
+                return True
+
+        return False
 
 
 # ── Stage 4: Prompt Build ────────────────────────────────

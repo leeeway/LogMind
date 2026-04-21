@@ -30,7 +30,7 @@ class LogQueryRequest(BaseModel):
         "When set, enables language-specific severity filtering on message content."
     )
     extra_filters: dict = Field(default_factory=dict)
-    size: int = Field(100, ge=1, le=1000)
+    size: int = Field(5000, ge=1, le=10000)
     sort_order: str = Field("desc", pattern=r"^(asc|desc)$")
 
 

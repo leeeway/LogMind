@@ -220,6 +220,22 @@ class AgentInferenceStage(PipelineStage):
                         )
                         tools = None
                         tools_withdrawn = True
+
+                        # Clean up messages: remove tool_calls and tool-role msgs
+                        # to avoid inconsistent conversation history (causes 400)
+                        clean_messages = []
+                        for m in messages:
+                            if m.get("role") == "tool":
+                                continue  # Remove tool responses
+                            if m.get("role") == "assistant" and m.get("tool_calls"):
+                                # Convert tool-calling assistant msg to plain text
+                                content = m.get("content") or ""
+                                if content:
+                                    clean_messages.append({"role": "assistant", "content": content})
+                                continue
+                            clean_messages.append(m)
+
+                        messages = clean_messages
                         messages.append({
                             "role": "user",
                             "content": (

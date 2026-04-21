@@ -91,7 +91,7 @@ async def _async_index_analysis(
 
 @celery_app.task(
     name="logmind.domain.analysis.tasks.index_analysis_result",
-    queue="rag",
+    queue="analysis",
     ignore_result=True,
 )
 def index_analysis_result(

@@ -38,8 +38,11 @@ _FILETYPE_LEVEL_MAP: dict[str, str] = {
 }
 
 # Java: reverse mapping for severity → filetype ES filter
+# NOTE: warn.log is included in error mapping because Java developers
+# frequently log real exceptions at WARN level (e.g. Spring's
+# DataIntegrityViolationException). QualityFilter handles noise.
 _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
-    "error": ["error.log"],
+    "error": ["error.log", "warn.log"],
     "warning": ["warn.log", "warning.log"],
     "info": ["info.log"],
     "debug": ["debug.log", "trace.log"],
@@ -164,8 +167,12 @@ class LogService:
                     {"match_phrase": {"message": "] FATAL "}},
                     # Java/C# exception indicators (high-confidence error markers)
                     {"match_phrase": {"message": "Exception:"}},
+                    {"match_phrase": {"message": "exception:"}},  # Java log4j lowercase
                     {"match_phrase": {"message": "Caused by:"}},
                     {"match_phrase": {"message": "Traceback (most recent"}},
+                    # Java exception class name patterns (catch Spring/JDBC exceptions in WARN logs)
+                    {"match_phrase": {"message": "Exception"}},
+                    {"match_phrase": {"message": "产生异常"}},
                 ])
             elif request.severity.lower() == "warning":
                 severity_should.extend([
@@ -275,23 +282,24 @@ class LogService:
                     "terms": {
                         "field": "level",
                         "size": 10,
+                        "missing": "unknown",
                     }
                 },
                 "by_namespace": {
                     "terms": {
-                        "field": "kubernetes.namespace",
+                        "field": "kubernetes.namespace.keyword",
                         "size": 20,
                     }
                 },
                 "by_domain": {
                     "terms": {
-                        "field": "gy.domain",
+                        "field": "gy.domain.keyword",
                         "size": 50,
                     }
                 },
                 "by_filetype": {
                     "terms": {
-                        "field": "gy.filetype",
+                        "field": "gy.filetype.keyword",
                         "size": 10,
                     }
                 },

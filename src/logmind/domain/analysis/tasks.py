@@ -16,6 +16,9 @@ from datetime import datetime, timedelta, timezone
 from logmind.core.celery_app import celery_app
 from logmind.core.logging import get_logger
 
+# Register Celery tasks defined in other modules so autodiscover picks them up
+import logmind.domain.analysis.analysis_indexer  # noqa: F401 — registers index_analysis_result task
+
 logger = get_logger(__name__)
 
 

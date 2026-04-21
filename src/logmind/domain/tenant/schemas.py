@@ -2,9 +2,10 @@
 Tenant Domain — Pydantic Schemas
 """
 
+import json
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from logmind.shared.base_schema import BaseSchema
 
@@ -125,3 +126,14 @@ class BusinessLineResponse(BaseSchema):
     webhook_url: str = ""
     is_active: bool
     created_at: datetime
+
+    @field_validator("field_mapping", mode="before")
+    @classmethod
+    def parse_json_field(cls, v):
+        """Auto-deserialize JSON string from DB into dict."""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return v
