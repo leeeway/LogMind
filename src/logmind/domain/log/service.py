@@ -186,9 +186,11 @@ class LogService:
             # Catches real failures logged at wrong level (e.g. timeout in debug.log).
             # These phrases are high-confidence fault signals — if they appear in
             # the message, the log is worth analyzing regardless of filetype/level.
+            # Combines static hand-curated signals + AI-learned signals from past analyses.
             if request.severity and request.severity.lower() in ("error", "critical"):
-                from logmind.domain.log.error_signals import ALL_ERROR_SIGNALS
-                for signal in ALL_ERROR_SIGNALS:
+                from logmind.domain.log.error_signals import get_all_error_signals
+                all_signals = await get_all_error_signals()
+                for signal in all_signals:
                     severity_should.append({"match_phrase": {"message": signal}})
 
             filter_clauses.append({

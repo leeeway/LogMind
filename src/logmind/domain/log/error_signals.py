@@ -13,6 +13,14 @@ These signals are used in two places:
      signals to prevent filtering out DEBUG/INFO logs that contain
      genuine fault information.
 
+Self-Learning Loop:
+  After each AI analysis, the AI identifies key error signal phrases
+  from the logs. These "learned signals" are stored in ES index
+  `logmind-learned-signals` and loaded at query time (with in-memory
+  caching). This creates a feedback loop:
+
+    AI analysis → extract signals → store in ES → next query uses them
+
 Design principles:
   - Phrases are optimised for ES match_phrase (exact substring match).
   - Only high-confidence signals — avoids false-positives from normal
@@ -20,7 +28,20 @@ Design principles:
   - Language-agnostic: covers both English infra errors and Chinese
     business failure patterns.
   - Zero per-business-line configuration required.
+  - Learned signals require confidence >= 0.7 to be loaded.
 """
+
+import hashlib
+import time
+
+from logmind.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+# ══════════════════════════════════════════════════════════
+#  Layer 1: Static Signals (hand-curated, always available)
+# ══════════════════════════════════════════════════════════
 
 # ── Infrastructure fault signals ─────────────────────────
 # Network, I/O, timeout, resource exhaustion — language-agnostic.
@@ -86,9 +107,6 @@ ERROR_CODE_SIGNALS: list[str] = [
 
 # ── Exception class signals ──────────────────────────────
 # High-confidence exception markers that transcend log level.
-# Note: "Exception" alone is already matched by the existing severity
-# filter's Channel A, but including Caused by / Traceback here ensures
-# Channel B also catches them in non-error filetypes.
 EXCEPTION_SIGNALS: list[str] = [
     "Caused by:",
     "Traceback (most recent",
@@ -107,10 +125,200 @@ EXCEPTION_SIGNALS: list[str] = [
     "连接被拒",
 ]
 
-# ── Aggregate: all signals for ES query Channel B ────────
-ALL_ERROR_SIGNALS: list[str] = (
+# ── Aggregate: all static signals ────────────────────────
+ALL_STATIC_SIGNALS: list[str] = (
     INFRA_SIGNALS
     + BUSINESS_FAILURE_SIGNALS
     + ERROR_CODE_SIGNALS
     + EXCEPTION_SIGNALS
 )
+
+# Backward compatibility alias
+ALL_ERROR_SIGNALS = ALL_STATIC_SIGNALS
+
+
+# ══════════════════════════════════════════════════════════
+#  Layer 2: Learned Signals (AI-discovered, stored in ES)
+# ══════════════════════════════════════════════════════════
+
+# ES index for storing learned error signal phrases
+_LEARNED_SIGNALS_INDEX = "logmind-learned-signals"
+
+# In-memory cache — avoids hitting ES on every search_logs call.
+# Celery workers and FastAPI processes both persist module-level state.
+_learned_cache: list[str] = []
+_cache_ts: float = 0.0
+_CACHE_TTL = 300  # 5 minutes
+
+
+async def _ensure_learned_index():
+    """Create the learned-signals ES index if it doesn't exist."""
+    from logmind.domain.log.service import log_service
+
+    es = log_service.es
+    exists = await es.indices.exists(index=_LEARNED_SIGNALS_INDEX)
+    if not exists:
+        mapping = {
+            "properties": {
+                "signal": {"type": "keyword"},
+                "source_task_id": {"type": "keyword"},
+                "business_line_id": {"type": "keyword"},
+                "confidence": {"type": "float"},
+                "hit_count": {"type": "integer"},
+                "first_seen": {"type": "date"},
+                "last_seen": {"type": "date"},
+                "created_at": {"type": "date"},
+            }
+        }
+        await es.indices.create(index=_LEARNED_SIGNALS_INDEX, mappings=mapping)
+        logger.info("learned_signals_index_created")
+
+
+async def store_learned_signal(
+    signal: str,
+    source_task_id: str,
+    business_line_id: str,
+    confidence: float = 0.8,
+):
+    """
+    Upsert a learned error signal into ES.
+
+    - First occurrence: creates a new document (hit_count=1).
+    - Subsequent: increments hit_count and updates last_seen.
+    - Uses MD5(signal) as doc ID for idempotent upsert.
+
+    Signals are only loaded into ES queries when they have sufficient
+    confidence (>= 0.7), providing a natural quality gate.
+    """
+    from datetime import datetime, timezone
+    from logmind.domain.log.service import log_service
+
+    # Skip signals that are too short or already in static list
+    if not signal or len(signal) < 3:
+        return
+    if signal in _static_set:
+        return
+
+    try:
+        await _ensure_learned_index()
+        es = log_service.es
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        doc_id = hashlib.md5(signal.encode("utf-8")).hexdigest()
+
+        await es.update(
+            index=_LEARNED_SIGNALS_INDEX,
+            id=doc_id,
+            body={
+                "script": {
+                    "source": """
+                        ctx._source.hit_count += 1;
+                        ctx._source.last_seen = params.now;
+                        if (ctx._source.confidence < params.confidence) {
+                            ctx._source.confidence = params.confidence;
+                        }
+                    """,
+                    "params": {
+                        "now": now_iso,
+                        "confidence": confidence,
+                    },
+                },
+                "upsert": {
+                    "signal": signal,
+                    "source_task_id": source_task_id,
+                    "business_line_id": business_line_id,
+                    "confidence": confidence,
+                    "hit_count": 1,
+                    "first_seen": now_iso,
+                    "last_seen": now_iso,
+                    "created_at": now_iso,
+                },
+            },
+        )
+        logger.info("learned_signal_stored", signal=signal[:50], doc_id=doc_id[:8])
+
+    except Exception as e:
+        logger.warning("learned_signal_store_failed", signal=signal[:50], error=str(e))
+
+
+async def load_learned_signals() -> list[str]:
+    """
+    Load learned signals from ES with in-memory cache (5-min TTL).
+
+    Quality gate: only signals with confidence >= 0.7 are loaded.
+    This prevents one-off false positives from polluting the registry.
+    """
+    global _learned_cache, _cache_ts
+
+    now = time.monotonic()
+    if _learned_cache and (now - _cache_ts) < _CACHE_TTL:
+        return _learned_cache
+
+    try:
+        from logmind.domain.log.service import log_service
+
+        es = log_service.es
+        exists = await es.indices.exists(index=_LEARNED_SIGNALS_INDEX)
+        if not exists:
+            _learned_cache = []
+            _cache_ts = now
+            return []
+
+        result = await es.search(
+            index=_LEARNED_SIGNALS_INDEX,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"range": {"confidence": {"gte": 0.7}}},
+                        ]
+                    }
+                },
+                "size": 200,
+                "_source": ["signal"],
+                "sort": [{"hit_count": {"order": "desc"}}],
+            },
+        )
+
+        signals = [
+            hit["_source"]["signal"]
+            for hit in result["hits"]["hits"]
+            if hit["_source"].get("signal")
+        ]
+
+        _learned_cache = signals
+        _cache_ts = now
+
+        if signals:
+            logger.info("learned_signals_loaded", count=len(signals))
+
+        return signals
+
+    except Exception as e:
+        logger.warning("learned_signals_load_failed", error=str(e))
+        return _learned_cache  # Return stale cache on error
+
+
+# ══════════════════════════════════════════════════════════
+#  Layer 3: Combined — Static + Learned
+# ══════════════════════════════════════════════════════════
+
+# Pre-compute static set for fast dedup lookups
+_static_set: set[str] = set(ALL_STATIC_SIGNALS)
+
+
+async def get_all_error_signals() -> list[str]:
+    """
+    Get combined static + learned error signals.
+
+    Returns the full list of signals for ES query Channel B.
+    Learned signals that duplicate static ones are excluded.
+    """
+    learned = await load_learned_signals()
+
+    if not learned:
+        return ALL_STATIC_SIGNALS
+
+    # Deduplicate: only add learned signals not already in static list
+    new_signals = [s for s in learned if s not in _static_set]
+    return ALL_STATIC_SIGNALS + new_signals

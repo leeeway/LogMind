@@ -309,6 +309,39 @@ async def _execute_analysis(task_id: str):
                         logger.info("analysis_index_dispatched", task_id=task_id)
                 except Exception as e:
                     logger.warning("analysis_index_dispatch_failed", error=str(e))
+
+            # Phase 4: Store AI-learned error signals for self-learning loop
+            if ctx.learned_signals:
+                try:
+                    from logmind.domain.log.error_signals import store_learned_signal
+
+                    # Determine confidence from top analysis severity
+                    confidence_map = {"critical": 0.95, "warning": 0.8, "info": 0.6}
+                    top_sev = max(
+                        (r.get("severity", "info") for r in ctx.analysis_results),
+                        key=lambda s: confidence_map.get(s, 0.5),
+                        default="info",
+                    )
+                    confidence = confidence_map.get(top_sev, 0.7)
+
+                    stored_count = 0
+                    for signal in ctx.learned_signals:
+                        await store_learned_signal(
+                            signal=signal,
+                            source_task_id=task_id,
+                            business_line_id=ctx.business_line_id,
+                            confidence=confidence,
+                        )
+                        stored_count += 1
+
+                    logger.info(
+                        "learned_signals_stored",
+                        count=stored_count,
+                        signals=ctx.learned_signals[:5],
+                        task_id=task_id,
+                    )
+                except Exception as e:
+                    logger.warning("learned_signals_store_failed", error=str(e))
         else:
             # ── AI-off mode: send direct error notification ──
             async with get_db_context() as session:
