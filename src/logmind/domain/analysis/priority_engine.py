@@ -54,6 +54,11 @@ class PriorityFactors:
     has_stack_traces: bool = False   # Exception traces present
     unique_error_types: int = 1     # Number of distinct error patterns
 
+    # Self-learning adjustments (from priority_learning module)
+    historical_adjustment: float = 0.0  # [-15, +10] from alert ack rate + feedback
+    is_suppressed: bool = False         # Auto-suppression from fatigue detection
+    suppression_reason: str = ""        # Human-readable suppression reason
+
 
 @dataclass
 class NotificationAction:
@@ -179,6 +184,11 @@ class PriorityDecisionEngine:
         elif f.log_count >= 100:
             bonus += 1.0
 
+        # ── Self-learning: historical adjustment ─────────
+        # Negative = alerts from this pattern are consistently ignored
+        # Positive = alerts are consistently acted upon
+        historical = max(-15.0, min(10.0, f.historical_adjustment))
+
         total = (
             severity_score
             + frequency_score
@@ -186,10 +196,11 @@ class PriorityDecisionEngine:
             + core_path_score
             + confidence_score
             + bonus
+            + historical
         )
 
-        # Cap at 100
-        total = min(total, 100.0)
+        # Cap at 100, floor at 0
+        total = max(0.0, min(total, 100.0))
 
         breakdown = {
             "severity": round(severity_score, 1),
@@ -198,6 +209,7 @@ class PriorityDecisionEngine:
             "core_path": round(core_path_score, 1),
             "confidence": round(confidence_score, 1),
             "bonus": round(bonus, 1),
+            "historical": round(historical, 1),
             "freq_ratio": round(freq_ratio, 2),
         }
 
@@ -258,6 +270,14 @@ class PriorityDecisionEngine:
         else:  # P2
             action.should_notify = False
             action.reason = f"🟢 P2: 低优先级，仅记录到日报"
+
+        # ── Self-learning: auto-suppression override ─────
+        if factors.is_suppressed:
+            action.should_notify = False
+            action.should_wake = False
+            action.delay_until_morning = False
+            action.include_in_digest = True  # Still show in digest
+            action.reason = f"🔇 自动抑制: {factors.suppression_reason}"
 
         return action
 

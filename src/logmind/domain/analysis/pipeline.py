@@ -1180,6 +1180,22 @@ class PriorityDecisionStage(PipelineStage):
         if baseline_errors == 0:
             baseline_errors = max(current_errors, 1)
 
+        # ── Self-learning: load historical adjustments ───
+        historical_adj = 0.0
+        is_suppressed = False
+        suppression_reason = ""
+        try:
+            from logmind.domain.analysis.priority_learning import (
+                check_suppression,
+                compute_priority_adjustment,
+            )
+            historical_adj = await compute_priority_adjustment(ctx.business_line_id)
+            is_suppressed, suppression_reason = await check_suppression(
+                ctx.business_line_id, ctx.error_signature
+            )
+        except Exception as e:
+            logger.warning("priority_learning_failed", error=str(e))
+
         factors = PriorityFactors(
             ai_severity=top_severity,
             confidence=top_confidence,
@@ -1191,6 +1207,9 @@ class PriorityDecisionStage(PipelineStage):
             log_count=ctx.log_count,
             has_stack_traces=ctx.has_stack_traces,
             unique_error_types=max(len(unique_errors), 1),
+            historical_adjustment=historical_adj,
+            is_suppressed=is_suppressed,
+            suppression_reason=suppression_reason,
         )
 
         decision = engine.decide(
