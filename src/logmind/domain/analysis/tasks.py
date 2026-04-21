@@ -342,6 +342,43 @@ async def _execute_analysis(task_id: str):
                     )
                 except Exception as e:
                     logger.warning("learned_signals_store_failed", error=str(e))
+
+            # Phase 5: Store AI-extracted experience rules for prompt evolution
+            if ctx.learned_rules:
+                try:
+                    from logmind.domain.analysis.business_profile import store_experience_rule
+
+                    confidence_map = {"critical": 0.95, "warning": 0.8, "info": 0.6}
+                    top_sev = max(
+                        (r.get("severity", "info") for r in ctx.analysis_results),
+                        key=lambda s: confidence_map.get(s, 0.5),
+                        default="info",
+                    )
+                    confidence = confidence_map.get(top_sev, 0.7)
+
+                    for rule in ctx.learned_rules:
+                        await store_experience_rule(
+                            rule=rule,
+                            business_line_id=ctx.business_line_id,
+                            source_task_id=task_id,
+                            confidence=confidence,
+                        )
+
+                    logger.info(
+                        "experience_rules_stored",
+                        count=len(ctx.learned_rules),
+                        rules=ctx.learned_rules[:3],
+                        task_id=task_id,
+                    )
+                except Exception as e:
+                    logger.warning("experience_rules_store_failed", error=str(e))
+
+            # Invalidate profile cache so next analysis picks up new data
+            try:
+                from logmind.domain.analysis.business_profile import invalidate_profile_cache
+                invalidate_profile_cache(ctx.business_line_id)
+            except Exception:
+                pass
         else:
             # ── AI-off mode: send direct error notification ──
             async with get_db_context() as session:

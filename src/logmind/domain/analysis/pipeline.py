@@ -156,6 +156,9 @@ class PipelineContext:
     # Signal self-learning: error signal phrases extracted by AI from analysis
     learned_signals: list[str] = field(default_factory=list)
 
+    # Experience rules: prescriptive rules extracted by AI for future analyses
+    learned_rules: list[str] = field(default_factory=list)
+
 
 # ── Stage Base ───────────────────────────────────────────
 
@@ -910,14 +913,17 @@ class PromptBuildStage(PipelineStage):
 - error_signals: (可选) 从日志中识别出的关键错误信号短语列表。
   这些短语应能在未来的日志中匹配同类故障，让系统自动学习新的错误模式。
   示例: ["connect timed out", "请求失败", "队列满"]
+- experience_rule: (可选) 一条可复用的分析经验规则。
+  用「当...时，应...」的处方式格式总结，方便未来分析同类问题时参考。
+  示例: "当该服务出现 connect timed out 时，应优先检查下游认证API而非本服务网络"
 
 ## 重要规则
 1. 只输出 JSON 数组，不要输出其他内容（不要包裹在 markdown 代码块中）。
 2. 数组中必须至少包含一个元素。分析所有错误模式，包括高频重复错误、异常堆栈、连接超时等。
 3. 即使日志中没有严重问题，也请输出至少一条 info 级别的总结说明当前系统健康状况。
 4. 对相同类型的错误请合并分析，说明出现频率和影响范围。
-5. 对于 severity 为 critical 或 warning 的结果，务必提供 error_signals 字段，
-   提取日志中可复用的故障信号短语（3-30字符，能精确匹配同类故障即可）。"""
+5. 对于 severity 为 critical 或 warning 的结果，务必提供 error_signals 和 experience_rule 字段，
+   让系统积累经验用于未来的智能分析。"""
 
         if ctx.has_stack_traces:
             if ctx.language == "csharp":
@@ -1059,6 +1065,7 @@ class ResultParseStage(PipelineStage):
 
             ctx.analysis_results = []
             all_learned_signals = []
+            all_learned_rules = []
             for item in parsed:
                 ctx.analysis_results.append({
                     "result_type": item.get("result_type", "anomaly"),
@@ -1075,8 +1082,14 @@ class ResultParseStage(PipelineStage):
                         if isinstance(sig, str) and 3 <= len(sig) <= 60:
                             all_learned_signals.append(sig)
 
+                # Extract experience rules for prompt evolution
+                rule = item.get("experience_rule", "")
+                if isinstance(rule, str) and 10 <= len(rule) <= 200:
+                    all_learned_rules.append(rule)
+
             # Deduplicate and store in context for post-analysis persistence
             ctx.learned_signals = list(dict.fromkeys(all_learned_signals))
+            ctx.learned_rules = list(dict.fromkeys(all_learned_rules))
 
             # If AI returned content but parsed to zero results, fallback to summary
             if not ctx.analysis_results:

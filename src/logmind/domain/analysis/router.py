@@ -232,6 +232,14 @@ async def submit_result_feedback(
                 except Exception as sig_err:
                     feedback_result += f" | Signal downgrade failed: {sig_err}"
 
+                # ── Negative Learning: downgrade experience rules ──
+                try:
+                    from logmind.domain.analysis.business_profile import downgrade_rules_for_task
+                    await downgrade_rules_for_task(historical_task_id)
+                    feedback_result += " | Experience rules downgraded"
+                except Exception as rule_err:
+                    feedback_result += f" | Rule downgrade failed: {rule_err}"
+
         # Invalidate business profile cache so negative feedback takes effect
         try:
             from logmind.domain.analysis.business_profile import invalidate_profile_cache
