@@ -866,6 +866,23 @@ class PromptBuildStage(PipelineStage):
             )
             ctx.prompt_template_id = template.id
 
+        # ── Inject business line intelligence profile ────────
+        # Appends accumulated analysis experience for this service
+        # so the AI "remembers" past incidents and root causes.
+        try:
+            from logmind.domain.analysis.business_profile import build_profile_context
+            profile = await build_profile_context(ctx.business_line_id)
+            if profile:
+                ctx.system_prompt = ctx.system_prompt + "\n\n" + profile
+                logger.info(
+                    "business_profile_injected",
+                    business_line_id=ctx.business_line_id,
+                    profile_length=len(profile),
+                    task_id=ctx.task_id,
+                )
+        except Exception as e:
+            logger.warning("business_profile_inject_failed", error=str(e))
+
         logger.info("prompt_built", template_id=ctx.prompt_template_id, task_id=ctx.task_id)
         return ctx
 

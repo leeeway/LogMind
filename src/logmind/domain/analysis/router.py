@@ -221,6 +221,24 @@ async def submit_result_feedback(
                     historical_task_id, "poor"
                 )
                 feedback_result += " | Vector marked as poor (excluded from future matches)"
+
+                # ── Negative Learning: downgrade learned signals ──
+                # Halve confidence of error signals discovered by this task.
+                # Prevents bad AI judgments from polluting future ES queries.
+                try:
+                    from logmind.domain.log.error_signals import downgrade_learned_signals
+                    await downgrade_learned_signals(historical_task_id)
+                    feedback_result += " | Learned signals downgraded"
+                except Exception as sig_err:
+                    feedback_result += f" | Signal downgrade failed: {sig_err}"
+
+        # Invalidate business profile cache so negative feedback takes effect
+        try:
+            from logmind.domain.analysis.business_profile import invalidate_profile_cache
+            invalidate_profile_cache(task.business_line_id)
+        except Exception:
+            pass
+
     except Exception as e:
         # Non-critical: DB feedback is saved even if vector update fails
         feedback_result += f" | Vector update failed: {e}"

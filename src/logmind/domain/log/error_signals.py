@@ -322,3 +322,88 @@ async def get_all_error_signals() -> list[str]:
     # Deduplicate: only add learned signals not already in static list
     new_signals = [s for s in learned if s not in _static_set]
     return ALL_STATIC_SIGNALS + new_signals
+
+
+# ══════════════════════════════════════════════════════════
+#  Negative Learning — Feedback-Driven Signal Downgrade
+# ══════════════════════════════════════════════════════════
+
+async def downgrade_learned_signals(source_task_id: str):
+    """
+    Downgrade confidence of all learned signals from a specific analysis task.
+
+    Called when a user gives negative feedback (score=-1) on an analysis result.
+    This prevents bad AI judgments from continuing to influence future queries.
+
+    Strategy:
+      - Halve the confidence of matching signals
+      - If confidence drops below 0.3, delete the signal entirely
+      - Invalidate the in-memory cache so changes take effect immediately
+    """
+    try:
+        from logmind.domain.log.service import log_service
+
+        es = log_service.es
+        exists = await es.indices.exists(index=_LEARNED_SIGNALS_INDEX)
+        if not exists:
+            return
+
+        # Find all signals that were created by this task
+        result = await es.search(
+            index=_LEARNED_SIGNALS_INDEX,
+            body={
+                "query": {"term": {"source_task_id": source_task_id}},
+                "size": 50,
+                "_source": ["signal", "confidence"],
+            },
+        )
+
+        hits = result.get("hits", {}).get("hits", [])
+        if not hits:
+            logger.info("no_signals_to_downgrade", task_id=source_task_id)
+            return
+
+        downgraded = 0
+        deleted = 0
+
+        for hit in hits:
+            doc_id = hit["_id"]
+            current_confidence = hit["_source"].get("confidence", 0.8)
+            new_confidence = current_confidence * 0.5  # Halve confidence
+
+            if new_confidence < 0.3:
+                # Too low — delete entirely
+                await es.delete(index=_LEARNED_SIGNALS_INDEX, id=doc_id, ignore=[404])
+                deleted += 1
+            else:
+                # Downgrade confidence
+                await es.update(
+                    index=_LEARNED_SIGNALS_INDEX,
+                    id=doc_id,
+                    body={"doc": {"confidence": new_confidence}},
+                )
+                downgraded += 1
+
+        # Force cache refresh
+        invalidate_signal_cache()
+
+        logger.info(
+            "learned_signals_downgraded",
+            task_id=source_task_id,
+            downgraded=downgraded,
+            deleted=deleted,
+        )
+
+    except Exception as e:
+        logger.warning(
+            "learned_signals_downgrade_failed",
+            task_id=source_task_id,
+            error=str(e),
+        )
+
+
+def invalidate_signal_cache():
+    """Force refresh of the learned signals cache on next query."""
+    global _cache_ts
+    _cache_ts = 0.0
+
