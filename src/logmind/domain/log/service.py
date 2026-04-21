@@ -182,6 +182,15 @@ class LogService:
                     {"match_phrase": {"message": "] WARNING "}},
                 ])
 
+            # ── Channel B: Content-aware error signal detection ──
+            # Catches real failures logged at wrong level (e.g. timeout in debug.log).
+            # These phrases are high-confidence fault signals — if they appear in
+            # the message, the log is worth analyzing regardless of filetype/level.
+            if request.severity and request.severity.lower() in ("error", "critical"):
+                from logmind.domain.log.error_signals import ALL_ERROR_SIGNALS
+                for signal in ALL_ERROR_SIGNALS:
+                    severity_should.append({"match_phrase": {"message": signal}})
+
             filter_clauses.append({
                 "bool": {
                     "should": severity_should,

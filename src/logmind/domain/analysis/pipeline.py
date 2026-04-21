@@ -647,11 +647,12 @@ class LogQualityFilterStage(PipelineStage):
             if actual_level:
                 actual_rank = self._SEVERITY_RANK.get(actual_level.upper(), -1)
                 if actual_rank >= 0 and actual_rank < threshold_rank:
-                    # Message level is below threshold (e.g. WARN when looking for ERROR)
-                    # BUT: allow through if the message contains real exception indicators
-                    # (Java devs frequently log SQL/Spring exceptions at WARN level)
-                    if actual_rank >= 3 and self._has_real_error_indicator(line):
-                        pass  # WARN with real exception → keep for analysis
+                    # Message level is below threshold (e.g. INFO when looking for ERROR)
+                    # BUT: allow through if the message contains real fault signals.
+                    # This rescues logs where devs logged genuine failures at the
+                    # wrong level (e.g. "请求失败：connect timed out" in debug.log).
+                    if self._has_real_error_indicator(line):
+                        pass  # Contains fault signal → keep regardless of declared level
                     else:
                         filtered_out += 1
                         continue
@@ -770,8 +771,13 @@ class LogQualityFilterStage(PipelineStage):
             if pattern.search(line):
                 return True
 
-        # Additional Chinese exception keywords common in Java apps
-        chinese_indicators = ["异常", "超时", "连接失败", "连接被拒", "截断"]
+        # Additional Chinese fault keywords common in Java/C# apps
+        chinese_indicators = [
+            "异常", "超时", "连接失败", "连接被拒", "截断",
+            "请求失败", "操作失败", "调用失败", "处理失败",
+            "通知失败", "发送失败", "同步失败", "执行失败",
+            "服务不可用", "服务异常", "系统异常",
+        ]
         for kw in chinese_indicators:
             if kw in line:
                 return True
