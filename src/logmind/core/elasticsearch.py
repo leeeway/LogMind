@@ -9,8 +9,9 @@ import sys
 from functools import lru_cache
 from elasticsearch import AsyncElasticsearch
 from logmind.core.config import get_settings
+from logmind.core.runtime import is_celery_runtime
 
-is_celery = "celery" in sys.argv[0] or (len(sys.argv) > 1 and "celery" in sys.argv[1])
+is_celery = is_celery_runtime()
 _celery_es_client = None
 
 def get_es_client() -> AsyncElasticsearch:

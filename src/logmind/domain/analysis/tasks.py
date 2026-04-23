@@ -16,6 +16,19 @@ from datetime import datetime, timedelta, timezone
 from logmind.core.celery_app import celery_app
 from logmind.core.logging import get_logger
 
+# Severity → confidence mapping for self-learning storage
+_SEVERITY_CONFIDENCE_MAP = {"critical": 0.95, "warning": 0.8, "info": 0.6}
+
+
+def _compute_top_confidence(analysis_results: list[dict]) -> float:
+    """Compute confidence score from the top severity in analysis results."""
+    top_sev = max(
+        (r.get("severity", "info") for r in analysis_results),
+        key=lambda s: _SEVERITY_CONFIDENCE_MAP.get(s, 0.5),
+        default="info",
+    )
+    return _SEVERITY_CONFIDENCE_MAP.get(top_sev, 0.7)
+
 # Register Celery tasks defined in other modules so autodiscover picks them up
 import logmind.domain.analysis.analysis_indexer  # noqa: F401 — registers index_analysis_result task
 
@@ -62,11 +75,13 @@ async def _execute_analysis(task_id: str):
     from logmind.domain.analysis.models import LogAnalysisTask
     from logmind.domain.analysis.pipeline import (
         AnalysisPipeline,
+        PipelineContext,
+    )
+    from logmind.domain.analysis.stages import (
         LogFetchStage,
         LogPreprocessStage,
         LogQualityFilterStage,
         PersistStage,
-        PipelineContext,
         PriorityDecisionStage,
         PromptBuildStage,
         ResultParseStage,
@@ -315,14 +330,7 @@ async def _execute_analysis(task_id: str):
                 try:
                     from logmind.domain.log.error_signals import store_learned_signal
 
-                    # Determine confidence from top analysis severity
-                    confidence_map = {"critical": 0.95, "warning": 0.8, "info": 0.6}
-                    top_sev = max(
-                        (r.get("severity", "info") for r in ctx.analysis_results),
-                        key=lambda s: confidence_map.get(s, 0.5),
-                        default="info",
-                    )
-                    confidence = confidence_map.get(top_sev, 0.7)
+                    confidence = _compute_top_confidence(ctx.analysis_results)
 
                     stored_count = 0
                     for signal in ctx.learned_signals:
@@ -348,13 +356,7 @@ async def _execute_analysis(task_id: str):
                 try:
                     from logmind.domain.analysis.business_profile import store_experience_rule
 
-                    confidence_map = {"critical": 0.95, "warning": 0.8, "info": 0.6}
-                    top_sev = max(
-                        (r.get("severity", "info") for r in ctx.analysis_results),
-                        key=lambda s: confidence_map.get(s, 0.5),
-                        default="info",
-                    )
-                    confidence = confidence_map.get(top_sev, 0.7)
+                    confidence = _compute_top_confidence(ctx.analysis_results)
 
                     for rule in ctx.learned_rules:
                         await store_experience_rule(

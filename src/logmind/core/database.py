@@ -15,9 +15,10 @@ from sqlalchemy.ext.asyncio import (
 
 import sys
 from logmind.core.config import get_settings
+from logmind.core.runtime import is_celery_runtime
 
 settings = get_settings()
-is_celery = "celery" in sys.argv[0] or (len(sys.argv) > 1 and "celery" in sys.argv[1])
+is_celery = is_celery_runtime()
 
 engine_kwargs = {
     "echo": settings.database_echo,

@@ -105,6 +105,18 @@ class Settings(BaseSettings):
             raise ValueError(f"severity must be one of {allowed}")
         return v.lower()
 
+    @field_validator("secret_key", "jwt_secret_key", "encryption_key")
+    @classmethod
+    def reject_default_keys(cls, v: str, info) -> str:
+        """Prevent production deployment with placeholder keys."""
+        if v.startswith("change-me") or v.startswith("dev-"):
+            if os.getenv("APP_ENV") == "production":
+                raise ValueError(
+                    f"{info.field_name} must be changed from default value "
+                    f"in production! Current value starts with '{v[:12]}...'"
+                )
+        return v
+
 
 @lru_cache
 def get_settings() -> Settings:
