@@ -35,7 +35,7 @@ class ComponentHealth:
 class SystemHealth:
     """Aggregated system health."""
     status: str = "ok"          # ok / degraded / down
-    version: str = "1.9.0"
+    version: str = "2.1.0"
     components: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:

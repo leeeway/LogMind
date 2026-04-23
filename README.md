@@ -412,6 +412,15 @@ sequenceDiagram
 | | 巡检冷却控制 | ✅ |
 | | 🆕 Agent 安全保护 (Token上限+连续失败退出) | ✅ |
 | | 🆕 Celery 任务超时保护 (5分钟) | ✅ |
+| | 🆕 深度健康检查 (DB/Redis/ES/Celery 探测) | ✅ |
+| | 🆕 API 限流中间件 (Redis 滑动窗口, 按租户限流) | ✅ |
+| | 🆕 Prometheus 指标导出 (Pipeline 耗时/Token/去重率) | ✅ |
+| | 🆕 告警确认 + 解决 API (ACK/Resolve 闭环) | ✅ |
+| | 🆕 Celery 事件循环复用 (性能优化) | ✅ |
+| | 🆕 Pipeline 模块化拆分 (stages/ 子包) | ✅ |
+| | 🆕 生产环境密钥拒绝校验 | ✅ |
+| | 🆕 错误趋势预警 (环比加速增长检测) | ✅ |
+| | 🆕 分析质量自评估 (低质量结论自动重分析) | ✅ |
 
 ---
 
@@ -645,6 +654,11 @@ docker-compose --env-file .env.production up -d --build
 | `GET` | `/api/v1/logs/search` | 搜索 ES 日志 |
 | `GET` | `/api/v1/logs/stats` | 日志统计聚合 |
 | `GET` | `/api/v1/logs/indices` | 列出 ES 索引 |
+| `GET` | `/api/v1/health` | 🆕 深度健康检查 (readiness probe) |
+| `GET` | `/api/v1/health/live` | 🆕 轻量存活检查 (liveness probe) |
+| `GET` | `/api/v1/metrics` | 🆕 Prometheus 指标导出 |
+| `POST` | `/api/v1/alerts/history/{id}/ack` | 🆕 确认告警 |
+| `POST` | `/api/v1/alerts/history/{id}/resolve` | 🆕 解决告警 |
 
 ### 🆕 知识库管理 API
 
@@ -701,48 +715,65 @@ curl -X POST "http://127.0.0.1:8000/api/v1/knowledge-base/<KB_ID>/documents" \
 ```
 LogMind/
 ├── src/logmind/
-│   ├── core/                    # 基础设施层
-│   │   ├── config.py            # Pydantic 配置管理
-│   │   ├── database.py          # SQLAlchemy 异步引擎
-│   │   ├── elasticsearch.py     # ES 客户端
-│   │   ├── redis.py             # Redis 客户端
-│   │   ├── celery_app.py        # Celery 配置 + Beat 调度
-│   │   ├── security.py          # JWT + Fernet 加密
-│   │   └── dependencies.py      # FastAPI 依赖注入
-│   ├── domain/                  # 业务领域层 (DDD)
-│   │   ├── tenant/              # 租户 + 用户 + 业务线
-│   │   ├── log/                 # ES 日志查询、解析与向量搜索
-│   │   ├── analysis/            # AI 分析 Pipeline
-│   │   │   ├── pipeline.py      # 10 阶段流水线 (含三层质量过滤 + PriorityDecisionStage)
-│   │   │   ├── agent_stage.py   # AI Agent 多步推理 Stage (含安全保护)
-│   │   │   ├── agent_tools.py   # 7 个 Agent 工具 (Function Calling + 脱敏)
-│   │   │   ├── sensitive_masker.py # 🆕 通用敏感数据脱敏引擎
-│   │   │   ├── priority_engine.py  # P0/P1/P2 优先级决策引擎
+│   ├── core/                       # 基础设施层
+│   │   ├── config.py               # Pydantic 配置管理 (含生产密钥校验)
+│   │   ├── database.py             # SQLAlchemy 异步引擎
+│   │   ├── elasticsearch.py        # ES 客户端
+│   │   ├── redis.py                # Redis 客户端
+│   │   ├── celery_app.py           # Celery 配置 + Beat 调度
+│   │   ├── security.py             # JWT + Fernet 加密
+│   │   ├── dependencies.py         # FastAPI 依赖注入
+│   │   ├── health.py               # 🆕 深度健康检查 (DB/Redis/ES/Celery)
+│   │   ├── metrics.py              # 🆕 Prometheus 指标导出
+│   │   ├── rate_limiter.py         # 🆕 Redis 滑动窗口限流
+│   │   ├── async_task.py           # 🆕 Celery 事件循环复用
+│   │   └── runtime.py              # 🆕 运行时环境检测
+│   ├── domain/                     # 业务领域层 (DDD)
+│   │   ├── tenant/                 # 租户 + 用户 + 业务线
+│   │   ├── log/                    # ES 日志查询、解析与向量搜索
+│   │   │   ├── error_signals.py    # 三层信号注册表 (静态+学习+合并)
+│   │   │   └── service.py          # ES 查询服务 (含 Channel B)
+│   │   ├── analysis/               # AI 分析 Pipeline
+│   │   │   ├── pipeline.py         # Pipeline 编排器 (PipelineContext + Stage 接口)
+│   │   │   ├── stages/             # 🆕 模块化阶段 (从 pipeline.py 拆分)
+│   │   │   │   ├── log_fetch.py        # Stage 1: ES 日志拉取
+│   │   │   │   ├── log_preprocess.py    # Stage 2: 堆栈合并+多样性采样
+│   │   │   │   ├── quality_filter.py    # Stage 3: 质量过滤+虚假ERROR检测
+│   │   │   │   ├── prompt_build.py      # Stage 4: Prompt 组装+降级
+│   │   │   │   ├── ai_inference.py      # Stage 5: AI 推理 (one-shot)
+│   │   │   │   ├── result_parse.py      # Stage 6: 结果解析
+│   │   │   │   ├── priority_decision.py # Stage 7: P0/P1/P2 决策
+│   │   │   │   └── persist.py           # Stage 8: 持久化+通知
+│   │   │   ├── agent_stage.py      # AI Agent 多步推理 Stage
+│   │   │   ├── agent_tools.py      # 7 个 Agent 工具 (Function Calling + 脱敏)
+│   │   │   ├── sensitive_masker.py  # 通用敏感数据脱敏引擎
+│   │   │   ├── priority_engine.py   # P0/P1/P2 优先级决策引擎
 │   │   │   ├── fingerprint_stage.py # Layer 1: MD5 指纹去重
 │   │   │   ├── semantic_dedup.py    # Layer 2: 向量语义去重
 │   │   │   ├── analysis_indexer.py  # Layer 3: 分析结论自动回写
-│   │   │   ├── business_profile.py   # 🆕 业务线智能画像 + 经验规则库
-│   │   │   ├── priority_learning.py  # 🆕 优先级自适应 + 疲劳抑制
-│   │   │   └── tasks.py         # Celery 任务入口
-│   │   ├── alert/               # 告警规则 + 并行巡检调度
-│   │   ├── provider/            # AI 模型提供商管理
-│   │   │   └── adapters/        # OpenAI/Claude/Gemini/DeepSeek/Ollama
-│   │   ├── prompt/              # Prompt 模板引擎
-│   │   ├── rag/                 # 🆕 RAG 知识库 (ES 向量检索 + 管理 API)
-│   │   ├── log/
-│   │   │   ├── error_signals.py  # 🆕 三层信号注册表 (静态+学习+合并)
-│   │   │   └── service.py       # ES 查询服务 (含 Channel B)
-│   │   └── dashboard/           # 仪表盘统计
-│   ├── shared/                  # 通用组件
-│   └── main.py                  # FastAPI 入口
-├── configs/prompts/             # 内置 Prompt 模板 (YAML)
-│   ├── log_analysis.yaml        # 通用日志分析模板
-│   └── stack_trace_analysis.yaml # 堆栈异常分析模板
-├── migrations/                  # 数据库迁移脚本
-├── deploy/                      # 部署配置
-├── docker-compose.yml           # Docker Compose 编排
-├── Makefile                     # 常用命令
-└── .env.example                 # 环境变量模板
+│   │   │   ├── trend_detection.py   # 🆕 错误趋势预警
+│   │   │   ├── quality_scorer.py    # 🆕 分析质量自评估
+│   │   │   ├── business_profile.py  # 业务线智能画像 + 经验规则库
+│   │   │   ├── priority_learning.py # 优先级自适应 + 疲劳抑制
+│   │   │   └── tasks.py            # Celery 任务入口
+│   │   ├── alert/                  # 告警规则 + 并行巡检调度
+│   │   │   ├── aggregator.py       # 告警智能聚合
+│   │   │   ├── digest.py           # 日报/周报推送
+│   │   │   └── channels/webhook.py # 多平台 Webhook 通知
+│   │   ├── provider/               # AI 模型提供商管理
+│   │   │   └── adapters/           # OpenAI/Claude/Gemini/DeepSeek/Ollama
+│   │   ├── prompt/                 # Prompt 模板引擎
+│   │   ├── rag/                    # RAG 知识库 (ES 向量检索 + 管理 API)
+│   │   └── dashboard/              # 仪表盘统计 (5 端点)
+│   ├── shared/                     # 通用组件
+│   └── main.py                     # FastAPI 入口
+├── tests/                          # 🆕 单元测试 (120+ 用例)
+├── configs/prompts/                # 内置 Prompt 模板 (YAML)
+├── migrations/                     # 数据库迁移脚本
+├── deploy/                         # 部署配置
+├── docker-compose.yml              # Docker Compose 编排
+├── Makefile                        # 常用命令
+└── .env.example                    # 环境变量模板
 ```
 
 ---
@@ -826,7 +857,7 @@ LogMind/
 - [x] 敏感字段补全 (account/userId/memberId — 来自真实生产日志)
 - [x] 业务噪声检测增强 (中文成功响应模式)
 
-### v2.0 — AI 自进化学习系统 ✅ ← 当前
+### v2.0 — AI 自进化学习系统 ✅
 
 - [x] 内容感知 Channel B 错误采集 (绕过 filetype 限制)
 - [x] AI 信号自学习 (error_signals → ES → 反哺 ES 查询)
@@ -835,14 +866,22 @@ LogMind/
 - [x] 负向反馈学习 (score=-1 → 信号/规则/画像/向量 四重降级)
 - [x] 告警优先级自适应 (历史确认率 + 反馈评分 → 自动调权)
 - [x] 告警疲劳自抑制 (已知问题 ignored / 多次未确认 → 静默)
+- [x] 🆕 .env 安全保护 + 生产密钥拒绝校验
+- [x] 🆕 Pipeline 模块化拆分 (1381行 → stages/ 子包, -87%)
+- [x] 🆕 单元测试基础设施 (120+ 用例, 100% 通过)
+- [x] 🆕 深度健康检查 (DB/Redis/ES/Celery 探测 + K8s probes)
+- [x] 🆕 API 限流中间件 (Redis 滑动窗口, 按租户+路由限流)
+- [x] 🆕 Prometheus 指标导出 (Pipeline 耗时/Token/去重率)
+- [x] 🆕 告警确认 + 解决 API (ACK/Resolve 反馈闭环)
+- [x] 🆕 Celery 事件循环复用 (asyncio.run → run_async 全量替换)
 
-### v2.1 — AI 深度进化 (规划中)
+### v2.1 — AI 深度进化 ✅ ← 当前
 
+- [x] 错误趋势预警 (error rate 环比加速增长 → 提前告警)
+- [x] 分析质量自评估 (低质量结论自动触发重分析)
 - [ ] 跨服务根因关联 (Service A 超时时自动检查 Service B 是否异常)
-- [ ] 错误趋势预警 (error rate 加速增长时提前告警)
 - [ ] Agent 工具策略自优化 (从 ToolCallRecord 学习最有效的工具链)
 - [ ] 智能日志采样 (per-service 自适应采样策略)
-- [ ] 分析质量自评估 (低质量分析自动重跑)
 
 ### v2.5 — 运维深度集成
 

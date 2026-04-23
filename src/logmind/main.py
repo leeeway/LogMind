@@ -78,7 +78,7 @@ def create_app() -> FastAPI:
             "Supports multiple AI providers, RAG knowledge base, "
             "multi-tenant isolation, and configurable prompt templates."
         ),
-        version="0.1.0",
+        version="2.1.0",
         docs_url="/docs" if settings.debug else None,
         redoc_url="/redoc" if settings.debug else None,
         lifespan=lifespan,
@@ -154,7 +154,7 @@ def _register_routes(app: FastAPI):
     # Lightweight liveness probe (no dependency checks)
     @api_router.get("/health/live", tags=["System"])
     async def liveness_check():
-        return {"status": "ok", "version": "1.9.0"}
+        return {"status": "ok", "version": "2.1.0"}
 
     # Prometheus metrics endpoint
     @api_router.get("/metrics", tags=["System"], include_in_schema=False)
