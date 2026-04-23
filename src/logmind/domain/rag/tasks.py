@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+from logmind.core.async_task import run_async
 from logmind.core.celery_app import celery_app
 from logmind.core.logging import get_logger
 
@@ -94,4 +95,4 @@ async def _async_index_document(document_id: str):
 @celery_app.task(name="logmind.domain.rag.tasks.index_document")
 def index_document(document_id: str):
     """Index a RAG document (Chunking -> Embedding -> ES)."""
-    asyncio.run(_async_index_document(document_id))
+    run_async(_async_index_document(document_id))

@@ -16,6 +16,7 @@ Benefits:
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+from logmind.core.async_task import run_async
 from logmind.core.celery_app import celery_app
 from logmind.core.logging import get_logger
 
@@ -32,7 +33,7 @@ def scheduled_log_patrol():
     and ensures no single business line can block the entire patrol cycle.
     """
     logger.info("scheduled_patrol_dispatcher_started")
-    asyncio.run(_dispatch_patrols())
+    run_async(_dispatch_patrols())
 
 
 async def _dispatch_patrols():
@@ -103,7 +104,7 @@ def patrol_single_business_line(business_line_id: str):
     Celery worker slot, so failures are isolated.
     """
     logger.info("patrol_single_started", biz_id=business_line_id)
-    asyncio.run(_patrol_single(business_line_id))
+    run_async(_patrol_single(business_line_id))
 
 
 async def _patrol_single(business_line_id: str):

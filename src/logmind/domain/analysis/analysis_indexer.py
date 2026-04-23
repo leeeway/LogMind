@@ -108,7 +108,8 @@ def index_analysis_result(
     the error signature + conclusion in the vector index.
     """
     logger.info("analysis_index_task_started", task_id=task_id)
-    asyncio.run(
+    from logmind.core.async_task import run_async
+    run_async(
         _async_index_analysis(
             task_id=task_id,
             business_line_id=business_line_id,

@@ -47,4 +47,9 @@ class AlertHistory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     notify_result: Mapped[str] = mapped_column(Text, default="{}")  # JSON
 
     fired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acked_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    priority: Mapped[str] = mapped_column(String(10), default="P2")  # P0 / P1 / P2

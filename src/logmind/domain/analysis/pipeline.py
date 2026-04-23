@@ -162,6 +162,8 @@ class AnalysisPipeline:
                     "status": "skipped",
                     "error": None,
                 })
+                from logmind.core.metrics import record_stage_duration
+                record_stage_duration(stage.name, 0, "skipped")
                 continue
 
             t0 = time.monotonic()
@@ -182,6 +184,9 @@ class AnalysisPipeline:
                     "status": "ok",
                     "error": None,
                 })
+                # Prometheus metrics
+                from logmind.core.metrics import record_stage_duration
+                record_stage_duration(stage.name, duration_ms / 1000, "ok")
             except Exception as e:
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 error_msg = f"Stage [{stage.name}] failed: {e}"
@@ -198,6 +203,8 @@ class AnalysisPipeline:
                     "status": "error",
                     "error": str(e)[:500],
                 })
+                from logmind.core.metrics import record_stage_duration
+                record_stage_duration(stage.name, duration_ms / 1000, "error")
 
                 if stage.is_critical:
                     from logmind.core.exceptions import PipelineError

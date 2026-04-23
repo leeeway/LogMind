@@ -52,9 +52,13 @@ class AlertHistoryResponse(BaseSchema):
     analysis_task_id: str | None
     status: str
     severity: str
+    priority: str
     message: str
     fired_at: datetime
+    acked_at: datetime | None
+    acked_by: str | None
     resolved_at: datetime | None
+    resolved_by: str | None
 
 
 @router.post("/rules", response_model=AlertRuleResponse, status_code=201)
@@ -108,3 +112,60 @@ async def list_alert_history(
         page=pagination.page,
         page_size=pagination.page_size,
     )
+
+
+# ── Alert Acknowledge & Resolve ──────────────────────────
+
+@router.post("/history/{alert_id}/ack", response_model=AlertHistoryResponse)
+async def acknowledge_alert(
+    alert_id: str, session: DBSession, user: CurrentUser
+):
+    """
+    Acknowledge an alert — marks it as seen by on-call.
+
+    This feeds into the priority self-learning system:
+    alerts that are frequently ACK'd receive positive
+    historical adjustment (+score), while ignored alerts
+    get negative adjustment (-score).
+    """
+    alert = await history_repo.get_by_id(session, alert_id, tenant_id=user.tenant_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if alert.status not in ("fired",):
+        raise HTTPException(status_code=400, detail=f"Cannot ACK alert in status: {alert.status}")
+
+    alert.status = "acknowledged"
+    alert.acked_at = datetime.now(timezone.utc)
+    alert.acked_by = user.username
+    await session.flush()
+
+    return AlertHistoryResponse.model_validate(alert)
+
+
+@router.post("/history/{alert_id}/resolve", response_model=AlertHistoryResponse)
+async def resolve_alert(
+    alert_id: str, session: DBSession, user: CurrentUser
+):
+    """
+    Resolve an alert — marks the issue as fixed.
+
+    Resolved alerts contribute to the experience knowledge base.
+    If an auto-ACK'd alert is resolved quickly, it boosts future
+    priority scoring for similar patterns.
+    """
+    alert = await history_repo.get_by_id(session, alert_id, tenant_id=user.tenant_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if alert.status == "resolved":
+        raise HTTPException(status_code=400, detail="Alert already resolved")
+
+    alert.status = "resolved"
+    alert.resolved_at = datetime.now(timezone.utc)
+    alert.resolved_by = user.username
+    # Auto-ack if not yet acknowledged
+    if not alert.acked_at:
+        alert.acked_at = alert.resolved_at
+        alert.acked_by = user.username
+    await session.flush()
+
+    return AlertHistoryResponse.model_validate(alert)

@@ -16,6 +16,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
+from logmind.core.async_task import run_async
 from logmind.core.celery_app import celery_app
 from logmind.core.logging import get_logger
 
@@ -26,14 +27,14 @@ logger = get_logger(__name__)
 def send_daily_digest():
     """Daily analysis digest — runs via Celery Beat."""
     logger.info("daily_digest_started")
-    asyncio.run(_generate_and_send_digest(hours=24))
+    run_async(_generate_and_send_digest(hours=24))
 
 
 @celery_app.task(name="logmind.domain.alert.tasks.send_weekly_digest")
 def send_weekly_digest():
     """Weekly analysis digest — runs via Celery Beat."""
     logger.info("weekly_digest_started")
-    asyncio.run(_generate_and_send_digest(hours=168))
+    run_async(_generate_and_send_digest(hours=168))
 
 
 async def _generate_and_send_digest(hours: int = 24):

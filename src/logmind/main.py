@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 
 from logmind.core.config import get_settings
 from logmind.core.exceptions import (
@@ -23,6 +24,7 @@ from logmind.core.exceptions import (
 )
 from logmind.core.logging import setup_logging
 from logmind.core.middleware import RequestLoggingMiddleware, TenantMiddleware
+from logmind.core.rate_limiter import RateLimitMiddleware
 
 
 @asynccontextmanager
@@ -91,6 +93,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(RequestLoggingMiddleware)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(TenantMiddleware)
 
     # ── Exception Handlers ───────────────────────────────
@@ -136,19 +139,28 @@ def _register_routes(app: FastAPI):
     """Register all domain routers under /api/v1 prefix."""
     from fastapi import APIRouter
 
-    from logmind.core.elasticsearch import check_es_health
+    from logmind.core.health import get_system_health
 
     api_router = APIRouter(prefix="/api/v1")
 
-    # Health check (no auth required)
+    # Deep health check (readiness probe — checks all components)
     @api_router.get("/health", tags=["System"])
     async def health_check():
-        es_health = await check_es_health()
-        return {
-            "status": "ok",
-            "version": "0.1.0",
-            "elasticsearch": es_health,
-        }
+        health = await get_system_health()
+        status_code = 200 if health.status != "down" else 503
+        from fastapi.responses import JSONResponse
+        return JSONResponse(content=health.to_dict(), status_code=status_code)
+
+    # Lightweight liveness probe (no dependency checks)
+    @api_router.get("/health/live", tags=["System"])
+    async def liveness_check():
+        return {"status": "ok", "version": "1.9.0"}
+
+    # Prometheus metrics endpoint
+    @api_router.get("/metrics", tags=["System"], include_in_schema=False)
+    async def prometheus_metrics():
+        from logmind.core.metrics import get_metrics_response
+        return Response(content=get_metrics_response(), media_type="text/plain")
 
     # Domain routers
     from logmind.domain.tenant.router import auth_router, biz_router, router as tenant_router

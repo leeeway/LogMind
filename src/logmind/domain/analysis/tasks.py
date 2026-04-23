@@ -9,10 +9,10 @@ Handles:
 - Old task cleanup
 """
 
-import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
+from logmind.core.async_task import run_async
 from logmind.core.celery_app import celery_app
 from logmind.core.logging import get_logger
 
@@ -56,11 +56,11 @@ def run_analysis_task(self, task_id: str):
 
     logger.info("celery_task_started", task_id=task_id)
     try:
-        asyncio.run(_execute_analysis(task_id))
+        run_async(_execute_analysis(task_id))
     except SoftTimeLimitExceeded:
         logger.error("celery_task_timeout", task_id=task_id)
         # Mark task as failed in DB
-        asyncio.run(_mark_task_timeout(task_id))
+        run_async(_mark_task_timeout(task_id))
 
 
 async def _execute_analysis(task_id: str):
@@ -546,7 +546,7 @@ async def _send_pipeline_error_notification(ctx, error_message: str, webhook_url
 @celery_app.task(name="logmind.domain.analysis.tasks.cleanup_old_tasks")
 def cleanup_old_tasks():
     """Clean up analysis tasks older than 30 days."""
-    asyncio.run(_cleanup_old_tasks())
+    run_async(_cleanup_old_tasks())
 
 
 async def _cleanup_old_tasks():
