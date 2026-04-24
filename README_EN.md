@@ -853,7 +853,7 @@ LogMind/
 - [x] 🆕 Smart tool result truncation (head+tail preservation for stack traces)
 - [x] 🆕 MCP Tools expanded to 13 (added ai_effectiveness / agent_analytics)
 - [x] 🆕 Cross-service root cause correlation (upstream/downstream cascade detection + prompt injection)
-- [ ] Intelligent log sampling (per-service adaptive sampling strategy)
+- [x] 🆕 Intelligent log sampling (adaptive budget + severity-weighted + diversity guarantee + temporal spread)
 
 ### v2.5 — Deep Ops Integration
 

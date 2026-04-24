@@ -834,7 +834,7 @@ LogMind/
 │   │   └── README.md               #   配置说明
 │   └── hermes/                     #   Hermes Agent Skill
 │       └── SKILL.md                #   运维技能文件
-├── tests/                          # 🆕 单元测试 (180+ 用例)
+├── tests/                          # 🆕 单元测试 (212+ 用例)
 ├── configs/prompts/                # 内置 Prompt 模板 (YAML)
 ├── migrations/                     # 数据库迁移脚本
 ├── deploy/                         # 部署配置
@@ -955,7 +955,7 @@ LogMind/
 - [x] 🆕 Agent 工具结果智能截断 (首尾保留, 堆栈根因不丢失)
 - [x] 🆕 MCP Tools 扩展至 13 个 (新增 ai_effectiveness / agent_analytics)
 - [x] 🆕 跨服务根因关联 (上下游级联故障自动检测 + Prompt 注入)
-- [ ] 智能日志采样 (per-service 自适应采样策略)
+- [x] 🆕 智能日志采样 (自适应预算 + 严重度加权 + 多样性保证 + 时序分布)
 
 ### v2.5 — 运维深度集成
 
