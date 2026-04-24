@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     analysis_agent_max_steps: int = 5
     analysis_agent_enabled: bool = True
 
+    # ── Adaptive Log Sampling ────────────────────────────
+    analysis_sampling_default_budget: int = 150
+    analysis_sampling_min_budget: int = 20
+    analysis_sampling_max_budget: int = 300
+
     # ── Semantic Dedup (Phase 3) ──────────────────────────
     analysis_semantic_dedup_enabled: bool = True
     analysis_semantic_dedup_threshold: float = 0.92

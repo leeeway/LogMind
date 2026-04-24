@@ -91,11 +91,26 @@ class LogPreprocessStage(PipelineStage):
                 seen.add(dedup_key)
                 unique_logs.append(log)
 
-        # Phase 3: Diversity-aware sampling
-        if len(unique_logs) > MAX_SAMPLED_LOGS:
-            sampled_logs = self._diversity_sample(unique_logs, MAX_SAMPLED_LOGS)
-        else:
-            sampled_logs = unique_logs
+        # Phase 3: Adaptive intelligent sampling
+        from logmind.domain.analysis.adaptive_sampler import (
+            adaptive_sample,
+            compute_adaptive_budget,
+        )
+
+        # Compute per-service adaptive budget
+        budget = compute_adaptive_budget(
+            business_line_id=ctx.business_line_id,
+            input_count=len(unique_logs),
+            default_budget=MAX_SAMPLED_LOGS,
+        )
+
+        sampled_logs, sampling_metrics = adaptive_sample(
+            unique_logs,
+            max_budget=budget,
+            business_line_id=ctx.business_line_id,
+            level_extractor=self._extract_level,
+            message_extractor=self._extract_message,
+        )
 
         # Phase 4: Format logs with business context
         # Apply sensitive data masking before sending to LLM
@@ -155,6 +170,7 @@ class LogPreprocessStage(PipelineStage):
             "formatted_count": len(lines),
             "has_stack_traces": ctx.has_stack_traces,
             "language": ctx.language,
+            "sampling": sampling_metrics.to_dict(),
         }
 
         logger.info("log_preprocess_completed", **ctx.log_metadata, task_id=ctx.task_id)
