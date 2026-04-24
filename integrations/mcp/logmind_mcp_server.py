@@ -351,6 +351,50 @@ async def list_tools() -> list[Tool]:
                 "required": ["business_line_id", "enabled"],
             },
         ),
+        Tool(
+            name="logmind_ai_effectiveness",
+            description=(
+                "Get AI analysis effectiveness metrics: accuracy trend based on user feedback, "
+                "MTTR (mean time to resolution), token savings from dedup, and top error patterns. "
+                "Use this to assess how well the AI is performing."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Look back N days (default: 7)",
+                        "default": 7,
+                    },
+                    "business_line_id": {
+                        "type": "string",
+                        "description": "Optional: filter by business line UUID",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="logmind_agent_analytics",
+            description=(
+                "Get Agent tool usage analytics: which tools are used most, success rates, "
+                "common tool chain patterns, and correlation with analysis quality. "
+                "Use this to understand and optimize the AI agent's investigation strategy."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Look back N days (default: 7)",
+                        "default": 7,
+                    },
+                    "business_line_id": {
+                        "type": "string",
+                        "description": "Optional: filter by business line UUID",
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -450,6 +494,20 @@ async def _dispatch(name: str, args: dict) -> str:
             f"/business-lines/{args['business_line_id']}",
             body={"ai_enabled": args["enabled"]},
         )
+        return _json_summary(data)
+
+    elif name == "logmind_ai_effectiveness":
+        params: dict[str, Any] = {"days": args.get("days", 7)}
+        if args.get("business_line_id"):
+            params["business_line_id"] = args["business_line_id"]
+        data = await _api_get("/dashboard/ai-effectiveness", params=params)
+        return _json_summary(data)
+
+    elif name == "logmind_agent_analytics":
+        params = {"days": args.get("days", 7)}
+        if args.get("business_line_id"):
+            params["business_line_id"] = args["business_line_id"]
+        data = await _api_get("/dashboard/agent-tool-analytics", params=params)
         return _json_summary(data)
 
     else:

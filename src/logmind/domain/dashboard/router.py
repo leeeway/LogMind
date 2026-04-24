@@ -4,11 +4,13 @@ Dashboard Domain — API Router (Enhanced)
 Aggregation endpoints for the Dashboard UI.
 
 Endpoints:
-  - GET /overview      — High-level KPIs (existing, refactored)
-  - GET /trends        — Time-series data for charts (error/token/task trends)
-  - GET /business-health  — Per-business-line health scoring
-  - GET /cost-analysis — Token consumption + dedup savings estimation
-  - GET /dedup-stats   — Fingerprint / semantic dedup hit rate statistics
+  - GET /overview           — High-level KPIs (existing, refactored)
+  - GET /trends             — Time-series data for charts (error/token/task trends)
+  - GET /business-health    — Per-business-line health scoring
+  - GET /cost-analysis      — Token consumption + dedup savings estimation
+  - GET /dedup-stats        — Fingerprint / semantic dedup hit rate statistics
+  - GET /ai-effectiveness   — AI accuracy trends, MTTR, top error patterns
+  - GET /agent-tool-analytics — Agent tool usage ranking & strategy patterns
 """
 
 from __future__ import annotations
@@ -888,3 +890,425 @@ async def _get_biz_name_map(session: AsyncSession, tenant_id: str) -> dict[str, 
     )
     result = await session.execute(stmt)
     return {r.id: r.name for r in result.all()}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Endpoint 6: AI Effectiveness — Accuracy & MTTR Tracking
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class AccuracyTrend(BaseSchema):
+    """Per-day AI accuracy based on user feedback."""
+    date: str
+    total_results: int = 0
+    positive: int = 0
+    negative: int = 0
+    accuracy_rate: float = Field(0.0, description="0.0-1.0, positive / (positive + negative)")
+
+
+class TopErrorPattern(BaseSchema):
+    """Most frequent error patterns."""
+    pattern: str = Field(..., description="Error type/exception class or first line summary")
+    count: int
+    avg_confidence: float = 0.0
+    last_seen: str | None = None
+
+
+class AIEffectivenessResponse(BaseSchema):
+    # Overall accuracy
+    total_feedback_results: int = 0
+    positive_count: int = 0
+    negative_count: int = 0
+    overall_accuracy: float = Field(0.0, description="0.0-1.0")
+    # Accuracy trend
+    accuracy_trend: list[AccuracyTrend]
+    # MTTR (Mean Time To Resolution) — avg time from task creation to completion
+    avg_mttr_minutes: float = Field(0.0, description="Average minutes from create to complete")
+    # Token efficiency
+    avg_tokens_per_result: int = 0
+    # Dedup savings summary
+    total_tokens_saved: int = 0
+    savings_percentage: float = 0.0
+    # Top error patterns
+    top_error_patterns: list[TopErrorPattern]
+    period_days: int
+
+
+@router.get("/ai-effectiveness", response_model=AIEffectivenessResponse)
+async def get_ai_effectiveness(
+    session: DBSession,
+    user: CurrentUser,
+    days: int = Query(7, ge=1, le=90),
+    business_line_id: str | None = Query(None),
+):
+    """
+    AI analysis effectiveness tracking dashboard.
+
+    Metrics:
+      - Accuracy trend: based on operator +1/-1 feedback
+      - MTTR: average time from task creation to completion
+      - Token efficiency: average tokens per useful result
+      - Top error patterns: most frequently analyzed errors
+    """
+    tenant_id = user.tenant_id
+    since, now = _build_time_range(days)
+
+    # ── 1. Feedback accuracy ─────────────────────────────
+    # Daily accuracy trend
+    day_trunc = func.date_trunc("day", LogAnalysisTask.created_at)
+    accuracy_stmt = (
+        select(
+            day_trunc.label("period"),
+            func.count().label("total"),
+            func.count(case(
+                (AnalysisResult.feedback_score == 1, 1),
+            )).label("positive"),
+            func.count(case(
+                (AnalysisResult.feedback_score == -1, 1),
+            )).label("negative"),
+        )
+        .select_from(AnalysisResult)
+        .join(LogAnalysisTask, AnalysisResult.task_id == LogAnalysisTask.id)
+        .where(
+            LogAnalysisTask.tenant_id == tenant_id,
+            LogAnalysisTask.created_at >= since,
+        )
+        .group_by(day_trunc)
+        .order_by(day_trunc)
+    )
+    if business_line_id:
+        accuracy_stmt = accuracy_stmt.where(
+            LogAnalysisTask.business_line_id == business_line_id
+        )
+    accuracy_rows = (await session.execute(accuracy_stmt)).all()
+
+    # Build trend with zero-fill
+    acc_map: dict[str, dict] = {}
+    total_pos, total_neg, total_fb = 0, 0, 0
+    for r in accuracy_rows:
+        key = r.period.strftime("%Y-%m-%d")
+        with_fb = r.positive + r.negative
+        acc_map[key] = {
+            "total": r.total,
+            "positive": r.positive,
+            "negative": r.negative,
+            "rate": r.positive / max(with_fb, 1) if with_fb > 0 else 0.0,
+        }
+        total_pos += r.positive
+        total_neg += r.negative
+        total_fb += r.total
+
+    accuracy_trend: list[AccuracyTrend] = []
+    current = since.replace(hour=0, minute=0, second=0, microsecond=0)
+    while current <= now:
+        key = current.strftime("%Y-%m-%d")
+        d = acc_map.get(key, {})
+        accuracy_trend.append(AccuracyTrend(
+            date=key,
+            total_results=d.get("total", 0),
+            positive=d.get("positive", 0),
+            negative=d.get("negative", 0),
+            accuracy_rate=round(d.get("rate", 0.0), 4),
+        ))
+        current += timedelta(days=1)
+
+    with_feedback = total_pos + total_neg
+    overall_accuracy = total_pos / max(with_feedback, 1) if with_feedback > 0 else 0.0
+
+    # ── 2. MTTR ──────────────────────────────────────────
+    mttr_stmt = (
+        select(
+            func.avg(
+                func.extract("epoch", LogAnalysisTask.completed_at)
+                - func.extract("epoch", LogAnalysisTask.created_at)
+            ).label("avg_seconds"),
+        )
+        .select_from(LogAnalysisTask)
+        .where(
+            LogAnalysisTask.tenant_id == tenant_id,
+            LogAnalysisTask.created_at >= since,
+            LogAnalysisTask.status == "completed",
+            LogAnalysisTask.completed_at.isnot(None),
+        )
+    )
+    if business_line_id:
+        mttr_stmt = mttr_stmt.where(
+            LogAnalysisTask.business_line_id == business_line_id
+        )
+    mttr_result = (await session.execute(mttr_stmt)).scalar_one_or_none()
+    avg_mttr_minutes = round((mttr_result or 0) / 60, 1)
+
+    # ── 3. Token efficiency ──────────────────────────────
+    token_stmt = (
+        select(
+            func.coalesce(func.sum(LogAnalysisTask.token_usage), 0).label("total_tokens"),
+            func.count(case(
+                (LogAnalysisTask.token_usage > 0, 1),
+            )).label("ai_tasks"),
+            func.count(case(
+                ((LogAnalysisTask.status == "completed") &
+                 (LogAnalysisTask.token_usage == 0), 1),
+            )).label("dedup_tasks"),
+        )
+        .select_from(LogAnalysisTask)
+    )
+    token_stmt = _base_task_filter(token_stmt, tenant_id, since, business_line_id)
+    token_row = (await session.execute(token_stmt)).one()
+    avg_tokens = token_row.total_tokens // max(token_row.ai_tasks, 1)
+    estimated_saved = token_row.dedup_tasks * avg_tokens
+    hypothetical = token_row.total_tokens + estimated_saved
+    savings_pct = (estimated_saved / max(hypothetical, 1)) * 100
+
+    # ── 4. Top error patterns ────────────────────────────
+    # Extract from AnalysisResult — group by first 120 chars of content
+    pattern_stmt = (
+        select(
+            func.substring(AnalysisResult.content, 1, 120).label("pattern"),
+            func.count().label("count"),
+            func.avg(AnalysisResult.confidence_score).label("avg_confidence"),
+            func.max(AnalysisResult.created_at).label("last_seen"),
+        )
+        .select_from(AnalysisResult)
+        .join(LogAnalysisTask, AnalysisResult.task_id == LogAnalysisTask.id)
+        .where(
+            LogAnalysisTask.tenant_id == tenant_id,
+            LogAnalysisTask.created_at >= since,
+            AnalysisResult.severity.in_(["critical", "warning"]),
+        )
+        .group_by(func.substring(AnalysisResult.content, 1, 120))
+        .order_by(func.count().desc())
+        .limit(10)
+    )
+    if business_line_id:
+        pattern_stmt = pattern_stmt.where(
+            LogAnalysisTask.business_line_id == business_line_id
+        )
+    pattern_rows = (await session.execute(pattern_stmt)).all()
+
+    top_patterns = [
+        TopErrorPattern(
+            pattern=r.pattern,
+            count=r.count,
+            avg_confidence=round(float(r.avg_confidence or 0), 3),
+            last_seen=r.last_seen.isoformat() if r.last_seen else None,
+        )
+        for r in pattern_rows
+    ]
+
+    return AIEffectivenessResponse(
+        total_feedback_results=total_fb,
+        positive_count=total_pos,
+        negative_count=total_neg,
+        overall_accuracy=round(overall_accuracy, 4),
+        accuracy_trend=accuracy_trend,
+        avg_mttr_minutes=avg_mttr_minutes,
+        avg_tokens_per_result=avg_tokens,
+        total_tokens_saved=estimated_saved,
+        savings_percentage=round(savings_pct, 1),
+        top_error_patterns=top_patterns,
+        period_days=days,
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Endpoint 7: Agent Tool Analytics — Tool Usage & Strategy
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class ToolUsageRank(BaseSchema):
+    """Usage statistics for a single agent tool."""
+    tool_name: str
+    call_count: int
+    success_count: int
+    failure_count: int
+    success_rate: float = Field(0.0, description="0.0-1.0")
+    avg_duration_ms: int = 0
+    avg_result_length: int = 0
+
+
+class ToolChainPattern(BaseSchema):
+    """
+    A common tool invocation sequence observed across tasks.
+
+    Correlates tool chains with analysis quality to identify
+    which sequences produce the best results.
+    """
+    chain: str = Field(
+        ..., description="Tool sequence, e.g. 'search_logs → count_error_patterns → get_log_context'"
+    )
+    occurrence_count: int
+    avg_quality_score: float = Field(
+        0.0, description="Average quality grade: high=3, medium=2, low=1"
+    )
+    avg_steps: float = 0.0
+
+
+class AgentToolAnalyticsResponse(BaseSchema):
+    total_tool_calls: int = 0
+    total_tasks_with_agent: int = 0
+    avg_tools_per_task: float = 0.0
+    avg_steps_per_task: float = 0.0
+    # Tool usage ranking
+    tool_usage: list[ToolUsageRank]
+    # Common tool chain patterns
+    tool_chains: list[ToolChainPattern]
+    period_days: int
+
+
+@router.get("/agent-tool-analytics", response_model=AgentToolAnalyticsResponse)
+async def get_agent_tool_analytics(
+    session: DBSession,
+    user: CurrentUser,
+    days: int = Query(7, ge=1, le=90),
+    business_line_id: str | None = Query(None),
+):
+    """
+    Agent tool usage analytics and strategy optimization insights.
+
+    Mines AgentToolCall records to:
+      1. Rank tools by usage frequency and success rate
+      2. Identify common tool chain patterns (sequences)
+      3. Correlate tool chains with analysis quality
+      4. Surface the most effective investigation strategies
+
+    Use this to understand how the AI agent investigates errors
+    and which strategies produce the highest quality analyses.
+    """
+    from logmind.domain.analysis.models import AgentToolCall
+
+    tenant_id = user.tenant_id
+    since, _ = _build_time_range(days)
+
+    # ── 1. Tool usage ranking ────────────────────────────
+    usage_stmt = (
+        select(
+            AgentToolCall.tool_name,
+            func.count().label("call_count"),
+            func.count(case(
+                (AgentToolCall.success == True, 1),  # noqa: E712
+            )).label("success_count"),
+            func.count(case(
+                (AgentToolCall.success == False, 1),  # noqa: E712
+            )).label("failure_count"),
+            func.avg(AgentToolCall.duration_ms).label("avg_duration"),
+            func.avg(AgentToolCall.result_length).label("avg_result_len"),
+        )
+        .select_from(AgentToolCall)
+        .join(LogAnalysisTask, AgentToolCall.task_id == LogAnalysisTask.id)
+        .where(
+            LogAnalysisTask.tenant_id == tenant_id,
+            LogAnalysisTask.created_at >= since,
+        )
+        .group_by(AgentToolCall.tool_name)
+        .order_by(func.count().desc())
+    )
+    if business_line_id:
+        usage_stmt = usage_stmt.where(
+            LogAnalysisTask.business_line_id == business_line_id
+        )
+    usage_rows = (await session.execute(usage_stmt)).all()
+
+    tool_usage = [
+        ToolUsageRank(
+            tool_name=r.tool_name,
+            call_count=r.call_count,
+            success_count=r.success_count,
+            failure_count=r.failure_count,
+            success_rate=round(r.success_count / max(r.call_count, 1), 4),
+            avg_duration_ms=int(r.avg_duration or 0),
+            avg_result_length=int(r.avg_result_len or 0),
+        )
+        for r in usage_rows
+    ]
+    total_calls = sum(t.call_count for t in tool_usage)
+
+    # ── 2. Per-task tool chains ──────────────────────────
+    # Get all tool calls ordered by (task_id, step)
+    chain_stmt = (
+        select(
+            AgentToolCall.task_id,
+            AgentToolCall.step,
+            AgentToolCall.tool_name,
+        )
+        .join(LogAnalysisTask, AgentToolCall.task_id == LogAnalysisTask.id)
+        .where(
+            LogAnalysisTask.tenant_id == tenant_id,
+            LogAnalysisTask.created_at >= since,
+        )
+        .order_by(AgentToolCall.task_id, AgentToolCall.step)
+    )
+    if business_line_id:
+        chain_stmt = chain_stmt.where(
+            LogAnalysisTask.business_line_id == business_line_id
+        )
+    chain_rows = (await session.execute(chain_stmt)).all()
+
+    # Group by task_id → build chain string
+    from collections import defaultdict
+    task_chains: dict[str, list[str]] = defaultdict(list)
+    for r in chain_rows:
+        task_chains[r.task_id].append(r.tool_name)
+
+    total_tasks_with_agent = len(task_chains)
+    avg_tools = total_calls / max(total_tasks_with_agent, 1)
+    avg_steps = (
+        sum(len(c) for c in task_chains.values()) / max(total_tasks_with_agent, 1)
+    )
+
+    # Count chain patterns and correlate with quality
+    # Get quality scores for tasks that have agent tool calls
+    quality_map: dict[str, float] = {}
+    if task_chains:
+        task_ids = list(task_chains.keys())
+        # Batch fetch quality (approximate by avg confidence of results)
+        quality_stmt = (
+            select(
+                AnalysisResult.task_id,
+                func.avg(AnalysisResult.confidence_score).label("avg_conf"),
+            )
+            .where(AnalysisResult.task_id.in_(task_ids))
+            .group_by(AnalysisResult.task_id)
+        )
+        quality_rows = (await session.execute(quality_stmt)).all()
+        for r in quality_rows:
+            # Map confidence to quality grade: >=0.8=high(3), >=0.5=med(2), else low(1)
+            conf = float(r.avg_conf or 0)
+            if conf >= 0.8:
+                quality_map[r.task_id] = 3.0
+            elif conf >= 0.5:
+                quality_map[r.task_id] = 2.0
+            else:
+                quality_map[r.task_id] = 1.0
+
+    chain_counter: dict[str, dict] = defaultdict(lambda: {
+        "count": 0, "quality_sum": 0.0, "step_sum": 0,
+    })
+    for task_id, tools in task_chains.items():
+        chain_key = " → ".join(tools)
+        chain_counter[chain_key]["count"] += 1
+        chain_counter[chain_key]["quality_sum"] += quality_map.get(task_id, 2.0)
+        chain_counter[chain_key]["step_sum"] += len(tools)
+
+    # Sort by frequency, take top 10
+    sorted_chains = sorted(
+        chain_counter.items(), key=lambda x: x[1]["count"], reverse=True
+    )[:10]
+
+    tool_chains = [
+        ToolChainPattern(
+            chain=chain_key,
+            occurrence_count=data["count"],
+            avg_quality_score=round(data["quality_sum"] / max(data["count"], 1), 2),
+            avg_steps=round(data["step_sum"] / max(data["count"], 1), 1),
+        )
+        for chain_key, data in sorted_chains
+    ]
+
+    return AgentToolAnalyticsResponse(
+        total_tool_calls=total_calls,
+        total_tasks_with_agent=total_tasks_with_agent,
+        avg_tools_per_task=round(avg_tools, 1),
+        avg_steps_per_task=round(avg_steps, 1),
+        tool_usage=tool_usage,
+        tool_chains=tool_chains,
+        period_days=days,
+    )
+

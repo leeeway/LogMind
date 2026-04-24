@@ -948,8 +948,13 @@ LogMind/
 - [x] 分析质量自评估 (低质量结论自动触发重分析)
 - [x] 🆕 MCP Server 集成 (Hermes Agent / OpenClaw / Claude Code)
 - [x] 🆕 Hermes Skill 运维技能 (零代码 Agent 对话集成)
+- [x] 🆕 AI 效果追踪 Dashboard (准确率趋势/MTTR/Top 错误模式)
+- [x] 🆕 Agent 工具策略分析 (工具使用排名/调用链模式/质量关联)
+- [x] 🆕 Pipeline 学习逻辑解耦 (tasks.py → _run_learning_hooks)
+- [x] 🆕 夜间时区修复 + Digest N+1 查询优化
+- [x] 🆕 Agent 工具结果智能截断 (首尾保留, 堆栈根因不丢失)
+- [x] 🆕 MCP Tools 扩展至 13 个 (新增 ai_effectiveness / agent_analytics)
 - [ ] 跨服务根因关联 (Service A 超时时自动检查 Service B 是否异常)
-- [ ] Agent 工具策略自优化 (从 ToolCallRecord 学习最有效的工具链)
 - [ ] 智能日志采样 (per-service 自适应采样策略)
 
 ### v2.5 — 运维深度集成

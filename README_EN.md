@@ -846,11 +846,14 @@ LogMind/
 - [x] Analysis quality self-assessment (low-quality conclusions auto re-analyze)
 - [x] 🆕 MCP Server integration (Hermes Agent / OpenClaw / Claude Code)
 - [x] 🆕 Hermes Skill for ops (zero-code Agent conversation integration)
-- [ ] Web management dashboard (Vue.js / React)
-- [ ] Alert rule engine enhancement (keyword / regex / threshold triggers)
-- [ ] Log trend analysis dashboard + anomaly baseline detection
-- [ ] Python / Go stack trace deep parsing support
-- [ ] Alert silencing / aggregation / escalation policies
+- [x] 🆕 AI effectiveness dashboard (accuracy trends / MTTR / top error patterns)
+- [x] 🆕 Agent tool strategy analytics (usage ranking / chain patterns / quality correlation)
+- [x] 🆕 Pipeline learning hooks decoupling (tasks.py → _run_learning_hooks)
+- [x] 🆕 Night timezone fix + Digest N+1 query optimization
+- [x] 🆕 Smart tool result truncation (head+tail preservation for stack traces)
+- [x] 🆕 MCP Tools expanded to 13 (added ai_effectiveness / agent_analytics)
+- [ ] Cross-service root cause correlation (auto-check upstream/downstream on failure)
+- [ ] Intelligent log sampling (per-service adaptive sampling strategy)
 
 ### v2.5 — Deep Ops Integration
 
