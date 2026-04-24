@@ -116,8 +116,16 @@ async def _build_tenant_digest(
     # ── 2. Per-business-line breakdown ───────────────────
     biz_ids = set(t.business_line_id for t in tasks if t.business_line_id)
     biz_stats = []
+
+    # Batch-load all business lines in one query (avoid N+1)
+    biz_map = {}
+    if biz_ids:
+        biz_stmt = select(BusinessLine).where(BusinessLine.id.in_(biz_ids))
+        biz_result = await session.execute(biz_stmt)
+        biz_map = {b.id: b for b in biz_result.scalars().all()}
+
     for biz_id in biz_ids:
-        biz = await session.get(BusinessLine, biz_id)
+        biz = biz_map.get(biz_id)
         biz_name = biz.name if biz else biz_id[:8]
         biz_tasks = [t for t in tasks if t.business_line_id == biz_id]
         biz_errors = sum(t.log_count or 0 for t in biz_tasks)

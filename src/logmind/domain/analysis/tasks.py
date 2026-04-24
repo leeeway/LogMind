@@ -290,97 +290,8 @@ async def _execute_analysis(task_id: str):
                     task_id=ctx.task_id,
                 )
 
-            # Phase 3: Index analysis conclusions into vector store for future dedup
-            if ctx.analysis_results and not ctx.semantic_dedup_hit:
-                try:
-                    from logmind.domain.analysis.analysis_indexer import index_analysis_result
-                    # Combine all analysis results into a single content block
-                    combined_content = "\n\n".join(
-                        f"[{r.get('severity', 'info').upper()}] {r.get('content', '')}"
-                        for r in ctx.analysis_results
-                    )
-                    # Use the error signature extracted by SemanticDedupStage
-                    error_sig = ctx.error_signature
-                    if not error_sig:
-                        # Fallback: generate signature now
-                        from logmind.domain.analysis.semantic_dedup import extract_error_signature
-                        error_sig = extract_error_signature(ctx.processed_logs, ctx.language)
-                    if error_sig and len(error_sig) >= 20:
-                        top_severity = "info"
-                        for r in ctx.analysis_results:
-                            s = r.get("severity", "info")
-                            if s == "critical":
-                                top_severity = "critical"
-                                break
-                            elif s == "warning" and top_severity != "critical":
-                                top_severity = "warning"
-                        index_analysis_result.delay(
-                            task_id=task_id,
-                            business_line_id=ctx.business_line_id,
-                            error_signature=error_sig,
-                            analysis_content=combined_content[:3000],
-                            severity=top_severity,
-                        )
-                        logger.info("analysis_index_dispatched", task_id=task_id)
-                except Exception as e:
-                    logger.warning("analysis_index_dispatch_failed", error=str(e))
-
-            # Phase 4: Store AI-learned error signals for self-learning loop
-            if ctx.learned_signals:
-                try:
-                    from logmind.domain.log.error_signals import store_learned_signal
-
-                    confidence = _compute_top_confidence(ctx.analysis_results)
-
-                    stored_count = 0
-                    for signal in ctx.learned_signals:
-                        await store_learned_signal(
-                            signal=signal,
-                            source_task_id=task_id,
-                            business_line_id=ctx.business_line_id,
-                            confidence=confidence,
-                        )
-                        stored_count += 1
-
-                    logger.info(
-                        "learned_signals_stored",
-                        count=stored_count,
-                        signals=ctx.learned_signals[:5],
-                        task_id=task_id,
-                    )
-                except Exception as e:
-                    logger.warning("learned_signals_store_failed", error=str(e))
-
-            # Phase 5: Store AI-extracted experience rules for prompt evolution
-            if ctx.learned_rules:
-                try:
-                    from logmind.domain.analysis.business_profile import store_experience_rule
-
-                    confidence = _compute_top_confidence(ctx.analysis_results)
-
-                    for rule in ctx.learned_rules:
-                        await store_experience_rule(
-                            rule=rule,
-                            business_line_id=ctx.business_line_id,
-                            source_task_id=task_id,
-                            confidence=confidence,
-                        )
-
-                    logger.info(
-                        "experience_rules_stored",
-                        count=len(ctx.learned_rules),
-                        rules=ctx.learned_rules[:3],
-                        task_id=task_id,
-                    )
-                except Exception as e:
-                    logger.warning("experience_rules_store_failed", error=str(e))
-
-            # Invalidate profile cache so next analysis picks up new data
-            try:
-                from logmind.domain.analysis.business_profile import invalidate_profile_cache
-                invalidate_profile_cache(ctx.business_line_id)
-            except Exception:
-                pass
+            # Self-learning hooks (non-critical, fire-and-forget)
+            await _run_learning_hooks(ctx, task_id)
         else:
             # ── AI-off mode: send direct error notification ──
             async with get_db_context() as session:
@@ -417,6 +328,100 @@ async def _execute_analysis(task_id: str):
                 await _send_error_log_notification(ctx, webhook_url)
     finally:
         await close_celery_es_client()
+
+
+async def _run_learning_hooks(ctx, task_id: str):
+    """
+    Post-analysis self-learning hooks (non-critical).
+
+    Handles:
+      - Vector index write-back (for future semantic dedup)
+      - Error signal storage (for quality filter evolution)
+      - Experience rule storage (for prompt evolution)
+      - Profile cache invalidation
+    """
+    # Hook 1: Index analysis conclusions into vector store for future dedup
+    if ctx.analysis_results and not ctx.semantic_dedup_hit:
+        try:
+            from logmind.domain.analysis.analysis_indexer import index_analysis_result
+            combined_content = "\n\n".join(
+                f"[{r.get('severity', 'info').upper()}] {r.get('content', '')}"
+                for r in ctx.analysis_results
+            )
+            error_sig = ctx.error_signature
+            if not error_sig:
+                from logmind.domain.analysis.semantic_dedup import extract_error_signature
+                error_sig = extract_error_signature(ctx.processed_logs, ctx.language)
+            if error_sig and len(error_sig) >= 20:
+                top_severity = "info"
+                for r in ctx.analysis_results:
+                    s = r.get("severity", "info")
+                    if s == "critical":
+                        top_severity = "critical"
+                        break
+                    elif s == "warning" and top_severity != "critical":
+                        top_severity = "warning"
+                index_analysis_result.delay(
+                    task_id=task_id,
+                    business_line_id=ctx.business_line_id,
+                    error_signature=error_sig,
+                    analysis_content=combined_content[:3000],
+                    severity=top_severity,
+                )
+                logger.info("analysis_index_dispatched", task_id=task_id)
+        except Exception as e:
+            logger.warning("analysis_index_dispatch_failed", error=str(e))
+
+    # Hook 2: Store AI-learned error signals for self-learning loop
+    if ctx.learned_signals:
+        try:
+            from logmind.domain.log.error_signals import store_learned_signal
+            confidence = _compute_top_confidence(ctx.analysis_results)
+            stored_count = 0
+            for signal in ctx.learned_signals:
+                await store_learned_signal(
+                    signal=signal,
+                    source_task_id=task_id,
+                    business_line_id=ctx.business_line_id,
+                    confidence=confidence,
+                )
+                stored_count += 1
+            logger.info(
+                "learned_signals_stored",
+                count=stored_count,
+                signals=ctx.learned_signals[:5],
+                task_id=task_id,
+            )
+        except Exception as e:
+            logger.warning("learned_signals_store_failed", error=str(e))
+
+    # Hook 3: Store AI-extracted experience rules for prompt evolution
+    if ctx.learned_rules:
+        try:
+            from logmind.domain.analysis.business_profile import store_experience_rule
+            confidence = _compute_top_confidence(ctx.analysis_results)
+            for rule in ctx.learned_rules:
+                await store_experience_rule(
+                    rule=rule,
+                    business_line_id=ctx.business_line_id,
+                    source_task_id=task_id,
+                    confidence=confidence,
+                )
+            logger.info(
+                "experience_rules_stored",
+                count=len(ctx.learned_rules),
+                rules=ctx.learned_rules[:3],
+                task_id=task_id,
+            )
+        except Exception as e:
+            logger.warning("experience_rules_store_failed", error=str(e))
+
+    # Hook 4: Invalidate profile cache so next analysis picks up new data
+    try:
+        from logmind.domain.analysis.business_profile import invalidate_profile_cache
+        invalidate_profile_cache(ctx.business_line_id)
+    except Exception:
+        pass
 
 
 async def _send_ai_alerts(ctx, webhook_url: str):

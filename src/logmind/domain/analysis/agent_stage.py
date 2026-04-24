@@ -168,7 +168,11 @@ class AgentInferenceStage(PipelineStage):
                         tool_duration_ms = int((time.monotonic() - t0) * 1000)
 
                         if len(result) > 8000:
-                            result = result[:8000] + "\n... (truncated)"
+                            # Smart truncation: keep head (error msgs) + tail (stack root cause)
+                            head = result[:3500]
+                            tail = result[-2000:]
+                            omitted = len(result) - 5500
+                            result = f"{head}\n\n... ({omitted} chars omitted) ...\n\n{tail}"
 
                         # Record for persistence
                         ctx.tool_call_records.append({

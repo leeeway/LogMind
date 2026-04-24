@@ -24,8 +24,19 @@ from logmind.shared.encryption import decrypt_value
 
 logger = get_logger(__name__)
 
-# Cache provider instances by config_id
-_provider_cache: dict[str, BaseProvider] = {}
+
+class _CacheEntry:
+    """Type-safe cache entry for provider instances."""
+    __slots__ = ("config_id", "event_loop", "provider")
+
+    def __init__(self, config_id: str, event_loop, provider: BaseProvider):
+        self.config_id = config_id
+        self.event_loop = event_loop
+        self.provider = provider
+
+
+# Cache provider instances by "{config_id}_{loop_id}"
+_provider_cache: dict[str, _CacheEntry] = {}
 
 
 class ProviderManager:
@@ -173,8 +184,8 @@ class ProviderManager:
 
         # Clean up cache for closed/dead event loops to prevent memory leaks in Celery
         dead_keys = []
-        for key, (_, cached_loop, provider) in _provider_cache.items():
-            if cached_loop is not None and getattr(cached_loop, "is_closed", lambda: False)():
+        for key, entry in _provider_cache.items():
+            if entry.event_loop is not None and getattr(entry.event_loop, "is_closed", lambda: False)():
                 dead_keys.append(key)
         for key in dead_keys:
             # We cannot easily await provider.close() here if we aren't in an async function,
@@ -183,7 +194,7 @@ class ProviderManager:
 
         cache_key = f"{config.id}_{loop_id}"
         if cache_key in _provider_cache:
-            return _provider_cache[cache_key][2]
+            return _provider_cache[cache_key].provider
 
         # Decrypt API key
         api_key = ""
@@ -209,14 +220,18 @@ class ProviderManager:
             **model_params,
         )
 
-        _provider_cache[cache_key] = (config.id, loop if 'loop' in locals() else None, provider)
+        _provider_cache[cache_key] = _CacheEntry(
+            config_id=config.id,
+            event_loop=loop if 'loop' in locals() else None,
+            provider=provider,
+        )
         return provider
 
     @staticmethod
     async def clear_cache():
         """Close all cached providers and clear the cache."""
-        for _, _, provider in _provider_cache.values():
-            await provider.close()
+        for entry in _provider_cache.values():
+            await entry.provider.close()
         _provider_cache.clear()
 
 

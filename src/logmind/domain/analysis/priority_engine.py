@@ -288,7 +288,14 @@ class PriorityDecisionEngine:
 
         Format: "HH:MM-HH:MM" (e.g., "22:00-08:00")
         Supports cross-midnight windows (22:00-08:00).
+
+        Uses Asia/Shanghai timezone by default (configurable via
+        NIGHT_TIMEZONE env var) to ensure correct behavior when
+        deployed on UTC-based K8s clusters.
         """
+        import os
+        from datetime import timedelta, timezone as tz
+
         try:
             parts = night_hours.split("-")
             if len(parts) != 2:
@@ -297,7 +304,10 @@ class PriorityDecisionEngine:
             start_h, start_m = map(int, parts[0].strip().split(":"))
             end_h, end_m = map(int, parts[1].strip().split(":"))
 
-            now = datetime.now()
+            # Use configurable timezone (default: UTC+8 Asia/Shanghai)
+            tz_offset_hours = int(os.environ.get("NIGHT_TIMEZONE_OFFSET", "8"))
+            local_tz = tz(timedelta(hours=tz_offset_hours))
+            now = datetime.now(local_tz)
             current_minutes = now.hour * 60 + now.minute
             start_minutes = start_h * 60 + start_m
             end_minutes = end_h * 60 + end_m

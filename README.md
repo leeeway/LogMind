@@ -834,7 +834,7 @@ LogMind/
 │   │   └── README.md               #   配置说明
 │   └── hermes/                     #   Hermes Agent Skill
 │       └── SKILL.md                #   运维技能文件
-├── tests/                          # 🆕 单元测试 (152+ 用例)
+├── tests/                          # 🆕 单元测试 (172+ 用例)
 ├── configs/prompts/                # 内置 Prompt 模板 (YAML)
 ├── migrations/                     # 数据库迁移脚本
 ├── deploy/                         # 部署配置
