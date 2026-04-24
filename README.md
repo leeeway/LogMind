@@ -37,6 +37,7 @@
 - [业务线配置指南](#-业务线配置指南)
 - [通知模板说明](#-通知模板说明)
 - [API 接口参考](#-api-接口参考)
+- [Agent 生态集成](#-agent-生态集成-mcp--hermes--openclaw)
 - [项目结构](#-项目结构)
 - [未来路标](#-未来路标)
 - [参与贡献](#-参与贡献)
@@ -710,6 +711,65 @@ curl -X POST "http://127.0.0.1:8000/api/v1/knowledge-base/<KB_ID>/documents" \
 
 ---
 
+## 🔌 Agent 生态集成 (MCP / Hermes / OpenClaw)
+
+LogMind 提供标准化的 Agent 集成接口，可与 [Hermes Agent](https://github.com/NousResearch/hermes-agent)、[OpenClaw](https://github.com/openclaw/openclaw)、Claude Code、Cursor 等 MCP 兼容客户端无缝对接。
+
+### MCP Server（推荐）
+
+将 LogMind REST API 封装为 [MCP (Model Context Protocol)](https://modelcontextprotocol.io) 工具服务器，Agent 可通过自然语言直接操控：
+
+```bash
+# 安装
+cd integrations/mcp && pip install -r requirements.txt
+
+# 启动 (stdio 模式)
+python logmind_mcp_server.py
+```
+
+**Hermes Agent 配置** (`~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  logmind:
+    command: "python"
+    args: ["/path/to/LogMind/integrations/mcp/logmind_mcp_server.py"]
+    env:
+      LOGMIND_API_URL: "http://your-logmind:8000"
+      LOGMIND_TOKEN: "your-jwt-token"
+```
+
+**暴露的 MCP 工具** (11 个)：
+
+| 工具 | 说明 | 用法示例 |
+|------|------|----------|
+| `logmind_health` | 平台健康检查 | "LogMind 状态如何？" |
+| `logmind_list_business_lines` | 列出所有业务线 | "有哪些服务在监控？" |
+| `logmind_search_logs` | 搜索 ES 错误日志 | "搜索 tong-kernel 最近的 ERROR" |
+| `logmind_log_stats` | 日志统计聚合 | "今天各服务错误数量" |
+| `logmind_trigger_analysis` | 触发 AI 分析 | "分析 tong-kernel 过去 30 分钟" |
+| `logmind_get_analysis` | 获取分析结果 | "查看分析任务 xxx 的结果" |
+| `logmind_list_alerts` | 查看告警历史 | "显示最近的 P0 告警" |
+| `logmind_ack_alert` | 确认告警 | "确认这个告警" |
+| `logmind_resolve_alert` | 解决告警 | "标记为已解决" |
+| `logmind_submit_feedback` | 提交分析反馈 | "这个分析准确 +1" |
+| `logmind_toggle_ai` | 切换 AI 开关 | "关闭 tong-kernel 的 AI" |
+
+### Hermes Skill
+
+零代码集成 — 将 Skill 文件放入 Hermes 技能目录：
+
+```bash
+mkdir -p ~/.hermes/skills/devops/logmind-ops/
+cp integrations/hermes/SKILL.md ~/.hermes/skills/devops/logmind-ops/
+```
+
+然后在 Hermes 中使用：`/logmind-ops 查看最近的告警`
+
+> 详见 [`integrations/`](integrations/) 目录了解完整配置说明。
+
+---
+
 ## 📁 项目结构
 
 ```
@@ -767,7 +827,14 @@ LogMind/
 │   │   └── dashboard/              # 仪表盘统计 (5 端点)
 │   ├── shared/                     # 通用组件
 │   └── main.py                     # FastAPI 入口
-├── tests/                          # 🆕 单元测试 (120+ 用例)
+├── integrations/                   # 🆕 Agent 生态集成
+│   ├── mcp/                        #   MCP Server (Hermes/OpenClaw/Claude Code)
+│   │   ├── logmind_mcp_server.py   #   11 个 MCP 工具
+│   │   ├── requirements.txt        #   MCP 依赖
+│   │   └── README.md               #   配置说明
+│   └── hermes/                     #   Hermes Agent Skill
+│       └── SKILL.md                #   运维技能文件
+├── tests/                          # 🆕 单元测试 (152+ 用例)
 ├── configs/prompts/                # 内置 Prompt 模板 (YAML)
 ├── migrations/                     # 数据库迁移脚本
 ├── deploy/                         # 部署配置
@@ -879,6 +946,8 @@ LogMind/
 
 - [x] 错误趋势预警 (error rate 环比加速增长 → 提前告警)
 - [x] 分析质量自评估 (低质量结论自动触发重分析)
+- [x] 🆕 MCP Server 集成 (Hermes Agent / OpenClaw / Claude Code)
+- [x] 🆕 Hermes Skill 运维技能 (零代码 Agent 对话集成)
 - [ ] 跨服务根因关联 (Service A 超时时自动检查 Service B 是否异常)
 - [ ] Agent 工具策略自优化 (从 ToolCallRecord 学习最有效的工具链)
 - [ ] 智能日志采样 (per-service 自适应采样策略)
@@ -889,7 +958,7 @@ LogMind/
 - [ ] K8s Event 关联分析 + ConfigMap 变更追踪
 - [ ] 部署系统联动：近期发布记录与错误关联
 - [ ] 多 ES 集群联邦查询
-- [ ] MCP 协议 Agent 工具解耦
+- [ ] MCP 协议 Agent 工具内部解耦 (Pipeline → MCP Tools)
 
 ### v3.0 — Auto-Remediation 自动自愈
 

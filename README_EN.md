@@ -37,6 +37,7 @@
 - [Business Line Configuration Guide](#-business-line-configuration-guide)
 - [Notification Templates](#-notification-templates)
 - [API Reference](#-api-reference)
+- [Agent Ecosystem Integration](#-agent-ecosystem-integration-mcp--hermes--openclaw)
 - [Project Structure](#-project-structure)
 - [Roadmap](#-roadmap)
 - [Contributing](#-contributing)
@@ -655,6 +656,65 @@ curl -X POST "http://127.0.0.1:8000/api/v1/knowledge-base/<KB_ID>/documents" \
 
 ---
 
+## 🔌 Agent Ecosystem Integration (MCP / Hermes / OpenClaw)
+
+LogMind provides standardized Agent integration interfaces, compatible with [Hermes Agent](https://github.com/NousResearch/hermes-agent), [OpenClaw](https://github.com/openclaw/openclaw), Claude Code, Cursor, and other MCP-compatible clients.
+
+### MCP Server (Recommended)
+
+Wraps the LogMind REST API as a [MCP (Model Context Protocol)](https://modelcontextprotocol.io) tool server. Agents can interact with LogMind through natural language:
+
+```bash
+# Install
+cd integrations/mcp && pip install -r requirements.txt
+
+# Start (stdio mode)
+python logmind_mcp_server.py
+```
+
+**Hermes Agent config** (`~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  logmind:
+    command: "python"
+    args: ["/path/to/LogMind/integrations/mcp/logmind_mcp_server.py"]
+    env:
+      LOGMIND_API_URL: "http://your-logmind:8000"
+      LOGMIND_TOKEN: "your-jwt-token"
+```
+
+**Exposed MCP Tools** (11):
+
+| Tool | Description | Example Usage |
+|------|-------------|---------------|
+| `logmind_health` | Platform health check | "How is LogMind doing?" |
+| `logmind_list_business_lines` | List all monitored services | "What services are being monitored?" |
+| `logmind_search_logs` | Search ES error logs | "Search tong-kernel recent ERRORs" |
+| `logmind_log_stats` | Log statistics aggregation | "Error counts per service today" |
+| `logmind_trigger_analysis` | Trigger AI analysis | "Analyze tong-kernel last 30 min" |
+| `logmind_get_analysis` | Get analysis results | "Show results for task xxx" |
+| `logmind_list_alerts` | View alert history | "Show recent P0 alerts" |
+| `logmind_ack_alert` | Acknowledge alert | "Acknowledge this alert" |
+| `logmind_resolve_alert` | Resolve alert | "Mark as resolved" |
+| `logmind_submit_feedback` | Submit analysis feedback | "This analysis is accurate +1" |
+| `logmind_toggle_ai` | Toggle AI on/off | "Disable AI for tong-kernel" |
+
+### Hermes Skill
+
+Zero-code integration — place the Skill file into the Hermes skills directory:
+
+```bash
+mkdir -p ~/.hermes/skills/devops/logmind-ops/
+cp integrations/hermes/SKILL.md ~/.hermes/skills/devops/logmind-ops/
+```
+
+Then use in Hermes: `/logmind-ops show recent alerts`
+
+> See the [`integrations/`](integrations/) directory for full configuration details.
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -780,20 +840,24 @@ LogMind/
 - [x] Sensitive field completion (account/userId/memberId — from real production logs)
 - [x] Business noise detection enhancement (Chinese success response patterns)
 
-### v2.0 — Near-Term Plans
+### v2.0 — AI Self-Evolution Learning System ✅ ← Current
 
+- [x] Error trend detection (period-over-period acceleration → early alert)
+- [x] Analysis quality self-assessment (low-quality conclusions auto re-analyze)
+- [x] 🆕 MCP Server integration (Hermes Agent / OpenClaw / Claude Code)
+- [x] 🆕 Hermes Skill for ops (zero-code Agent conversation integration)
 - [ ] Web management dashboard (Vue.js / React)
 - [ ] Alert rule engine enhancement (keyword / regex / threshold triggers)
 - [ ] Log trend analysis dashboard + anomaly baseline detection
 - [ ] Python / Go stack trace deep parsing support
 - [ ] Alert silencing / aggregation / escalation policies
 
-### v2.0 — Mid-Term Goals (Deep Ops Integration)
+### v2.5 — Deep Ops Integration
 
 - [ ] K8s Event correlation analysis + ConfigMap change tracking
 - [ ] Deployment system integration: recent releases correlated with errors
 - [ ] Multi-ES-cluster federated queries
-- [ ] MCP protocol Agent tool decoupling
+- [ ] MCP protocol internal Agent tool decoupling (Pipeline → MCP Tools)
 
 ### v3.0 — Long-Term Vision (Auto-Remediation Self-Healing)
 
