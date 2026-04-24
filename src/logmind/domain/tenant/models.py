@@ -137,6 +137,12 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Phase B: {"actions": [{"type": "webhook", "url": "...", "trigger_on": ["P0"]}]}
     auto_remediation_config: Mapped[str] = mapped_column(Text, default="{}")
 
+    # Cross-service correlation — upstream and downstream service dependencies (JSON text)
+    # Format: {"upstream": ["<biz_line_id>", ...], "downstream": ["<biz_line_id>", ...]}
+    # When this service has errors, the pipeline auto-checks related services
+    # for correlated failures in the same time window.
+    related_services: Mapped[str] = mapped_column(Text, default="{}")
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Relationships

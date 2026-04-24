@@ -8,6 +8,7 @@ Stages are imported and assembled in the pipeline orchestrator.
 from logmind.domain.analysis.stages.log_fetch import LogFetchStage
 from logmind.domain.analysis.stages.log_preprocess import LogPreprocessStage
 from logmind.domain.analysis.stages.quality_filter import LogQualityFilterStage
+from logmind.domain.analysis.stages.cross_service import CrossServiceCorrelationStage
 from logmind.domain.analysis.stages.prompt_build import PromptBuildStage
 from logmind.domain.analysis.stages.ai_inference import AIInferenceStage
 from logmind.domain.analysis.stages.result_parse import ResultParseStage
@@ -18,6 +19,7 @@ __all__ = [
     "LogFetchStage",
     "LogPreprocessStage",
     "LogQualityFilterStage",
+    "CrossServiceCorrelationStage",
     "PromptBuildStage",
     "AIInferenceStage",
     "ResultParseStage",

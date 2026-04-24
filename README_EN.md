@@ -852,7 +852,7 @@ LogMind/
 - [x] 🆕 Night timezone fix + Digest N+1 query optimization
 - [x] 🆕 Smart tool result truncation (head+tail preservation for stack traces)
 - [x] 🆕 MCP Tools expanded to 13 (added ai_effectiveness / agent_analytics)
-- [ ] Cross-service root cause correlation (auto-check upstream/downstream on failure)
+- [x] 🆕 Cross-service root cause correlation (upstream/downstream cascade detection + prompt injection)
 - [ ] Intelligent log sampling (per-service adaptive sampling strategy)
 
 ### v2.5 — Deep Ops Integration

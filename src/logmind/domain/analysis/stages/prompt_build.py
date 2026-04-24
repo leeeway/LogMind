@@ -91,6 +91,23 @@ class PromptBuildStage(PipelineStage):
         except Exception as e:
             logger.warning("business_profile_inject_failed", error=str(e))
 
+        # Inject cross-service correlation context
+        if ctx.correlated_errors:
+            correlation_lines = ["\n\n## 跨服务关联异常\n以下关联服务在同一时间窗口内也出现了错误，请综合分析是否存在级联故障：\n"]
+            for ce in ctx.correlated_errors:
+                direction_label = "上游服务" if ce["direction"] == "upstream" else "下游服务"
+                correlation_lines.append(f"### {direction_label}: {ce['service_name']} ({ce['error_count']} 条错误)")
+                for i, sample in enumerate(ce.get("error_samples", [])[:3], 1):
+                    correlation_lines.append(f"  {i}. {sample}")
+                correlation_lines.append("")
+            correlation_text = "\n".join(correlation_lines)
+            ctx.user_prompt = ctx.user_prompt + correlation_text
+            logger.info(
+                "cross_service_context_injected",
+                correlated_services=len(ctx.correlated_errors),
+                task_id=ctx.task_id,
+            )
+
         logger.info("prompt_built", template_id=ctx.prompt_template_id, task_id=ctx.task_id)
         return ctx
 

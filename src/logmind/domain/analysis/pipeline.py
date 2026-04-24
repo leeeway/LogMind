@@ -9,17 +9,18 @@ This module defines:
 Stage implementations are in the `stages/` subpackage.
 
 Stages (assembled in tasks.py):
- 1. LogFetchStage         — Fetch logs from ES
- 2. LogPreprocessStage    — Clean, deduplicate, truncate, merge stack traces
- 3. LogQualityFilterStage — Filter false-positive INFO/noise logs
- 4. ErrorBaselineStage    — Query historical error frequency baseline
- 5. ErrorFingerprintStage — Fast MD5 fingerprint dedup (Redis)
- 6. SemanticDedupStage    — Vector-level semantic dedup (ES KNN)
- 7. PromptBuildStage      — Assemble prompt from template
- 8. AgentInferenceStage   — Multi-step AI Agent with tool calling
- 9. ResultParseStage      — Parse AI output to structured results
-10. PriorityDecisionStage — P0/P1/P2 priority scoring + night policy
-11. PersistStage          — Save results to DB
+ 1. LogFetchStage              — Fetch logs from ES
+ 2. LogPreprocessStage         — Clean, deduplicate, truncate, merge stack traces
+ 3. LogQualityFilterStage      — Filter false-positive INFO/noise logs
+ 4. ErrorBaselineStage         — Query historical error frequency baseline
+ 5. ErrorFingerprintStage      — Fast MD5 fingerprint dedup (Redis)
+ 6. SemanticDedupStage         — Vector-level semantic dedup (ES KNN)
+ 7. CrossServiceCorrelationStage — Auto-check upstream/downstream for cascading failures
+ 8. PromptBuildStage           — Assemble prompt from template
+ 9. AgentInferenceStage        — Multi-step AI Agent with tool calling
+10. ResultParseStage           — Parse AI output to structured results
+11. PriorityDecisionStage      — P0/P1/P2 priority scoring + night policy
+12. PersistStage               — Save results to DB
 """
 
 import time
@@ -112,6 +113,10 @@ class PipelineContext:
     # Signal self-learning
     learned_signals: list[str] = field(default_factory=list)
     learned_rules: list[str] = field(default_factory=list)
+
+    # Cross-service correlation
+    related_services: dict = field(default_factory=dict)  # {"upstream": [...], "downstream": [...]}
+    correlated_errors: list[dict] = field(default_factory=list)  # Errors from related services
 
 
 # ── Stage Base ───────────────────────────────────────────

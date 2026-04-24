@@ -78,6 +78,7 @@ async def _execute_analysis(task_id: str):
         PipelineContext,
     )
     from logmind.domain.analysis.stages import (
+        CrossServiceCorrelationStage,
         LogFetchStage,
         LogPreprocessStage,
         LogQualityFilterStage,
@@ -135,6 +136,7 @@ async def _execute_analysis(task_id: str):
             ErrorBaselineStage(log_service),     # Historical baseline for frequency scoring
             ErrorFingerprintStage(),             # Layer 1: Fast MD5 dedup
             SemanticDedupStage(),                # Layer 2: Vector semantic dedup
+            CrossServiceCorrelationStage(log_service),  # Cross-service root cause correlation
             PromptBuildStage(prompt_engine, prompt_repo),
             AgentInferenceStage(provider_manager),
             ResultParseStage(),
@@ -178,6 +180,8 @@ async def _execute_analysis(task_id: str):
         estimated_dau=biz.estimated_dau,
         night_policy=biz.night_policy,
         night_hours=biz.night_hours,
+        # Cross-service correlation config
+        related_services=json.loads(biz.related_services) if biz.related_services else {},
     )
 
     # 5. Execute pipeline
