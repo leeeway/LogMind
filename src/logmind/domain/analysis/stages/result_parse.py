@@ -35,12 +35,20 @@ class ResultParseStage(PipelineStage):
             all_learned_signals = []
             all_learned_rules = []
             for item in parsed:
+                # Extract source log references if the AI provided them
+                raw_refs = item.get("source_log_refs", item.get("log_refs", []))
+                if not isinstance(raw_refs, list):
+                    raw_refs = []
+                # Normalize: keep only strings, limit to 20
+                log_refs = [str(r)[:200] for r in raw_refs if r][:20]
+
                 ctx.analysis_results.append({
                     "result_type": item.get("result_type", "anomaly"),
                     "content": item.get("content", ""),
                     "severity": item.get("severity", "info"),
                     "confidence_score": float(item.get("confidence_score", 0.5)),
                     "structured_data": json.dumps(item, ensure_ascii=False),
+                    "source_log_refs": json.dumps(log_refs, ensure_ascii=False),
                 })
 
                 signals = item.get("error_signals", [])

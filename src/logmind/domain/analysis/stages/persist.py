@@ -24,6 +24,7 @@ class PersistStage(PipelineStage):
                     severity=result["severity"],
                     confidence_score=result["confidence_score"],
                     structured_data=result.get("structured_data", "{}"),
+                    source_log_refs=result.get("source_log_refs", "[]"),
                 )
                 session.add(ar)
             await session.flush()

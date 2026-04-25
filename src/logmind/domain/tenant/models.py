@@ -134,7 +134,8 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     night_hours: Mapped[str] = mapped_column(String(20), default="22:00-08:00")
 
     # Auto-remediation Runbook config (JSON)
-    # Phase B: {"actions": [{"type": "webhook", "url": "...", "trigger_on": ["P0"]}]}
+    # RESERVED for v3.0: Not currently consumed by any pipeline stage.
+    # Planned: {"actions": [{"type": "webhook", "url": "...", "trigger_on": ["P0"]}]}
     auto_remediation_config: Mapped[str] = mapped_column(Text, default="{}")
 
     # Cross-service correlation — upstream and downstream service dependencies (JSON text)

@@ -255,6 +255,21 @@ async def upload_document(
     # Compute content hash for dedup
     content_hash = hashlib.sha256(payload.content.encode()).hexdigest()
 
+    # Check for duplicate document in this knowledge base
+    from sqlalchemy import select as sa_select
+    dup_stmt = (
+        sa_select(KBDocument)
+        .where(KBDocument.kb_id == kb.id, KBDocument.content_hash == content_hash)
+    )
+    dup_result = await session.execute(dup_stmt)
+    existing_doc = dup_result.scalars().first()
+    if existing_doc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate document: content already exists as '{existing_doc.filename}' "
+                   f"(id={existing_doc.id}). Use DELETE + re-upload to replace.",
+        )
+
     # Store raw text in metadata_json for the indexer task
     metadata = payload.metadata.copy()
     metadata["raw_text"] = payload.content

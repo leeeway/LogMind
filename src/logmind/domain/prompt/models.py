@@ -32,6 +32,8 @@ class PromptTemplate(Base, UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin):
     variables_schema: Mapped[str] = mapped_column(Text, default="{}")
 
     # Additional metadata (JSON text)
+    # RESERVED: Not currently read by any component. Intended for future
+    # template-level configuration (e.g., chain-of-thought toggles).
     extra_metadata: Mapped[str] = mapped_column("metadata", Text, default="{}")
 
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)

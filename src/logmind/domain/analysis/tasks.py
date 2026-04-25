@@ -63,6 +63,60 @@ def run_analysis_task(self, task_id: str):
         run_async(_mark_task_timeout(task_id))
 
 
+# ── Cost Estimation ──────────────────────────────────────
+
+# Per-1K-token pricing (USD). Keyed by model name prefix.
+# Conservative estimates; update when provider pricing changes.
+_MODEL_PRICING: dict[str, dict[str, float]] = {
+    "gpt-4o":       {"input": 0.005,  "output": 0.015},
+    "gpt-4":        {"input": 0.03,   "output": 0.06},
+    "gpt-3.5":      {"input": 0.0005, "output": 0.0015},
+    "claude-3-opus": {"input": 0.015, "output": 0.075},
+    "claude-3-sonnet": {"input": 0.003, "output": 0.015},
+    "claude-3-haiku": {"input": 0.00025, "output": 0.00125},
+    "deepseek":     {"input": 0.0014, "output": 0.0028},
+    "gemini":       {"input": 0.0005, "output": 0.0015},
+    "qwen":         {"input": 0.002,  "output": 0.006},
+}
+_DEFAULT_PRICE = {"input": 0.002, "output": 0.006}  # Fallback
+
+
+def _estimate_cost_usd(token_usage, provider_config_id: str = "") -> float:
+    """
+    Estimate API cost in USD from token usage.
+
+    Attempts to load the model name from provider_config_id to match pricing.
+    Falls back to default rate. Returns 0.0 on any error (never crashes).
+    """
+    if not token_usage:
+        return 0.0
+    try:
+        model_name = ""
+        if provider_config_id:
+            try:
+                from logmind.domain.provider.manager import provider_manager
+                entry = provider_manager._cache.get(provider_config_id)
+                if entry:
+                    model_name = entry.config.default_model.lower()
+            except Exception:
+                pass
+
+        # Find matching price tier
+        pricing = _DEFAULT_PRICE
+        for prefix, rates in _MODEL_PRICING.items():
+            if prefix in model_name:
+                pricing = rates
+                break
+
+        cost = (
+            (token_usage.prompt_tokens / 1000.0) * pricing["input"]
+            + (token_usage.completion_tokens / 1000.0) * pricing["output"]
+        )
+        return round(cost, 6)
+    except Exception:
+        return 0.0
+
+
 async def _execute_analysis(task_id: str):
     """
     Run the analysis pipeline for a given task.
@@ -240,6 +294,9 @@ async def _execute_analysis(task_id: str):
                 task.status = "completed"
                 task.log_count = ctx.log_count
                 task.token_usage = ctx.token_usage.total_tokens if ctx.token_usage else 0
+                task.cost_usd = _estimate_cost_usd(
+                    ctx.token_usage, ctx.provider_config_id
+                ) if ctx.token_usage else 0.0
                 task.provider_config_id = ctx.provider_config_id
                 task.prompt_template_id = ctx.prompt_template_id
                 task.completed_at = datetime.now(timezone.utc)
@@ -277,7 +334,7 @@ async def _execute_analysis(task_id: str):
                     reason=reason,
                     task_id=ctx.task_id,
                 )
-                await _send_ai_alerts(ctx, webhook_url)
+                await _send_ai_alerts(ctx, webhook_url, task_id)
             elif delay_morning:
                 logger.info(
                     "alert_delayed_to_morning",
@@ -428,8 +485,8 @@ async def _run_learning_hooks(ctx, task_id: str):
         pass
 
 
-async def _send_ai_alerts(ctx, webhook_url: str):
-    """Send AI analysis alert notifications for critical findings (with aggregation)."""
+async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
+    """Send AI analysis alert notifications and persist AlertHistory records."""
     from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_ai_alert
 
@@ -474,8 +531,11 @@ async def _send_ai_alerts(ctx, webhook_url: str):
             )
             continue
 
+        # Send webhook notification and capture result
+        notify_success = False
+        notify_result_data = {}
         try:
-            await notify_ai_alert(
+            notify_success = await notify_ai_alert(
                 business_line=ctx.business_line_name,
                 domain=ctx.domain,
                 branch=ctx.branch,
@@ -487,8 +547,34 @@ async def _send_ai_alerts(ctx, webhook_url: str):
                 log_count=ctx.log_count,
                 webhook_url=webhook_url or None,
             )
+            notify_result_data = {"success": notify_success, "channel": "webhook"}
         except Exception as e:
             logger.error("ai_alert_notification_failed", error=str(e))
+            notify_result_data = {"success": False, "error": str(e)[:200]}
+
+        # Persist AlertHistory record
+        try:
+            from logmind.core.database import get_db_context
+            from logmind.domain.alert.models import AlertHistory
+
+            async with get_db_context() as session:
+                alert_record = AlertHistory(
+                    # alert_rule_id is None — this alert was generated by AI analysis,
+                    # not triggered by a user-defined AlertRule.
+                    alert_rule_id=None,
+                    analysis_task_id=task_id,
+                    tenant_id=ctx.tenant_id,
+                    status="fired",
+                    severity=severity,
+                    message=content[:4000],
+                    notify_result=json.dumps(notify_result_data, ensure_ascii=False),
+                    fired_at=datetime.now(timezone.utc),
+                    priority=priority,
+                )
+                session.add(alert_record)
+                await session.flush()
+        except Exception as e:
+            logger.error("alert_history_persist_failed", error=str(e))
 
 
 async def _send_error_log_notification(ctx, webhook_url: str):
