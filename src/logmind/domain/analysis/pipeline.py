@@ -118,6 +118,10 @@ class PipelineContext:
     related_services: dict = field(default_factory=dict)  # {"upstream": [...], "downstream": [...]}
     correlated_errors: list[dict] = field(default_factory=list)  # Errors from related services
 
+    # Change-point detection
+    change_points: list[dict] = field(default_factory=list)  # [{timestamp, before_rate, after_rate, z_score}]
+    error_rate_trend: str = "unknown"  # "stable" | "increasing" | "spike" | "declining" | "unknown"
+
 
 # ── Stage Base ───────────────────────────────────────────
 

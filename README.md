@@ -956,9 +956,12 @@ LogMind/
 - [x] 🆕 MCP Tools 扩展至 13 个 (新增 ai_effectiveness / agent_analytics)
 - [x] 🆕 跨服务根因关联 (上下游级联故障自动检测 + Prompt 注入)
 - [x] 🆕 智能日志采样 (自适应预算 + 严重度加权 + 多样性保证 + 时序分布)
+- [x] 🆕 数据字段闭环 (cost_usd 计算 / notify_result 记录 / source_log_refs 提取)
 
 ### v2.5 — 运维深度集成
 
+- [x] 🆕 错误变点检测 (Z-Score 时间序列分析 + 错误率突增自动发现 + AI Prompt 注入)
+- [x] 🆕 分析对比 API (两次分析结果 Diff: 新增/修复/恶化/改善 + MCP 工具)
 - [ ] Web 管理界面 (Vue.js / React Dashboard)
 - [ ] K8s Event 关联分析 + ConfigMap 变更追踪
 - [ ] 部署系统联动：近期发布记录与错误关联

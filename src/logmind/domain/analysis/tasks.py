@@ -132,6 +132,7 @@ async def _execute_analysis(task_id: str):
         PipelineContext,
     )
     from logmind.domain.analysis.stages import (
+        ChangePointDetectionStage,
         CrossServiceCorrelationStage,
         LogFetchStage,
         LogPreprocessStage,
@@ -188,6 +189,7 @@ async def _execute_analysis(task_id: str):
             LogPreprocessStage(),
             LogQualityFilterStage(),            # Layer 0: Smart quality filter
             ErrorBaselineStage(log_service),     # Historical baseline for frequency scoring
+            ChangePointDetectionStage(log_service), # Error rate spike detection
             ErrorFingerprintStage(),             # Layer 1: Fast MD5 dedup
             SemanticDedupStage(),                # Layer 2: Vector semantic dedup
             CrossServiceCorrelationStage(log_service),  # Cross-service root cause correlation

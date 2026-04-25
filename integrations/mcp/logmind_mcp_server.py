@@ -395,6 +395,28 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="logmind_compare_analyses",
+            description=(
+                "Compare two analysis tasks to identify error pattern changes. "
+                "Returns new errors, resolved errors, worsened/improved items. "
+                "Useful for post-deployment verification."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_a": {
+                        "type": "string",
+                        "description": "Baseline (earlier) analysis task UUID",
+                    },
+                    "task_b": {
+                        "type": "string",
+                        "description": "Current (later) analysis task UUID",
+                    },
+                },
+                "required": ["task_a", "task_b"],
+            },
+        ),
     ]
 
 
@@ -508,6 +530,13 @@ async def _dispatch(name: str, args: dict) -> str:
         if args.get("business_line_id"):
             params["business_line_id"] = args["business_line_id"]
         data = await _api_get("/dashboard/agent-tool-analytics", params=params)
+        return _json_summary(data)
+
+    elif name == "logmind_compare_analyses":
+        data = await _api_get(
+            "/analysis/compare",
+            params={"task_a": args["task_a"], "task_b": args["task_b"]},
+        )
         return _json_summary(data)
 
     else:

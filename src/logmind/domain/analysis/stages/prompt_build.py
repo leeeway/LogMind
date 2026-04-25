@@ -107,6 +107,34 @@ class PromptBuildStage(PipelineStage):
                 correlated_services=len(ctx.correlated_errors),
                 task_id=ctx.task_id,
             )
+        # Inject change-point detection context
+        if ctx.change_points:
+            cp_lines = [
+                "\n\n## 错误率变点检测",
+                f"整体趋势: **{ctx.error_rate_trend}**\n",
+                "以下时间点检测到统计显著的错误率突变：\n",
+            ]
+            for cp in ctx.change_points[:5]:  # Cap at 5 most significant
+                cp_lines.append(
+                    f"- **{cp['timestamp']}**: 错误率从 {cp['before_rate']}/min "
+                    f"突增到 {cp['after_rate']}/min "
+                    f"(z-score={cp['z_score']}, 当前桶={cp['bucket_count']}条)"
+                )
+            cp_lines.append(
+                "\n请结合以上错误率变化分析是否与部署、配置变更或流量突增有关。"
+            )
+            ctx.user_prompt = ctx.user_prompt + "\n".join(cp_lines)
+            logger.info(
+                "change_point_context_injected",
+                points=len(ctx.change_points),
+                trend=ctx.error_rate_trend,
+                task_id=ctx.task_id,
+            )
+        elif ctx.error_rate_trend and ctx.error_rate_trend != "unknown":
+            # Even without spikes, inject trend info
+            ctx.user_prompt = ctx.user_prompt + (
+                f"\n\n## 错误率趋势\n整体趋势: **{ctx.error_rate_trend}**（无显著突变点）"
+            )
 
         logger.info("prompt_built", template_id=ctx.prompt_template_id, task_id=ctx.task_id)
         return ctx

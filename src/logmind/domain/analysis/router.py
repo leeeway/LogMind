@@ -284,3 +284,63 @@ async def _update_vector_feedback(task_id: str, quality: str):
     except Exception:
         pass  # Best-effort
 
+
+@router.get("/compare")
+async def compare_analysis_tasks(
+    task_a: str,
+    task_b: str,
+    session: DBSession,
+    user: CurrentUser,
+):
+    """
+    Compare two analysis tasks and return a structured diff.
+
+    - task_a: baseline (earlier) task ID
+    - task_b: current (later) task ID
+
+    Returns new/resolved/worsened/improved errors between the two analyses.
+    Useful for post-deployment verification and error trend tracking.
+    """
+    from logmind.domain.analysis.comparison import compare_analyses
+    from logmind.domain.analysis.models import AnalysisResult
+
+    # Load both tasks (tenant-scoped)
+    ta = await task_repo.get_by_id(session, task_a, tenant_id=user.tenant_id)
+    if not ta:
+        raise HTTPException(status_code=404, detail=f"Task A not found: {task_a}")
+
+    tb = await task_repo.get_by_id(session, task_b, tenant_id=user.tenant_id)
+    if not tb:
+        raise HTTPException(status_code=404, detail=f"Task B not found: {task_b}")
+
+    # Load analysis results
+    from sqlalchemy import select
+
+    results_a_stmt = select(AnalysisResult).where(AnalysisResult.task_id == task_a)
+    results_b_stmt = select(AnalysisResult).where(AnalysisResult.task_id == task_b)
+
+    results_a_raw = (await session.execute(results_a_stmt)).scalars().all()
+    results_b_raw = (await session.execute(results_b_stmt)).scalars().all()
+
+    # Convert ORM objects to dicts
+    def _to_dict(r: AnalysisResult) -> dict:
+        return {
+            "result_type": r.result_type,
+            "severity": r.severity,
+            "content": r.content,
+            "confidence_score": r.confidence_score,
+        }
+
+    results_a = [_to_dict(r) for r in results_a_raw]
+    results_b = [_to_dict(r) for r in results_b_raw]
+
+    result = compare_analyses(
+        results_a,
+        results_b,
+        task_a_id=task_a,
+        task_b_id=task_b,
+        task_a_time=str(ta.completed_at or ta.created_at),
+        task_b_time=str(tb.completed_at or tb.created_at),
+    )
+
+    return result.to_dict()

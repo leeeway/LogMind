@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     analysis_sampling_min_budget: int = 20
     analysis_sampling_max_budget: int = 300
 
+    # ── Change-Point Detection ───────────────────────────
+    analysis_changepoint_enabled: bool = True
+    analysis_changepoint_threshold: float = 3.0   # Z-score threshold for spike detection
+    analysis_changepoint_window_hours: int = 4     # Rolling baseline window
+
     # ── Semantic Dedup (Phase 3) ──────────────────────────
     analysis_semantic_dedup_enabled: bool = True
     analysis_semantic_dedup_threshold: float = 0.92

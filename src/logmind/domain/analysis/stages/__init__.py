@@ -9,6 +9,7 @@ from logmind.domain.analysis.stages.log_fetch import LogFetchStage
 from logmind.domain.analysis.stages.log_preprocess import LogPreprocessStage
 from logmind.domain.analysis.stages.quality_filter import LogQualityFilterStage
 from logmind.domain.analysis.stages.cross_service import CrossServiceCorrelationStage
+from logmind.domain.analysis.stages.change_point import ChangePointDetectionStage
 from logmind.domain.analysis.stages.prompt_build import PromptBuildStage
 from logmind.domain.analysis.stages.ai_inference import AIInferenceStage
 from logmind.domain.analysis.stages.result_parse import ResultParseStage
@@ -20,6 +21,7 @@ __all__ = [
     "LogPreprocessStage",
     "LogQualityFilterStage",
     "CrossServiceCorrelationStage",
+    "ChangePointDetectionStage",
     "PromptBuildStage",
     "AIInferenceStage",
     "ResultParseStage",
