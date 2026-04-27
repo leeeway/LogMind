@@ -14,8 +14,6 @@ import {
   SearchOutlined,
   PlusOutlined,
   SaveOutlined,
-  ArrowUpOutlined,
-  ArrowDownOutlined,
 } from '@ant-design/icons';
 import { Line, Pie } from '@ant-design/charts';
 import { dashboardApi } from '@/api/dashboard';
@@ -79,11 +77,14 @@ const Dashboard: React.FC = () => {
     );
   }
 
-  const trendData = trends?.error_trend?.map((item: any) => ({
-    time: dayjs(item.date || item.time).format('MM-DD HH:mm'),
-    value: item.count || item.value || 0,
-    type: '错误数',
-  })) || [];
+  // Build multi-series trend data from API response: trends.data[]
+  const trendData: any[] = [];
+  (trends?.data || []).forEach((item: any) => {
+    const time = dayjs(item.period).format('MM-DD');
+    if (item.task_count > 0) trendData.push({ time, value: item.task_count, type: '任务数' });
+    if (item.failed_count > 0 || item.task_count > 0) trendData.push({ time, value: item.failed_count || 0, type: '失败数' });
+    trendData.push({ time, value: Math.round((item.token_usage || 0) / 1000), type: 'Token(K)' });
+  });
 
   const severityData = overview?.severity_distribution?.map((item: any) => ({
     type: item.severity,
@@ -176,16 +177,17 @@ const Dashboard: React.FC = () => {
         </Col>
         <Col xs={24} sm={12} lg={4}>
           <div className="lm-stat-card">
-            <Space><DollarOutlined className="stat-icon" style={{ color: '#52c41a' }} /><span className="stat-label">AI 成本</span></Space>
-            <div className="stat-value" style={{ color: '#52c41a' }}>${cost?.total_cost_usd?.toFixed(2) || '0.00'}</div>
+            <Space><DollarOutlined className="stat-icon" style={{ color: '#52c41a' }} /><span className="stat-label">AI 任务</span></Space>
+            <div className="stat-value" style={{ color: '#52c41a' }}>{cost?.ai_tasks || 0}</div>
+            <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>平均 {(cost?.avg_tokens_per_task || 0).toLocaleString()} tokens/任务</Text>
           </div>
         </Col>
         <Col xs={24} sm={12} lg={4}>
           <div className="lm-stat-card">
             <Space><SaveOutlined className="stat-icon" style={{ color: '#13c2c2' }} /><span className="stat-label">去重节省</span></Space>
-            <div className="stat-value" style={{ color: '#13c2c2' }}>{cost?.savings_pct ? `${cost.savings_pct.toFixed(0)}%` : '-'}</div>
+            <div className="stat-value" style={{ color: '#13c2c2' }}>{cost?.dedup_savings?.savings_percentage ? `${cost.dedup_savings.savings_percentage.toFixed(0)}%` : '-'}</div>
             <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-              ≈ {(cost?.estimated_saved_tokens || 0).toLocaleString()} tokens
+              ≈ {(cost?.dedup_savings?.estimated_tokens_saved || 0).toLocaleString()} tokens
             </Text>
           </div>
         </Col>
@@ -193,7 +195,7 @@ const Dashboard: React.FC = () => {
           <div className="lm-stat-card">
             <Space><RiseOutlined className="stat-icon" style={{ color: '#eb2f96' }} /><span className="stat-label">完成率</span></Space>
             <div className="stat-value" style={{ color: '#eb2f96' }}>{completionRate}%</div>
-            <Progress percent={Number(completionRate)} showInfo={false} strokeColor="#eb2f96" trailColor="rgba(255,255,255,0.06)" size="small" />
+            <Progress percent={Number(completionRate)} showInfo={false} strokeColor="#eb2f96" railColor="rgba(255,255,255,0.06)" size="small" />
           </div>
         </Col>
       </Row>
@@ -201,13 +203,13 @@ const Dashboard: React.FC = () => {
       {/* Charts Row */}
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
         <Col xs={24} lg={16}>
-          <Card title="错误趋势" size="small"
+          <Card title="运维趋势" size="small"
             style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}
             styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
             {trendData.length > 0 ? (
               <Line data={trendData} xField="time" yField="value" seriesField="type" height={260} smooth
-                color={['#1677ff']} point={{ size: 2 }} theme="classicDark"
-                area={{ style: { fillOpacity: 0.15 } }}
+                color={['#1677ff', '#ff4d4f', '#722ed1']} point={{ size: 2 }} theme="classicDark"
+                area={{ style: { fillOpacity: 0.08 } }}
                 animation={{ appear: { animation: 'wave-in', duration: 800 } }} />
             ) : (
               <div style={{ textAlign: 'center', padding: 60, color: 'var(--lm-text-tertiary)' }}>暂无数据</div>
@@ -240,33 +242,29 @@ const Dashboard: React.FC = () => {
           <Card title={<Space><ClusterOutlined /> 服务健康</Space>} size="small"
             style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}
             styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
-            {health?.business_lines?.length > 0 ? (
+            {(health?.items?.length > 0) ? (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
-                {health.business_lines.map((biz: any) => {
-                  const score = biz.health_score ?? 100;
-                  const color = score >= 80 ? '#52c41a' : score >= 50 ? '#faad14' : '#ff4d4f';
-                  const trend = biz.prev_score != null ? score - biz.prev_score : null;
+                {health.items.map((biz: any) => {
+                  // API returns health_score as 0.0-1.0, convert to 0-100
+                  const rawScore = biz.health_score ?? 0;
+                  const score = Math.round(rawScore <= 1 ? rawScore * 100 : rawScore);
+                  const successPct = Math.round((biz.success_rate || 0) * 100);
+                  const color = successPct >= 80 ? '#52c41a' : successPct >= 50 ? '#faad14' : '#ff4d4f';
+                  const errorCount = (biz.critical_count || 0) + (biz.warning_count || 0);
                   return (
-                    <div key={biz.id} style={{
+                    <div key={biz.business_line_id} style={{
                       padding: '10px 14px', background: 'var(--lm-bg-elevated)', borderRadius: 8,
                       border: '1px solid var(--lm-border-light)', cursor: 'pointer', transition: 'all 0.2s',
                     }}
                     onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = color; }}
                     onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--lm-border-light)'; }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                        <Text ellipsis style={{ maxWidth: 100, color: 'var(--lm-text)', fontSize: 13 }}>{biz.name}</Text>
-                        <Space size={4}>
-                          {trend != null && trend !== 0 && (
-                            <Text style={{ fontSize: 11, color: trend > 0 ? '#52c41a' : '#ff4d4f' }}>
-                              {trend > 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}{Math.abs(trend)}
-                            </Text>
-                          )}
-                          <Tag color={color} style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>{score}%</Tag>
-                        </Space>
+                        <Text ellipsis style={{ maxWidth: 120, color: 'var(--lm-text)', fontSize: 13 }}>{biz.business_line_name}</Text>
+                        <Tag color={color} style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>{successPct}%</Tag>
                       </div>
-                      <Progress percent={score} showInfo={false} strokeColor={color} trailColor="rgba(255,255,255,0.06)" size="small" />
+                      <Progress percent={successPct} showInfo={false} strokeColor={color} railColor="rgba(255,255,255,0.06)" size="small" />
                       <div style={{ marginTop: 3, fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-                        {biz.total_tasks || 0} 任务 · {biz.error_count || 0} 错误
+                        {biz.total_tasks || 0} 任务 · {errorCount} 异常 · {(biz.total_logs || 0).toLocaleString()} 日志
                       </div>
                     </div>
                   );
