@@ -77,6 +77,9 @@ const TaskList: React.FC = () => {
     }
   };
 
+  // Build biz name map for inline display
+  const bizNameMap = Object.fromEntries(bizLines.map(b => [b.id, b.name]));
+
   const columns = [
     {
       title: '状态',
@@ -84,8 +87,18 @@ const TaskList: React.FC = () => {
       width: 90,
       render: (s: string) => {
         const m = statusMap[s] || { color: '#8c8c8c', label: s };
-        return <Tag color={m.color} style={{ borderRadius: 4 }}>{m.label}</Tag>;
+        return <Tag color={m.color} style={{ borderRadius: 4 }}>
+          {s === 'running' && <span className="lm-running-dot" />}
+          {m.label}
+        </Tag>;
       },
+    },
+    {
+      title: '服务',
+      dataIndex: 'business_line_id',
+      width: 120,
+      ellipsis: true,
+      render: (id: string) => bizNameMap[id] || <span style={{ color: 'var(--lm-text-tertiary)', fontSize: 12 }}>{id?.slice(0, 8)}...</span>,
     },
     { title: '类型', dataIndex: 'task_type', width: 80 },
     {
@@ -111,15 +124,6 @@ const TaskList: React.FC = () => {
       dataIndex: 'completed_at',
       width: 150,
       render: (v: string) => v ? dayjs(v).format('YYYY-MM-DD HH:mm') : '-',
-    },
-    {
-      title: '操作',
-      width: 100,
-      render: (_: any, record: any) => (
-        <Button type="link" size="small" icon={<EyeOutlined />} onClick={() => navigate(`/analysis/${record.id}`)}>
-          详情
-        </Button>
-      ),
     },
   ];
 
@@ -170,6 +174,10 @@ const TaskList: React.FC = () => {
           loading={loading}
           size="small"
           pagination={{ current: page, total, pageSize: 15, onChange: setPage, showTotal: (t) => `共 ${t} 条` }}
+          onRow={(record) => ({
+            onClick: () => navigate(`/analysis/${record.id}`),
+            style: { cursor: 'pointer' },
+          })}
         />
       </Card>
 

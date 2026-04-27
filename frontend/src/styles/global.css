@@ -176,3 +176,122 @@ body {
 .severity-critical { color: var(--lm-critical); }
 .severity-warning { color: var(--lm-warning); }
 .severity-info { color: var(--lm-info); }
+
+/* ── Skeleton Loading ────────────────────────────────── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.lm-stat-card.lm-pulse,
+.lm-card.lm-pulse {
+  background: linear-gradient(
+    90deg,
+    var(--lm-bg-card) 25%,
+    var(--lm-bg-elevated) 37%,
+    var(--lm-bg-card) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border: 1px solid var(--lm-border-light);
+  border-radius: var(--lm-radius-lg);
+}
+
+/* ── Enhanced Stat Cards ─────────────────────────────── */
+.lm-stat-card {
+  transition: all 0.25s ease;
+  cursor: default;
+}
+
+.lm-stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--lm-shadow-elevated);
+  border-color: var(--lm-border);
+}
+
+.lm-stat-card .stat-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Table Row Hover ─────────────────────────────────── */
+.ant-table-wrapper .ant-table-row {
+  transition: background 0.15s ease;
+}
+
+.ant-table-wrapper .ant-table-row:hover td {
+  background: rgba(22, 119, 255, 0.04) !important;
+}
+
+.ant-table-wrapper .ant-table-row[style*="cursor: pointer"]:hover td {
+  background: rgba(22, 119, 255, 0.08) !important;
+}
+
+/* ── Refresh Indicator ───────────────────────────────── */
+.lm-refresh-indicator:hover {
+  background: var(--lm-bg-card) !important;
+  border-color: var(--lm-border) !important;
+}
+
+/* ── Page Transition ─────────────────────────────────── */
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.lm-slide-in {
+  animation: slideInRight 0.25s ease-out;
+}
+
+/* ── Badge Pulse ─────────────────────────────────────── */
+@keyframes badgePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(250, 140, 22, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(250, 140, 22, 0); }
+}
+
+.ant-badge .ant-badge-count {
+  animation: badgePulse 2s ease-in-out infinite;
+}
+
+/* ── Running Status Dot ──────────────────────────────── */
+@keyframes runningPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.lm-running-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #1677ff;
+  margin-right: 4px;
+  animation: runningPulse 1.5s ease-in-out infinite;
+}
+
+/* ── Card Gradient Border on Hover ───────────────────── */
+.ant-card:hover {
+  border-color: rgba(22, 119, 255, 0.15) !important;
+}
+
+/* ── Login Page Background ───────────────────────────── */
+.lm-login-bg {
+  background:
+    radial-gradient(ellipse at 20% 50%, rgba(22, 119, 255, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 50%, rgba(114, 46, 209, 0.06) 0%, transparent 50%),
+    var(--lm-bg-layout);
+}
+
+/* ── Breadcrumb ──────────────────────────────────────── */
+.ant-breadcrumb a {
+  color: var(--lm-text-tertiary) !important;
+  transition: color 0.15s;
+}
+.ant-breadcrumb a:hover {
+  color: var(--lm-primary) !important;
+}
+
+/* ── Selection ───────────────────────────────────────── */
+::selection {
+  background: rgba(22, 119, 255, 0.3);
+  color: #fff;
+}
