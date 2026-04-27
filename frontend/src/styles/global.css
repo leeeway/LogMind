@@ -1,0 +1,178 @@
+/* ── LogMind Design Tokens ────────────────────────────── */
+:root {
+  /* Brand */
+  --lm-primary: #1677ff;
+  --lm-primary-hover: #4096ff;
+  --lm-primary-bg: rgba(22, 119, 255, 0.08);
+
+  /* Severity Colors */
+  --lm-critical: #ff4d4f;
+  --lm-critical-bg: rgba(255, 77, 79, 0.1);
+  --lm-warning: #faad14;
+  --lm-warning-bg: rgba(250, 173, 20, 0.1);
+  --lm-info: #1677ff;
+  --lm-info-bg: rgba(22, 119, 255, 0.1);
+  --lm-success: #52c41a;
+  --lm-success-bg: rgba(82, 196, 26, 0.1);
+
+  /* Priority */
+  --lm-p0: #ff4d4f;
+  --lm-p1: #fa8c16;
+  --lm-p2: #fadb14;
+
+  /* Dark theme base */
+  --lm-bg-layout: #0a0e17;
+  --lm-bg-container: #111827;
+  --lm-bg-elevated: #1a2332;
+  --lm-bg-card: #1e293b;
+  --lm-bg-card-hover: #253347;
+  --lm-border: #1e3a5f;
+  --lm-border-light: rgba(255, 255, 255, 0.06);
+  --lm-text: rgba(255, 255, 255, 0.88);
+  --lm-text-secondary: rgba(255, 255, 255, 0.55);
+  --lm-text-tertiary: rgba(255, 255, 255, 0.35);
+
+  /* Shadows */
+  --lm-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.32);
+  --lm-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  /* Spacing */
+  --lm-space-xs: 4px;
+  --lm-space-sm: 8px;
+  --lm-space-md: 16px;
+  --lm-space-lg: 24px;
+  --lm-space-xl: 32px;
+
+  /* Radius */
+  --lm-radius-sm: 6px;
+  --lm-radius-md: 8px;
+  --lm-radius-lg: 12px;
+
+  /* Sidebar */
+  --lm-sidebar-width: 240px;
+  --lm-sidebar-collapsed: 64px;
+  --lm-header-height: 56px;
+}
+
+/* ── Global Reset ────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--lm-bg-layout);
+  color: var(--lm-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  line-height: 1.5;
+}
+
+/* ── Scrollbar ───────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* ── Utility Classes ─────────────────────────────────── */
+.lm-page {
+  padding: var(--lm-space-lg);
+  min-height: calc(100vh - var(--lm-header-height));
+}
+
+.lm-card {
+  background: var(--lm-bg-card);
+  border: 1px solid var(--lm-border-light);
+  border-radius: var(--lm-radius-lg);
+  box-shadow: var(--lm-shadow-card);
+  padding: var(--lm-space-lg);
+  transition: all 0.2s ease;
+}
+
+.lm-card:hover {
+  box-shadow: var(--lm-shadow-elevated);
+  border-color: var(--lm-border);
+}
+
+.lm-stat-card {
+  background: linear-gradient(135deg, var(--lm-bg-card) 0%, var(--lm-bg-elevated) 100%);
+  border: 1px solid var(--lm-border-light);
+  border-radius: var(--lm-radius-lg);
+  padding: var(--lm-space-lg);
+  position: relative;
+  overflow: hidden;
+}
+
+.lm-stat-card::after {
+  content: '';
+  position: absolute;
+  top: -30%;
+  right: -20%;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  opacity: 0.06;
+}
+
+.lm-stat-card .stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: var(--lm-space-sm) 0;
+}
+
+.lm-stat-card .stat-label {
+  color: var(--lm-text-secondary);
+  font-size: 13px;
+}
+
+.lm-stat-card .stat-icon {
+  font-size: 24px;
+  opacity: 0.7;
+}
+
+/* ── Animations ──────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.lm-animate-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.lm-pulse {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* ── Status Colors ───────────────────────────────────── */
+.status-completed { color: var(--lm-success); }
+.status-running { color: var(--lm-primary); }
+.status-failed { color: var(--lm-critical); }
+.status-pending { color: var(--lm-text-tertiary); }
+
+.severity-critical { color: var(--lm-critical); }
+.severity-warning { color: var(--lm-warning); }
+.severity-info { color: var(--lm-info); }
