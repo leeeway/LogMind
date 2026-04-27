@@ -128,16 +128,25 @@ const AppLayout: React.FC = () => {
         }}
       >
         <div style={{
-          height: 56,
+          height: 60,
           display: 'flex',
           alignItems: 'center',
           justifyContent: collapsed ? 'center' : 'flex-start',
-          padding: collapsed ? '0' : '0 20px',
+          padding: collapsed ? '0' : '0 18px',
           borderBottom: '1px solid var(--lm-border-light)',
+          gap: 10,
         }}>
-          <ThunderboltOutlined style={{ fontSize: 22, color: 'var(--lm-primary)' }} />
+          <div style={{
+            width: 34, height: 34, borderRadius: 10,
+            background: 'linear-gradient(135deg, rgba(22,119,255,0.2) 0%, rgba(114,46,209,0.2) 100%)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: '1px solid rgba(22,119,255,0.15)',
+            flexShrink: 0,
+          }}>
+            <ThunderboltOutlined style={{ fontSize: 18, color: '#1677ff' }} />
+          </div>
           {!collapsed && (
-            <Text strong style={{ fontSize: 18, marginLeft: 10, color: 'var(--lm-text)', letterSpacing: 1 }}>
+            <Text strong className="lm-gradient-text" style={{ fontSize: 17, letterSpacing: 1.5 }}>
               LogMind
             </Text>
           )}
@@ -231,7 +240,9 @@ const AppLayout: React.FC = () => {
           padding: 24,
           minHeight: 'calc(100vh - 56px)',
           background: 'var(--lm-bg-layout)',
+          position: 'relative',
         }}>
+          <div className="lm-ambient" />
           <ErrorBoundary resetKey={location.pathname}>
             <Outlet />
           </ErrorBoundary>

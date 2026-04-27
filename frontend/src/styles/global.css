@@ -1,9 +1,15 @@
 /* ── LogMind Design Tokens ────────────────────────────── */
 :root {
-  /* Brand */
+  /* Brand Gradient */
   --lm-primary: #1677ff;
   --lm-primary-hover: #4096ff;
   --lm-primary-bg: rgba(22, 119, 255, 0.08);
+  --lm-accent: #722ed1;
+  --lm-accent-2: #13c2c2;
+  --lm-gradient-primary: linear-gradient(135deg, #1677ff 0%, #722ed1 100%);
+  --lm-gradient-accent: linear-gradient(135deg, #13c2c2 0%, #1677ff 100%);
+  --lm-gradient-warm: linear-gradient(135deg, #fa8c16 0%, #ff4d4f 100%);
+  --lm-gradient-success: linear-gradient(135deg, #52c41a 0%, #13c2c2 100%);
 
   /* Severity Colors */
   --lm-critical: #ff4d4f;
@@ -20,21 +26,24 @@
   --lm-p1: #fa8c16;
   --lm-p2: #fadb14;
 
-  /* Dark theme base */
-  --lm-bg-layout: #0a0e17;
-  --lm-bg-container: #111827;
-  --lm-bg-elevated: #1a2332;
-  --lm-bg-card: #1e293b;
-  --lm-bg-card-hover: #253347;
+  /* Dark theme base — deeper, richer */
+  --lm-bg-layout: #060a13;
+  --lm-bg-container: #0d1220;
+  --lm-bg-elevated: #141c2e;
+  --lm-bg-card: rgba(20, 28, 46, 0.8);
+  --lm-bg-card-hover: rgba(30, 42, 68, 0.9);
+  --lm-bg-glass: rgba(15, 23, 42, 0.6);
   --lm-border: #1e3a5f;
   --lm-border-light: rgba(255, 255, 255, 0.06);
-  --lm-text: rgba(255, 255, 255, 0.88);
-  --lm-text-secondary: rgba(255, 255, 255, 0.55);
+  --lm-border-glow: rgba(22, 119, 255, 0.2);
+  --lm-text: rgba(255, 255, 255, 0.92);
+  --lm-text-secondary: rgba(255, 255, 255, 0.6);
   --lm-text-tertiary: rgba(255, 255, 255, 0.35);
 
-  /* Shadows */
-  --lm-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.32);
-  --lm-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.4);
+  /* Shadows — layered depth */
+  --lm-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3), 0 0 1px rgba(22, 119, 255, 0.05);
+  --lm-shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(22, 119, 255, 0.08);
+  --lm-shadow-glow: 0 0 20px rgba(22, 119, 255, 0.15), 0 0 60px rgba(22, 119, 255, 0.05);
 
   /* Spacing */
   --lm-space-xs: 4px;
@@ -45,8 +54,8 @@
 
   /* Radius */
   --lm-radius-sm: 6px;
-  --lm-radius-md: 8px;
-  --lm-radius-lg: 12px;
+  --lm-radius-md: 10px;
+  --lm-radius-lg: 14px;
 
   /* Sidebar */
   --lm-sidebar-width: 240px;
@@ -70,65 +79,90 @@ html {
 body {
   background: var(--lm-bg-layout);
   color: var(--lm-text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   line-height: 1.5;
 }
 
 /* ── Scrollbar ───────────────────────────────────────── */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.2);
 }
 
-/* ── Utility Classes ─────────────────────────────────── */
-.lm-page {
-  padding: var(--lm-space-lg);
-  min-height: calc(100vh - var(--lm-header-height));
-}
-
+/* ── Glassmorphism Card ──────────────────────────────── */
 .lm-card {
   background: var(--lm-bg-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--lm-border-light);
   border-radius: var(--lm-radius-lg);
   box-shadow: var(--lm-shadow-card);
   padding: var(--lm-space-lg);
-  transition: all 0.2s ease;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .lm-card:hover {
   box-shadow: var(--lm-shadow-elevated);
-  border-color: var(--lm-border);
+  border-color: var(--lm-border-glow);
 }
 
+/* ── Stat Card with Glow ─────────────────────────────── */
 .lm-stat-card {
-  background: linear-gradient(135deg, var(--lm-bg-card) 0%, var(--lm-bg-elevated) 100%);
+  background: var(--lm-bg-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--lm-border-light);
   border-radius: var(--lm-radius-lg);
   padding: var(--lm-space-lg);
   position: relative;
   overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: default;
+}
+
+.lm-stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--lm-gradient-primary);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.lm-stat-card:hover::before {
+  opacity: 1;
 }
 
 .lm-stat-card::after {
   content: '';
   position: absolute;
-  top: -30%;
+  top: -40%;
   right: -20%;
-  width: 120px;
-  height: 120px;
+  width: 140px;
+  height: 140px;
   border-radius: 50%;
-  opacity: 0.06;
+  background: radial-gradient(circle, rgba(22, 119, 255, 0.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.lm-stat-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--lm-shadow-glow);
+  border-color: var(--lm-border-glow);
 }
 
 .lm-stat-card .stat-value {
@@ -136,46 +170,20 @@ body {
   font-weight: 700;
   line-height: 1.2;
   margin: var(--lm-space-sm) 0;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
 }
 
 .lm-stat-card .stat-label {
   color: var(--lm-text-secondary);
   font-size: 13px;
+  font-weight: 500;
 }
 
 .lm-stat-card .stat-icon {
-  font-size: 24px;
-  opacity: 0.7;
+  font-size: 22px;
+  opacity: 0.8;
 }
-
-/* ── Animations ──────────────────────────────────────── */
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.lm-animate-in {
-  animation: fadeIn 0.3s ease-out;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-.lm-pulse {
-  animation: pulse 2s ease-in-out infinite;
-}
-
-/* ── Status Colors ───────────────────────────────────── */
-.status-completed { color: var(--lm-success); }
-.status-running { color: var(--lm-primary); }
-.status-failed { color: var(--lm-critical); }
-.status-pending { color: var(--lm-text-tertiary); }
-
-.severity-critical { color: var(--lm-critical); }
-.severity-warning { color: var(--lm-warning); }
-.severity-info { color: var(--lm-info); }
 
 /* ── Skeleton Loading ────────────────────────────────── */
 @keyframes shimmer {
@@ -187,9 +195,9 @@ body {
 .lm-card.lm-pulse {
   background: linear-gradient(
     90deg,
-    var(--lm-bg-card) 25%,
-    var(--lm-bg-elevated) 37%,
-    var(--lm-bg-card) 63%
+    rgba(20, 28, 46, 0.8) 25%,
+    rgba(30, 42, 68, 0.6) 37%,
+    rgba(20, 28, 46, 0.8) 63%
   );
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
@@ -197,65 +205,47 @@ body {
   border-radius: var(--lm-radius-lg);
 }
 
-/* ── Enhanced Stat Cards ─────────────────────────────── */
-.lm-stat-card {
-  transition: all 0.25s ease;
-  cursor: default;
+/* ── Animations ──────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
-.lm-stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--lm-shadow-elevated);
-  border-color: var(--lm-border);
+.lm-animate-in {
+  animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.lm-stat-card .stat-value {
-  font-variant-numeric: tabular-nums;
-}
-
-/* ── Table Row Hover ─────────────────────────────────── */
-.ant-table-wrapper .ant-table-row {
-  transition: background 0.15s ease;
-}
-
-.ant-table-wrapper .ant-table-row:hover td {
-  background: rgba(22, 119, 255, 0.04) !important;
-}
-
-.ant-table-wrapper .ant-table-row[style*="cursor: pointer"]:hover td {
-  background: rgba(22, 119, 255, 0.08) !important;
-}
-
-/* ── Refresh Indicator ───────────────────────────────── */
-.lm-refresh-indicator:hover {
-  background: var(--lm-bg-card) !important;
-  border-color: var(--lm-border) !important;
-}
-
-/* ── Page Transition ─────────────────────────────────── */
 @keyframes slideInRight {
-  from { opacity: 0; transform: translateX(12px); }
+  from { opacity: 0; transform: translateX(16px); }
   to { opacity: 1; transform: translateX(0); }
 }
 
 .lm-slide-in {
-  animation: slideInRight 0.25s ease-out;
+  animation: slideInRight 0.3s ease-out;
 }
 
-/* ── Badge Pulse ─────────────────────────────────────── */
-@keyframes badgePulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(250, 140, 22, 0.4); }
-  50% { box-shadow: 0 0 0 4px rgba(250, 140, 22, 0); }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
-.ant-badge .ant-badge-count {
-  animation: badgePulse 2s ease-in-out infinite;
+.lm-pulse-dot {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+}
+
+.lm-float {
+  animation: float 3s ease-in-out infinite;
 }
 
 /* ── Running Status Dot ──────────────────────────────── */
 @keyframes runningPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.8); }
 }
 
 .lm-running-dot {
@@ -268,23 +258,65 @@ body {
   animation: runningPulse 1.5s ease-in-out infinite;
 }
 
-/* ── Card Gradient Border on Hover ───────────────────── */
-.ant-card:hover {
-  border-color: rgba(22, 119, 255, 0.15) !important;
+/* ── Gradient Text ───────────────────────────────────── */
+.lm-gradient-text {
+  background: var(--lm-gradient-primary);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
-/* ── Login Page Background ───────────────────────────── */
+/* ── Table Enhancements ──────────────────────────────── */
+.ant-table-wrapper .ant-table-row {
+  transition: all 0.2s;
+}
+
+.ant-table-wrapper .ant-table-row:hover td {
+  background: rgba(22, 119, 255, 0.03) !important;
+}
+
+.ant-table-wrapper .ant-table-row[style*="cursor: pointer"]:hover td {
+  background: rgba(22, 119, 255, 0.06) !important;
+}
+
+/* ── Refresh Indicator ───────────────────────────────── */
+.lm-refresh-indicator:hover {
+  background: var(--lm-bg-card) !important;
+  border-color: var(--lm-border-glow) !important;
+}
+
+/* ── Badge Pulse ─────────────────────────────────────── */
+@keyframes badgePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(255, 77, 79, 0); }
+}
+
+.ant-badge .ant-badge-count {
+  animation: badgePulse 2s ease-in-out infinite;
+}
+
+/* ── Card Glow on Hover ──────────────────────────────── */
+.ant-card {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.ant-card:hover {
+  border-color: var(--lm-border-glow) !important;
+}
+
+/* ── Login Page ──────────────────────────────────────── */
 .lm-login-bg {
   background:
-    radial-gradient(ellipse at 20% 50%, rgba(22, 119, 255, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 50%, rgba(114, 46, 209, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse at 20% 50%, rgba(22, 119, 255, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 30%, rgba(114, 46, 209, 0.1) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 80%, rgba(19, 194, 194, 0.06) 0%, transparent 50%),
     var(--lm-bg-layout);
 }
 
 /* ── Breadcrumb ──────────────────────────────────────── */
 .ant-breadcrumb a {
   color: var(--lm-text-tertiary) !important;
-  transition: color 0.15s;
+  transition: color 0.2s;
 }
 .ant-breadcrumb a:hover {
   color: var(--lm-primary) !important;
@@ -294,4 +326,123 @@ body {
 ::selection {
   background: rgba(22, 119, 255, 0.3);
   color: #fff;
+}
+
+/* ── Status Colors ───────────────────────────────────── */
+.status-completed { color: var(--lm-success); }
+.status-running { color: var(--lm-primary); }
+.status-failed { color: var(--lm-critical); }
+.status-pending { color: var(--lm-text-tertiary); }
+
+.severity-critical { color: var(--lm-critical); }
+.severity-warning { color: var(--lm-warning); }
+.severity-info { color: var(--lm-info); }
+
+/* ── Sidebar Glow Indicator ──────────────────────────── */
+.ant-menu-item-selected {
+  position: relative;
+}
+
+.ant-menu-item-selected::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 25%;
+  bottom: 25%;
+  width: 3px;
+  background: var(--lm-gradient-primary);
+  border-radius: 0 3px 3px 0;
+}
+
+/* ── Ambient Background Glow ─────────────────────────── */
+@keyframes ambientGlow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.7; }
+}
+
+.lm-ambient {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(600px circle at 30% 20%, rgba(22, 119, 255, 0.03) 0%, transparent 60%),
+    radial-gradient(800px circle at 70% 80%, rgba(114, 46, 209, 0.02) 0%, transparent 60%);
+  animation: ambientGlow 8s ease-in-out infinite;
+}
+
+/* ── Tag Pill Style ──────────────────────────────────── */
+.ant-tag {
+  border-radius: 6px !important;
+  font-weight: 500;
+}
+
+/* ── Input Focus Glow ────────────────────────────────── */
+.ant-input:focus,
+.ant-input-focused,
+.ant-select-focused .ant-select-selector {
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.15) !important;
+}
+
+/* ── Progress Bar Polish ─────────────────────────────── */
+.ant-progress-inner {
+  border-radius: 6px !important;
+}
+.ant-progress-bg {
+  border-radius: 6px !important;
+}
+
+/* ── Counter Animation ───────────────────────────────── */
+@keyframes countUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.lm-count-up {
+  animation: countUp 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Tooltip Polish ──────────────────────────────────── */
+.ant-tooltip-inner {
+  border-radius: 8px !important;
+  backdrop-filter: blur(8px);
+}
+
+/* ── Grid Mesh Background (for Login) ────────────────── */
+.lm-grid-bg {
+  background-image:
+    linear-gradient(rgba(22, 119, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(22, 119, 255, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+/* ── Particle Canvas ─────────────────────────────────── */
+.lm-particles {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── Button Polish ───────────────────────────────────── */
+.ant-btn-primary {
+  background: var(--lm-gradient-primary) !important;
+  border: none !important;
+  box-shadow: 0 2px 8px rgba(22, 119, 255, 0.3) !important;
+  transition: all 0.3s !important;
+}
+
+.ant-btn-primary:hover {
+  box-shadow: 0 4px 16px rgba(22, 119, 255, 0.5) !important;
+  transform: translateY(-1px);
+}
+
+.ant-btn-primary:active {
+  transform: translateY(0);
 }

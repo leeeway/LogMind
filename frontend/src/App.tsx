@@ -38,24 +38,25 @@ const App: React.FC = () => {
         algorithm: theme.darkAlgorithm,
         token: {
           colorPrimary: '#1677ff',
-          colorBgContainer: '#111827',
-          colorBgLayout: '#0a0e17',
-          colorBgElevated: '#1a2332',
+          colorBgContainer: '#0d1220',
+          colorBgLayout: '#060a13',
+          colorBgElevated: '#141c2e',
           colorBorder: '#1e3a5f',
           colorBorderSecondary: 'rgba(255,255,255,0.06)',
-          borderRadius: 8,
-          fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif",
+          borderRadius: 10,
+          fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif",
         },
         components: {
           Menu: {
             itemBg: 'transparent',
-            itemSelectedBg: 'rgba(22, 119, 255, 0.15)',
+            itemSelectedBg: 'rgba(22, 119, 255, 0.12)',
             itemHoverBg: 'rgba(255, 255, 255, 0.04)',
-            itemSelectedColor: '#1677ff',
+            itemSelectedColor: '#4096ff',
+            itemColor: 'rgba(255,255,255,0.55)',
           },
           Table: {
             headerBg: 'rgba(255,255,255,0.02)',
-            rowHoverBg: 'rgba(255,255,255,0.03)',
+            rowHoverBg: 'rgba(22, 119, 255, 0.03)',
           },
           Card: {
             headerBg: 'transparent',

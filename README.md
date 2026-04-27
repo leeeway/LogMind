@@ -11,6 +11,8 @@
   <p>
     <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.13-blue.svg?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.13" /></a>
     <a href="https://fastapi.tiangolo.com"><img src="https://img.shields.io/badge/FastAPI-0.111-009688.svg?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" /></a>
+    <img src="https://img.shields.io/badge/React-18-61DAFB.svg?style=for-the-badge&logo=react&logoColor=white" alt="React 18" />
+    <img src="https://img.shields.io/badge/TypeScript-5.x-3178C6.svg?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
     <img src="https://img.shields.io/badge/Elasticsearch-8.x-yellow?style=for-the-badge&logo=elasticsearch" alt="ES" />
     <img src="https://img.shields.io/badge/Celery-Distributed-lightgreen.svg?style=for-the-badge" alt="Celery" />
     <img src="https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=for-the-badge&logo=docker" alt="Docker" />
@@ -422,6 +424,17 @@ sequenceDiagram
 | | 🆕 生产环境密钥拒绝校验 | ✅ |
 | | 🆕 错误趋势预警 (环比加速增长检测) | ✅ |
 | | 🆕 分析质量自评估 (低质量结论自动重分析) | ✅ |
+| **Web Dashboard** | 🆕 React 18 + TypeScript + Vite + AntD 5 暗色主题 | ✅ |
+| | 🆕 运维总览 (6 KPI + 多系列趋势图 + 服务健康矩阵) | ✅ |
+| | 🆕 日志搜索 (快速时间预设 + 关键词高亮 + 导出) | ✅ |
+| | 🆕 告警管理 (状态筛选 + ACK/Resolve + Popconfirm) | ✅ |
+| | 🆕 服务管理 (完整 CRUD + AI Switch + 夜间策略) | ✅ |
+| | 🆕 AI 洞察 (效果追踪 + 工具策略分析) | ✅ |
+| | 🆕 知识库管理 (CRUD + 文档上传) | ✅ |
+| | 🆕 系统设置 (Provider + Prompt + 健康检查) | ✅ |
+| | 🆕 登录页 (Canvas 粒子动画 + Glassmorphism) | ✅ |
+| | 🆕 Zustand Auth Store (刷新不丢登录态) | ✅ |
+| | 🆕 ErrorBoundary 路由感知 + 自动轮询 | ✅ |
 
 ---
 
@@ -456,6 +469,7 @@ LogMind 内置多层 Token 消耗控制机制，通过 `.env` 配置：
 | 组件 | 版本要求 |
 |------|---------| 
 | Python | ≥ 3.13 |
+| Node.js | ≥ 18 (前端 Dashboard) |
 | PostgreSQL / MySQL | 任选其一 |
 | Redis | ≥ 6.0 |
 | Elasticsearch | ≥ 8.x（已部署，含 Filebeat 日志数据） |
@@ -486,6 +500,16 @@ make run      # FastAPI 主服务 (端口 8000)
 make worker   # Celery Worker (新终端)
 make beat     # Celery Beat 调度器 (新终端)
 ```
+
+### 启动前端 Dashboard
+
+```bash
+cd frontend
+npm install
+npm run dev   # Vite 开发服务器 (端口 3000，API 自动代理到 8000)
+```
+
+> 访问 `http://localhost:3000` 即可使用 Web Dashboard。默认账号：`admin` / `logmind2024!`
 
 ### Docker Compose 部署
 
@@ -834,7 +858,24 @@ LogMind/
 │   │   └── README.md               #   配置说明
 │   └── hermes/                     #   Hermes Agent Skill
 │       └── SKILL.md                #   运维技能文件
-├── tests/                          # 🆕 单元测试 (212+ 用例)
+├── tests/                          # 🆕 单元测试 (274 用例)
+├── frontend/                       # 🆕 Web Dashboard (React 18 + Vite 6)
+│   ├── src/
+│   │   ├── pages/                  #   9 个页面模块
+│   │   │   ├── Login.tsx           #   登录 (粒子动画 + 毛玻璃)
+│   │   │   ├── Dashboard/          #   运维总览 (KPI + 趋势 + 健康)
+│   │   │   ├── Analysis/           #   分析中心 (任务列表/详情/对比)
+│   │   │   ├── Alerts/             #   告警管理 (记录 + 规则)
+│   │   │   ├── Logs/               #   日志搜索 (快速时间 + 高亮)
+│   │   │   ├── BusinessLines/      #   服务管理 (CRUD + AI Switch)
+│   │   │   ├── AIInsights/         #   AI 洞察 (效果追踪 + 工具分析)
+│   │   │   ├── Knowledge/          #   知识库管理
+│   │   │   └── Settings/           #   系统设置 (Provider + Prompt)
+│   │   ├── components/             #   通用组件 (ErrorBoundary/Layout)
+│   │   ├── api/                    #   API 层 (Axios + JWT 拦截)
+│   │   ├── stores/                 #   Zustand 状态管理
+│   │   └── styles/                 #   全局样式 (Glassmorphism + 动画)
+│   └── README.md                   #   前端项目文档
 ├── configs/prompts/                # 内置 Prompt 模板 (YAML)
 ├── migrations/                     # 数据库迁移脚本
 ├── deploy/                         # 部署配置
@@ -942,7 +983,7 @@ LogMind/
 - [x] 🆕 告警确认 + 解决 API (ACK/Resolve 反馈闭环)
 - [x] 🆕 Celery 事件循环复用 (asyncio.run → run_async 全量替换)
 
-### v2.1 — AI 深度进化 ✅ ← 当前
+### v2.1 — AI 深度进化 ✅
 
 - [x] 错误趋势预警 (error rate 环比加速增长 → 提前告警)
 - [x] 分析质量自评估 (低质量结论自动触发重分析)
@@ -958,11 +999,21 @@ LogMind/
 - [x] 🆕 智能日志采样 (自适应预算 + 严重度加权 + 多样性保证 + 时序分布)
 - [x] 🆕 数据字段闭环 (cost_usd 计算 / notify_result 记录 / source_log_refs 提取)
 
-### v2.5 — 运维深度集成
+### v2.5 — 运维深度集成 + Web Dashboard ✅ ← 当前
 
 - [x] 🆕 错误变点检测 (Z-Score 时间序列分析 + 错误率突增自动发现 + AI Prompt 注入)
 - [x] 🆕 分析对比 API (两次分析结果 Diff: 新增/修复/恶化/改善 + MCP 工具)
-- [ ] Web 管理界面 (Vue.js / React Dashboard)
+- [x] 🆕 Web Dashboard (React 18 + TypeScript + Vite 6 + AntD 5)
+  - [x] 登录页 (Canvas 粒子动画 + Glassmorphism + 渐变品牌)
+  - [x] 运维总览 (6 KPI 卡片 + 多系列趋势图 + 服务健康矩阵 + 60s 自动刷新)
+  - [x] 日志搜索 (快速时间预设 + 关键词高亮 + 行复制 + CSV/TXT 导出 + ⌘+Enter)
+  - [x] 分析中心 (任务列表 + 详情页 + 两次分析对比 Diff)
+  - [x] 告警管理 (状态筛选 + ACK/Resolve 闭环 + Popconfirm + 脉冲动画)
+  - [x] 服务管理 (完整 CRUD + 语言/权重/DAU/夜间策略 + AI Switch)
+  - [x] AI 洞察 (AI 效果追踪 + Agent 工具策略分析)
+  - [x] 知识库管理 + 系统设置 (Provider + Prompt + 健康检查)
+  - [x] 全局: ErrorBoundary 路由感知 + Zustand Auth 持久化 + 面包屑导航
+  - [x] 设计系统: 深色主题 + Glassmorphism + 渐变边框 + Ambient Glow
 - [ ] K8s Event 关联分析 + ConfigMap 变更追踪
 - [ ] 部署系统联动：近期发布记录与错误关联
 - [ ] 多 ES 集群联邦查询
