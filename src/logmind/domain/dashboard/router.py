@@ -1060,9 +1060,15 @@ async def get_ai_effectiveness(
 
     # ── 4. Top error patterns ────────────────────────────
     # Extract from AnalysisResult — group by first 120 chars of content
+    # NOTE: Define the expression once to avoid PostgreSQL treating
+    # parameterized SELECT vs GROUP BY SUBSTRING as different expressions.
+    pattern_expr = cast(
+        func.left(AnalysisResult.content, 120), String
+    ).label("pattern")
+
     pattern_stmt = (
         select(
-            func.substring(AnalysisResult.content, 1, 120).label("pattern"),
+            pattern_expr,
             func.count().label("count"),
             func.avg(AnalysisResult.confidence_score).label("avg_confidence"),
             func.max(AnalysisResult.created_at).label("last_seen"),
@@ -1074,7 +1080,7 @@ async def get_ai_effectiveness(
             LogAnalysisTask.created_at >= since,
             AnalysisResult.severity.in_(["critical", "warning"]),
         )
-        .group_by(func.substring(AnalysisResult.content, 1, 120))
+        .group_by(pattern_expr)
         .order_by(func.count().desc())
         .limit(10)
     )
