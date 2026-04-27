@@ -196,9 +196,27 @@ def _register_routes(app: FastAPI):
         from fastapi.staticfiles import StaticFiles
         from starlette.responses import FileResponse
 
+        # Mount static assets (JS/CSS/images) directly
+        assets_dir = frontend_dist / "assets"
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="static-assets")
+
         @app.get("/{full_path:path}", include_in_schema=False)
         async def serve_spa(full_path: str):
-            """Serve frontend SPA with fallback to index.html."""
+            """Serve frontend SPA with fallback to index.html.
+
+            IMPORTANT: This must NOT intercept /api/* or /docs/* paths.
+            FastAPI matches routes in registration order, so API routes
+            registered above will take priority. However, as a safety guard,
+            we explicitly check and skip API paths.
+            """
+            # Never intercept API, docs, or health endpoints
+            if full_path.startswith(("api/", "docs", "redoc", "openapi.json")):
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": f"API route not found: /{full_path}"}
+                )
             file_path = frontend_dist / full_path
             if file_path.is_file():
                 return FileResponse(file_path)

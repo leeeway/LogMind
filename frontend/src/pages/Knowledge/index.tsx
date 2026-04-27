@@ -16,7 +16,7 @@ const KnowledgeBase: React.FC = () => {
     setLoading(true);
     try {
       const { data } = await ragApi.listKBs();
-      setKbs(data || []);
+      setKbs(Array.isArray(data) ? data : (data?.items || []));
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };

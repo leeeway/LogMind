@@ -232,7 +232,7 @@ const AppLayout: React.FC = () => {
           minHeight: 'calc(100vh - 56px)',
           background: 'var(--lm-bg-layout)',
         }}>
-          <ErrorBoundary>
+          <ErrorBoundary resetKey={location.pathname}>
             <Outlet />
           </ErrorBoundary>
         </Content>

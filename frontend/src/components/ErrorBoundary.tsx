@@ -3,22 +3,35 @@ import { Result, Button, Typography } from 'antd';
 
 const { Paragraph, Text } = Typography;
 
+interface Props {
+  children: React.ReactNode;
+  /** Pass current pathname to auto-reset on navigation */
+  resetKey?: string;
+}
+
 interface State {
   hasError: boolean;
   error?: Error;
   errorInfo?: React.ErrorInfo;
 }
 
-class ErrorBoundary extends React.Component<{ children: React.ReactNode }, State> {
+class ErrorBoundary extends React.Component<Props, State> {
   state: State = { hasError: false };
 
-  static getDerivedStateFromError(error: Error): State {
+  static getDerivedStateFromError(error: Error): Partial<State> {
     return { hasError: true, error };
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     this.setState({ errorInfo });
     console.error('[ErrorBoundary]', error, errorInfo);
+  }
+
+  componentDidUpdate(prevProps: Props) {
+    // Auto-reset when route changes (resetKey changes)
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, error: undefined, errorInfo: undefined });
+    }
   }
 
   render() {
@@ -30,8 +43,8 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, State
             title="页面渲染异常"
             subTitle="请尝试刷新页面或联系管理员"
             extra={[
-              <Button type="primary" key="reload" onClick={() => window.location.reload()}>
-                刷新页面
+              <Button type="primary" key="reload" onClick={() => this.setState({ hasError: false })}>
+                重试当前页
               </Button>,
               <Button key="back" onClick={() => { this.setState({ hasError: false }); window.history.back(); }}>
                 返回上一页
