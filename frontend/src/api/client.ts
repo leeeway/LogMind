@@ -20,9 +20,12 @@ client.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem('lm_token');
-      localStorage.removeItem('lm_user');
-      window.location.href = '/login';
+      // Only redirect to login if not already on login page
+      if (window.location.pathname !== '/login') {
+        localStorage.removeItem('lm_token');
+        localStorage.removeItem('lm_user');
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(err);
   }

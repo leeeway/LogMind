@@ -1,6 +1,6 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { ConfigProvider, theme, App as AntApp } from 'antd';
+import { ConfigProvider, theme, App as AntApp, Spin } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { useAuthStore } from '@/stores/authStore';
 import AppLayout from '@/components/Layout/AppLayout';
@@ -16,16 +16,20 @@ import AIInsights from '@/pages/AIInsights';
 import KnowledgeBase from '@/pages/Knowledge';
 import Settings from '@/pages/Settings';
 
+// Hydrate auth synchronously on module load — before any component renders
+useAuthStore.getState().hydrate();
+
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated, isHydrated } = useAuthStore();
+  // Wait for hydration before making redirect decision
+  if (!isHydrated) {
+    return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}><Spin size="large" /></div>;
+  }
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return <>{children}</>;
 };
 
 const App: React.FC = () => {
-  const { hydrate } = useAuthStore();
-
-  useEffect(() => { hydrate(); }, []);
 
   return (
     <ConfigProvider

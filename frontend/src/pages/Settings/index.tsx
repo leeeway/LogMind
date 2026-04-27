@@ -31,8 +31,8 @@ const Settings: React.FC = () => {
         providerApi.health().catch(() => ({ data: [] })),
         providerApi.getRegistered().catch(() => ({ data: { providers: [] } })),
       ]);
-      setProviders(pRes.data?.items || []);
-      setProviderHealth(hRes.data || []);
+      setProviders(pRes.data?.items || pRes.data || []);
+      setProviderHealth(Array.isArray(hRes.data) ? hRes.data : []);
       setRegisteredProviders(rRes.data?.providers || []);
     } catch (err) { console.error(err); }
     finally { setProvLoading(false); }
@@ -41,7 +41,7 @@ const Settings: React.FC = () => {
   const fetchPrompts = async () => {
     try {
       const { data } = await promptApi.list();
-      setPrompts(data?.items || []);
+      setPrompts(data?.items || data || []);
     } catch (err) { console.error(err); }
   };
 
@@ -88,7 +88,7 @@ const Settings: React.FC = () => {
   const providerColumns = [
     { title: '名称', dataIndex: 'name', width: 140 },
     { title: 'Provider', dataIndex: 'provider_type', width: 120 },
-    { title: '模型', dataIndex: 'model_name', width: 150 },
+    { title: '模型', dataIndex: 'default_model', width: 150 },
     {
       title: '状态', dataIndex: 'is_active', width: 80,
       render: (v: boolean) => <Tag color={v ? '#52c41a' : '#8c8c8c'}>{v ? '启用' : '禁用'}</Tag>,
@@ -112,8 +112,8 @@ const Settings: React.FC = () => {
 
   const promptColumns = [
     { title: '名称', dataIndex: 'name', width: 160 },
-    { title: '类型', dataIndex: 'template_type', width: 100 },
-    { title: '语言', dataIndex: 'language', width: 80 },
+    { title: '类型', dataIndex: 'category', width: 100 },
+    { title: '版本', dataIndex: 'version', width: 80 },
     {
       title: '操作', width: 100,
       render: (_: any, r: any) => (
@@ -161,7 +161,12 @@ const Settings: React.FC = () => {
             key: 'health', label: '系统健康',
             children: systemHealth ? (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16 }}>
-                {Object.entries(systemHealth.components || {}).map(([name, comp]: any) => (
+                {(typeof systemHealth === 'object' && systemHealth.components && typeof systemHealth.components === 'object'
+                  ? Object.entries(systemHealth.components)
+                  : typeof systemHealth === 'object' && !systemHealth.components
+                    ? Object.entries(systemHealth).filter(([k]) => k !== 'status')
+                    : []
+                ).map(([name, comp]: any) => (
                   <div key={name} style={{
                     padding: 16,
                     background: 'var(--lm-bg-elevated)',
@@ -169,10 +174,12 @@ const Settings: React.FC = () => {
                     border: '1px solid var(--lm-border-light)',
                     textAlign: 'center',
                   }}>
-                    <Badge status={comp.status === 'up' ? 'success' : 'error'} />
+                    <Badge status={((comp?.status || comp) === 'up' || comp === true) ? 'success' : 'error'} />
                     <Text style={{ marginLeft: 8, color: 'var(--lm-text)' }}>{name}</Text>
                     <div style={{ marginTop: 4 }}>
-                      <Tag color={comp.status === 'up' ? '#52c41a' : '#ff4d4f'} style={{ borderRadius: 4 }}>{comp.status}</Tag>
+                      <Tag color={((comp?.status || comp) === 'up' || comp === true) ? '#52c41a' : '#ff4d4f'} style={{ borderRadius: 4 }}>
+                        {typeof comp === 'object' ? (comp.status || 'unknown') : String(comp)}
+                      </Tag>
                     </div>
                   </div>
                 ))}
@@ -189,9 +196,9 @@ const Settings: React.FC = () => {
           <Form.Item name="provider_type" label="Provider 类型" rules={[{ required: true }]}>
             <Select options={registeredProviders.map(p => ({ value: p, label: p }))} placeholder="选择 Provider" />
           </Form.Item>
-          <Form.Item name="model_name" label="模型名称" rules={[{ required: true }]}><Input placeholder="gpt-4o / deepseek-chat" /></Form.Item>
-          <Form.Item name="api_key" label="API Key" rules={[{ required: true }]}><Input.Password /></Form.Item>
-          <Form.Item name="api_base" label="API Base URL"><Input placeholder="可选" /></Form.Item>
+          <Form.Item name="default_model" label="模型名称" rules={[{ required: true }]}><Input placeholder="gpt-4o / deepseek-chat" /></Form.Item>
+          <Form.Item name="api_key_encrypted" label="API Key" rules={[{ required: true }]}><Input.Password /></Form.Item>
+          <Form.Item name="api_base_url" label="API Base URL"><Input placeholder="可选" /></Form.Item>
           <Form.Item><Button type="primary" htmlType="submit" block>保存</Button></Form.Item>
         </Form>
       </Modal>
@@ -200,10 +207,10 @@ const Settings: React.FC = () => {
       <Modal title={editPromptId ? '编辑 Prompt 模板' : '添加 Prompt 模板'} open={promptFormOpen} onCancel={() => { setPromptFormOpen(false); setEditPromptId(null); }} footer={null} width={700} destroyOnClose>
         <Form form={promptForm} layout="vertical" onFinish={handleSavePrompt}>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="template_type" label="类型" initialValue="analysis"><Select options={[{ value: 'analysis', label: 'Analysis' }, { value: 'alert', label: 'Alert' }]} /></Form.Item>
+          <Form.Item name="category" label="类型" initialValue="analysis"><Select options={[{ value: 'analysis', label: 'Analysis' }, { value: 'alert', label: 'Alert' }, { value: 'rag', label: 'RAG' }]} /></Form.Item>
           <Form.Item name="system_prompt" label="System Prompt" rules={[{ required: true }]}><Input.TextArea rows={4} /></Form.Item>
           <Form.Item name="user_prompt_template" label="User Prompt 模板" rules={[{ required: true }]}><Input.TextArea rows={6} /></Form.Item>
-          <Form.Item name="language" label="语言" initialValue="zh"><Select options={[{ value: 'zh', label: '中文' }, { value: 'en', label: 'English' }]} /></Form.Item>
+          <Form.Item name="description" label="描述"><Input /></Form.Item>
           <Form.Item><Button type="primary" htmlType="submit" block>保存</Button></Form.Item>
         </Form>
       </Modal>
