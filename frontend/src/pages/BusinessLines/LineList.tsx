@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Table, Tag, Button, Space, Typography, Card, Modal, Form, Input, Select, Switch, message, Tooltip, Progress } from 'antd';
 import { PlusOutlined, EditOutlined, ReloadOutlined, ClusterOutlined, ApiOutlined, ExperimentOutlined } from '@ant-design/icons';
 import { businessLineApi } from '@/api/services';
@@ -10,6 +11,7 @@ const languageLabels: Record<string, string> = {
 };
 
 const BusinessLineList: React.FC = () => {
+  const navigate = useNavigate();
   const [lines, setLines] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
@@ -63,7 +65,7 @@ const BusinessLineList: React.FC = () => {
       render: (name: string, r: any) => (
         <Space>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: r.is_active ? '#52c41a' : '#8c8c8c', display: 'inline-block' }} />
-          <Text strong style={{ color: 'var(--lm-text)' }}>{name}</Text>
+          <a onClick={() => navigate(`/business-lines/${r.id}`)} style={{ color: 'var(--lm-text)', fontWeight: 600 }}>{name}</a>
         </Space>
       ),
     },

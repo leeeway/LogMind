@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Card, Tag, Typography, Space, Button, Spin, Descriptions, List, message, Tooltip, Tabs } from 'antd';
-import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined } from '@ant-design/icons';
 import { analysisApi } from '@/api/analysis';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import dayjs from 'dayjs';
 
 const { Title, Text, Paragraph } = Typography;
@@ -243,9 +245,9 @@ const TaskDetail: React.FC = () => {
                 }
                 description={
                   <>
-                    <Paragraph style={{ color: 'var(--lm-text-secondary)', margin: '8px 0 0', whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.7 }}>
-                      {result.content}
-                    </Paragraph>
+                    <div className="lm-markdown-content" style={{ margin: '8px 0 0', fontSize: 13, lineHeight: 1.7 }}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.content}</ReactMarkdown>
+                    </div>
                     {result.structured_data && result.structured_data !== '{}' && (
                       <details style={{ marginTop: 8 }}>
                         <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--lm-text-tertiary)' }}>结构化数据</summary>
@@ -268,6 +270,51 @@ const TaskDetail: React.FC = () => {
           locale={{ emptyText: '暂无分析结果' }}
         />
       </Card>
+
+      {/* Running State — Agent Reasoning Animation */}
+      {task.status === 'running' && (
+        <Card
+          title={
+            <Space>
+              <LoadingOutlined spin style={{ color: '#1677ff' }} />
+              <span>AI 正在分析中...</span>
+              {trace?.tool_calls?.length > 0 && (
+                <Tag color="blue" style={{ borderRadius: 4 }}>步骤 {trace.tool_calls.length}</Tag>
+              )}
+            </Space>
+          }
+          size="small"
+          style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12, marginTop: 16 }}
+          styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {trace?.tool_calls?.map((tc: any, i: number) => (
+              <div
+                key={i}
+                className="lm-animate-in"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+                  background: 'var(--lm-bg-elevated)', borderRadius: 8,
+                  border: '1px solid var(--lm-border-light)',
+                  animationDelay: `${i * 0.1}s`,
+                }}
+              >
+                <span style={{ fontWeight: 600, color: 'var(--lm-text-tertiary)', fontSize: 12, width: 24, textAlign: 'center' }}>{i + 1}</span>
+                <Tag color={tc.success ? 'processing' : 'error'} style={{ borderRadius: 4 }}>🔧 {tc.tool_name}</Tag>
+                <span style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>{tc.duration_ms}ms</span>
+                <Tag color={tc.success ? '#52c41a' : '#ff4d4f'} style={{ borderRadius: 4, fontSize: 11 }}>
+                  {tc.success ? '✓' : '✗'}
+                </Tag>
+              </div>
+            ))}
+            {(!trace?.tool_calls || trace.tool_calls.length === 0) && (
+              <div style={{ textAlign: 'center', padding: 20, color: 'var(--lm-text-tertiary)' }}>
+                <div className="lm-pulse" style={{ display: 'inline-block' }}>正在初始化分析 Pipeline...</div>
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
     </div>
   );
 };

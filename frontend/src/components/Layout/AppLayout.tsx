@@ -14,11 +14,12 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   ThunderboltOutlined,
-  BellOutlined,
+  BugOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import NotificationBell from '@/components/NotificationBell';
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -29,6 +30,7 @@ const menuItems = [
   { key: '/alerts', icon: <AlertOutlined />, label: '告警管理' },
   { key: '/logs', icon: <FileSearchOutlined />, label: '日志搜索' },
   { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
+  { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
   { key: '/ai-insights', icon: <ThunderboltOutlined />, label: 'AI 洞察' },
   { key: '/knowledge', icon: <BookOutlined />, label: '知识库' },
   { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
@@ -40,6 +42,7 @@ const breadcrumbMap: Record<string, string> = {
   alerts: '告警管理',
   logs: '日志搜索',
   'business-lines': '服务管理',
+  'known-issues': '已知问题',
   'ai-insights': 'AI 洞察',
   knowledge: '知识库',
   settings: '系统设置',
@@ -183,7 +186,7 @@ const AppLayout: React.FC = () => {
             fontSize: 11,
             color: 'var(--lm-text-tertiary)',
           }}>
-            <div>LogMind v2.5</div>
+            <div>LogMind v2.6</div>
             <div style={{ opacity: 0.5 }}>AI 智能日志分析平台</div>
           </div>
         )}
@@ -219,14 +222,7 @@ const AppLayout: React.FC = () => {
                 style={{ fontSize: 16, color: 'var(--lm-text-tertiary)', cursor: 'pointer' }}
               />
             </Tooltip>
-            <Tooltip title="告警">
-              <Badge count={alertCount} size="small" offset={[-2, 4]}>
-                <BellOutlined
-                  onClick={() => navigate('/alerts')}
-                  style={{ fontSize: 16, color: alertCount > 0 ? '#fa8c16' : 'var(--lm-text-tertiary)', cursor: 'pointer' }}
-                />
-              </Badge>
-            </Tooltip>
+            <NotificationBell />
             <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenu }} placement="bottomRight">
               <Space style={{ cursor: 'pointer' }}>
                 <Avatar size={30} icon={<UserOutlined />} style={{ background: 'var(--lm-primary)' }} />

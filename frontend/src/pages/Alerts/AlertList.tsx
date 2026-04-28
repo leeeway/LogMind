@@ -1,9 +1,15 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Table, Tag, Button, Space, Typography, Card, Tabs, message, Badge, Tooltip, Select, Popconfirm } from 'antd';
-import { CheckOutlined, CheckCircleOutlined, ReloadOutlined, AlertOutlined, FilterOutlined, BellOutlined } from '@ant-design/icons';
+import {
+  Table, Tag, Button, Space, Typography, Card, Tabs, message, Badge, Tooltip,
+  Select, Popconfirm, Row, Col, Drawer, Descriptions, Modal, Form, Input,
+} from 'antd';
+import {
+  CheckOutlined, CheckCircleOutlined, ReloadOutlined, AlertOutlined,
+  FilterOutlined, BellOutlined, PlusOutlined, EyeOutlined,
+  FireOutlined, ExclamationCircleOutlined,
+} from '@ant-design/icons';
 import { alertsApi } from '@/api/alerts';
-import { usePolling } from '@/hooks/usePolling';
-import RefreshIndicator from '@/components/RefreshIndicator';
+import { businessLineApi } from '@/api/services';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/zh-cn';
@@ -11,7 +17,7 @@ import 'dayjs/locale/zh-cn';
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
-const { Title, Text } = Typography;
+const { Title, Text, Paragraph } = Typography;
 
 const priorityColors: Record<string, string> = { P0: '#ff4d4f', P1: '#fa8c16', P2: '#fadb14', P3: '#8c8c8c' };
 const statusLabels: Record<string, { color: string; label: string }> = {
@@ -27,21 +33,35 @@ const AlertList: React.FC = () => {
   const [page, setPage] = useState(1);
   const [rules, setRules] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
+  const [priorityFilter, setPriorityFilter] = useState<string | undefined>(undefined);
+  const [bizLines, setBizLines] = useState<any[]>([]);
+
+  // Detail Drawer
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [detailAlert, setDetailAlert] = useState<any>(null);
+
+  // Rule create modal
+  const [ruleModalOpen, setRuleModalOpen] = useState(false);
+  const [ruleForm] = Form.useForm();
 
   // Stats
-  const firedCount = alerts.filter(a => a.status === 'fired').length;
-  const ackedCount = alerts.filter(a => a.status === 'acknowledged').length;
+  const allAlerts = alerts;
+  const firedCount = allAlerts.filter(a => a.status === 'fired').length;
+  const ackedCount = allAlerts.filter(a => a.status === 'acknowledged').length;
+  const resolvedCount = allAlerts.filter(a => a.status === 'resolved').length;
 
   const fetchAlerts = useCallback(async () => {
     setLoading(true);
     try {
       const { data } = await alertsApi.listHistory({ page, page_size: 15 });
-      const items = data.items || [];
-      setAlerts(statusFilter ? items.filter((a: any) => a.status === statusFilter) : items);
+      let items = data.items || [];
+      if (statusFilter) items = items.filter((a: any) => a.status === statusFilter);
+      if (priorityFilter) items = items.filter((a: any) => a.priority === priorityFilter);
+      setAlerts(items);
       setTotal(data.total || 0);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
-  }, [page, statusFilter]);
+  }, [page, statusFilter, priorityFilter]);
 
   const fetchRules = async () => {
     try {
@@ -50,7 +70,14 @@ const AlertList: React.FC = () => {
     } catch (err) { console.error(err); }
   };
 
-  useEffect(() => { fetchAlerts(); fetchRules(); }, [fetchAlerts]);
+  const fetchBizLines = async () => {
+    try {
+      const { data } = await businessLineApi.list({ page_size: 100 });
+      setBizLines(data?.items || []);
+    } catch { /* ignore */ }
+  };
+
+  useEffect(() => { fetchAlerts(); fetchRules(); fetchBizLines(); }, [fetchAlerts]);
 
   const handleAck = async (id: string) => {
     try { await alertsApi.ackAlert(id); message.success('已确认'); fetchAlerts(); }
@@ -60,6 +87,18 @@ const AlertList: React.FC = () => {
   const handleResolve = async (id: string) => {
     try { await alertsApi.resolveAlert(id); message.success('已解决'); fetchAlerts(); }
     catch { message.error('解决失败'); }
+  };
+
+  const handleCreateRule = async (values: any) => {
+    try {
+      await alertsApi.createRule(values);
+      message.success('规则已创建');
+      setRuleModalOpen(false);
+      ruleForm.resetFields();
+      fetchRules();
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '创建失败');
+    }
   };
 
   const alertColumns = [
@@ -83,7 +122,14 @@ const AlertList: React.FC = () => {
         );
       },
     },
-    { title: '告警信息', dataIndex: 'message', ellipsis: true },
+    {
+      title: '告警信息', dataIndex: 'message', ellipsis: true,
+      render: (text: string, r: any) => (
+        <a onClick={() => { setDetailAlert(r); setDrawerOpen(true); }} style={{ color: 'var(--lm-text)' }}>
+          {text}
+        </a>
+      ),
+    },
     {
       title: '触发时间', dataIndex: 'fired_at', width: 150,
       render: (v: string) => v ? (
@@ -98,6 +144,9 @@ const AlertList: React.FC = () => {
       title: '操作', width: 160,
       render: (_: any, r: any) => (
         <Space>
+          <Tooltip title="查看详情">
+            <Button size="small" icon={<EyeOutlined />} onClick={() => { setDetailAlert(r); setDrawerOpen(true); }} />
+          </Tooltip>
           {r.status === 'fired' && (
             <Popconfirm title="确认此告警？" onConfirm={() => handleAck(r.id)} okText="确认" cancelText="取消">
               <Button size="small" icon={<CheckOutlined />}>确认</Button>
@@ -128,17 +177,32 @@ const AlertList: React.FC = () => {
           <Title level={4} style={{ margin: 0, color: 'var(--lm-text)' }}>
             <AlertOutlined style={{ marginRight: 8 }} />告警管理
           </Title>
-          {firedCount > 0 && (
-            <Badge count={firedCount} style={{ background: '#ff4d4f' }}>
-              <Tag color="#ff4d4f" style={{ borderRadius: 4 }}>待处理</Tag>
-            </Badge>
-          )}
-          {ackedCount > 0 && (
-            <Tag color="#fa8c16" style={{ borderRadius: 4 }}>{ackedCount} 待解决</Tag>
-          )}
         </Space>
         <Button icon={<ReloadOutlined />} onClick={fetchAlerts} />
       </div>
+
+      {/* Stats Cards */}
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        <Col xs={8}>
+          <div className="lm-stat-card" onClick={() => { setStatusFilter('fired'); setPage(1); }} style={{ cursor: 'pointer' }}>
+            <Space><FireOutlined className="stat-icon" style={{ color: '#ff4d4f' }} /><span className="stat-label">触发中</span></Space>
+            <div className="stat-value" style={{ color: '#ff4d4f' }}>{firedCount}</div>
+          </div>
+        </Col>
+        <Col xs={8}>
+          <div className="lm-stat-card" onClick={() => { setStatusFilter('acknowledged'); setPage(1); }} style={{ cursor: 'pointer' }}>
+            <Space><ExclamationCircleOutlined className="stat-icon" style={{ color: '#fa8c16' }} /><span className="stat-label">已确认</span></Space>
+            <div className="stat-value" style={{ color: '#fa8c16' }}>{ackedCount}</div>
+          </div>
+        </Col>
+        <Col xs={8}>
+          <div className="lm-stat-card" onClick={() => { setStatusFilter('resolved'); setPage(1); }} style={{ cursor: 'pointer' }}>
+            <Space><CheckCircleOutlined className="stat-icon" style={{ color: '#52c41a' }} /><span className="stat-label">已解决</span></Space>
+            <div className="stat-value" style={{ color: '#52c41a' }}>{resolvedCount}</div>
+          </div>
+        </Col>
+      </Row>
+
       <Card style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}>
         <Tabs items={[
           {
@@ -151,19 +215,26 @@ const AlertList: React.FC = () => {
             ),
             children: (
               <>
-                <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
+                {/* Enhanced Filters */}
+                <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <FilterOutlined style={{ color: 'var(--lm-text-tertiary)' }} />
                   <Select
-                    allowClear
-                    placeholder="状态筛选"
-                    value={statusFilter}
-                    onChange={setStatusFilter}
+                    allowClear placeholder="状态" value={statusFilter} onChange={(v) => { setStatusFilter(v); setPage(1); }}
+                    style={{ width: 120 }}
                     options={[
                       { value: 'fired', label: '触发中' },
                       { value: 'acknowledged', label: '已确认' },
                       { value: 'resolved', label: '已解决' },
                     ]}
-                    style={{ width: 140 }}
+                  />
+                  <Select
+                    allowClear placeholder="优先级" value={priorityFilter} onChange={(v) => { setPriorityFilter(v); setPage(1); }}
+                    style={{ width: 100 }}
+                    options={[
+                      { value: 'P0', label: '🔴 P0' },
+                      { value: 'P1', label: '🟡 P1' },
+                      { value: 'P2', label: '🟢 P2' },
+                    ]}
                   />
                 </div>
                 <Table dataSource={alerts} columns={alertColumns} rowKey="id" size="small" loading={loading}
@@ -172,11 +243,127 @@ const AlertList: React.FC = () => {
             ),
           },
           {
-            key: 'rules', label: '告警规则',
-            children: <Table dataSource={rules} columns={ruleColumns} rowKey="id" size="small" pagination={false} />,
+            key: 'rules',
+            label: '告警规则',
+            children: (
+              <>
+                <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'flex-end' }}>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setRuleModalOpen(true)}>创建规则</Button>
+                </div>
+                <Table dataSource={rules} columns={ruleColumns} rowKey="id" size="small" pagination={false} />
+              </>
+            ),
           },
         ]} />
       </Card>
+
+      {/* Alert Detail Drawer */}
+      <Drawer
+        title={
+          <Space>
+            <AlertOutlined />
+            <span>告警详情</span>
+            {detailAlert && (
+              <Tag color={priorityColors[detailAlert.priority]} style={{ borderRadius: 4, fontWeight: 600 }}>
+                {detailAlert.priority}
+              </Tag>
+            )}
+          </Space>
+        }
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        width={520}
+        styles={{ body: { background: 'var(--lm-bg-layout)' } }}
+      >
+        {detailAlert && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <Card size="small" style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10 }}>
+              <Descriptions size="small" column={2}>
+                <Descriptions.Item label="优先级">
+                  <Tag color={priorityColors[detailAlert.priority]} style={{ fontWeight: 600 }}>{detailAlert.priority}</Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="严重度">
+                  <Tag color={detailAlert.severity === 'critical' ? '#ff4d4f' : '#faad14'}>{detailAlert.severity}</Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="状态">
+                  <Tag color={statusLabels[detailAlert.status]?.color || '#8c8c8c'}>
+                    {statusLabels[detailAlert.status]?.label || detailAlert.status}
+                  </Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="触发时间">
+                  {detailAlert.fired_at ? dayjs(detailAlert.fired_at).format('YYYY-MM-DD HH:mm:ss') : '-'}
+                </Descriptions.Item>
+                {detailAlert.acked_at && (
+                  <Descriptions.Item label="确认时间">
+                    {dayjs(detailAlert.acked_at).format('MM-DD HH:mm')} ({detailAlert.acked_by})
+                  </Descriptions.Item>
+                )}
+                {detailAlert.resolved_at && (
+                  <Descriptions.Item label="解决时间">
+                    {dayjs(detailAlert.resolved_at).format('MM-DD HH:mm')} ({detailAlert.resolved_by})
+                  </Descriptions.Item>
+                )}
+              </Descriptions>
+            </Card>
+            <Card size="small" title="告警信息" style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10 }}
+              styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
+              <Paragraph style={{ color: 'var(--lm-text-secondary)', whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.8, margin: 0 }}>
+                {detailAlert.message}
+              </Paragraph>
+            </Card>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {detailAlert.status === 'fired' && (
+                <Button icon={<CheckOutlined />} onClick={() => { handleAck(detailAlert.id); setDetailAlert({ ...detailAlert, status: 'acknowledged' }); }}>
+                  确认
+                </Button>
+              )}
+              {detailAlert.status !== 'resolved' && (
+                <Button type="primary" icon={<CheckCircleOutlined />} onClick={() => { handleResolve(detailAlert.id); setDetailAlert({ ...detailAlert, status: 'resolved' }); }}>
+                  解决
+                </Button>
+              )}
+              {detailAlert.analysis_task_id && (
+                <Button type="link" onClick={() => setDrawerOpen(false)}>
+                  查看关联分析 →
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+      </Drawer>
+
+      {/* Rule Create Modal */}
+      <Modal title="创建告警规则" open={ruleModalOpen} onCancel={() => setRuleModalOpen(false)} footer={null} destroyOnClose>
+        <Form form={ruleForm} layout="vertical" onFinish={handleCreateRule}>
+          <Form.Item name="business_line_id" label="业务线" rules={[{ required: true }]}>
+            <Select placeholder="选择业务线" showSearch optionFilterProp="label"
+              options={bizLines.map(b => ({ value: b.id, label: b.name }))} />
+          </Form.Item>
+          <Form.Item name="name" label="规则名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="rule_type" label="规则类型" rules={[{ required: true }]}>
+            <Select options={[
+              { value: 'keyword', label: '关键词匹配' },
+              { value: 'pattern', label: '模式匹配' },
+              { value: 'ai_anomaly', label: 'AI 异常' },
+              { value: 'threshold', label: '阈值触发' },
+            ]} />
+          </Form.Item>
+          <Space style={{ width: '100%' }} size={16}>
+            <Form.Item name="severity" label="严重度" initialValue="warning" style={{ flex: 1 }}>
+              <Select options={[
+                { value: 'critical', label: 'Critical' },
+                { value: 'warning', label: 'Warning' },
+                { value: 'info', label: 'Info' },
+              ]} />
+            </Form.Item>
+            <Form.Item name="cron_expression" label="Cron 表达式" initialValue="*/30 * * * *" style={{ flex: 1 }}>
+              <Input placeholder="*/30 * * * *" />
+            </Form.Item>
+          </Space>
+          <Form.Item name="description" label="描述"><Input.TextArea rows={2} /></Form.Item>
+          <Form.Item><Button type="primary" htmlType="submit" block>创建</Button></Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 };

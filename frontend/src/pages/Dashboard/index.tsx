@@ -256,6 +256,7 @@ const Dashboard: React.FC = () => {
                       padding: '10px 14px', background: 'var(--lm-bg-elevated)', borderRadius: 8,
                       border: '1px solid var(--lm-border-light)', cursor: 'pointer', transition: 'all 0.2s',
                     }}
+                    onClick={() => navigate(`/business-lines/${biz.business_line_id}`)}
                     onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = color; }}
                     onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--lm-border-light)'; }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
@@ -297,8 +298,111 @@ const Dashboard: React.FC = () => {
           </Card>
         </Col>
       </Row>
+
+      {/* Cost Analysis Panel — Phase 3 */}
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col span={24}>
+          <Card
+            title={<Space><DollarOutlined style={{ color: '#52c41a' }} /> 成本分析 · 去重漏斗</Space>}
+            size="small"
+            style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}
+            styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+          >
+            {cost ? (
+              <Row gutter={[16, 16]}>
+                {/* Dedup Funnel */}
+                <Col xs={24} lg={10}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {[
+                      { label: '总任务', value: cost.total_tasks, color: '#1677ff', pct: 100 },
+                      { label: '质量过滤跳过', value: cost.dedup_savings?.quality_filtered_tasks || 0, color: '#722ed1', pct: cost.total_tasks > 0 ? ((cost.dedup_savings?.quality_filtered_tasks || 0) / cost.total_tasks * 100) : 0 },
+                      { label: '指纹去重跳过', value: cost.dedup_savings?.fingerprint_skipped_tasks || 0, color: '#13c2c2', pct: cost.total_tasks > 0 ? ((cost.dedup_savings?.fingerprint_skipped_tasks || 0) / cost.total_tasks * 100) : 0 },
+                      { label: '语义去重命中', value: cost.dedup_savings?.semantic_dedup_tasks || 0, color: '#fa8c16', pct: cost.total_tasks > 0 ? ((cost.dedup_savings?.semantic_dedup_tasks || 0) / cost.total_tasks * 100) : 0 },
+                      { label: 'AI 实际推理', value: cost.ai_tasks || 0, color: '#ff4d4f', pct: cost.total_tasks > 0 ? ((cost.ai_tasks || 0) / cost.total_tasks * 100) : 0 },
+                    ].map((step, i) => (
+                      <Tooltip key={i} title={`${step.label}: ${step.value} 个任务 (${step.pct.toFixed(1)}%)`}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ width: 100, fontSize: 12, color: 'var(--lm-text-secondary)', textAlign: 'right', flexShrink: 0 }}>{step.label}</span>
+                          <div style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 4, height: 22, overflow: 'hidden' }}>
+                            <div style={{
+                              width: `${Math.max(step.pct, 2)}%`,
+                              height: '100%',
+                              background: `linear-gradient(90deg, ${step.color}, ${step.color}88)`,
+                              borderRadius: 4,
+                              display: 'flex', alignItems: 'center', paddingLeft: 6,
+                              transition: 'width 1s ease',
+                            }}>
+                              <span style={{ fontSize: 11, color: '#fff', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                {step.value}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </Tooltip>
+                    ))}
+                  </div>
+                </Col>
+
+                {/* Token by Business Line */}
+                <Col xs={24} lg={8}>
+                  <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)', marginBottom: 8, display: 'block' }}>Token 按业务线分布</Text>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {(cost.by_business_line || []).slice(0, 5).map((b: any, i: number) => {
+                      const maxTokens = Math.max(...(cost.by_business_line || []).map((x: any) => x.tokens_used || 0), 1);
+                      const pct = (b.tokens_used / maxTokens) * 100;
+                      return (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <Text ellipsis style={{ width: 80, fontSize: 11, color: 'var(--lm-text-tertiary)' }}>{b.business_line_name}</Text>
+                          <div style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 3, height: 14, overflow: 'hidden' }}>
+                            <div style={{
+                              width: `${pct}%`, height: '100%',
+                              background: 'linear-gradient(90deg, #722ed1, #1677ff)',
+                              borderRadius: 3,
+                            }} />
+                          </div>
+                          <span style={{ fontSize: 10, color: 'var(--lm-text-tertiary)', width: 50, textAlign: 'right' }}>
+                            {(b.tokens_used / 1000).toFixed(1)}K
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {(!cost.by_business_line || cost.by_business_line.length === 0) && (
+                      <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>暂无数据</Text>
+                    )}
+                  </div>
+                </Col>
+
+                {/* Summary Stats */}
+                <Col xs={24} lg={6}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{ padding: '10px 14px', background: 'var(--lm-bg-elevated)', borderRadius: 8, border: '1px solid var(--lm-border-light)' }}>
+                      <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)', display: 'block' }}>总 Token 消耗</Text>
+                      <Text strong style={{ color: '#722ed1', fontSize: 18 }}>{(cost.total_tokens / 1000).toFixed(1)}K</Text>
+                    </div>
+                    <div style={{ padding: '10px 14px', background: 'var(--lm-bg-elevated)', borderRadius: 8, border: '1px solid var(--lm-border-light)' }}>
+                      <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)', display: 'block' }}>节省率</Text>
+                      <Text strong style={{ color: '#52c41a', fontSize: 18 }}>
+                        {cost.dedup_savings?.savings_percentage?.toFixed(1) || '0'}%
+                      </Text>
+                    </div>
+                    <div style={{ padding: '10px 14px', background: 'var(--lm-bg-elevated)', borderRadius: 8, border: '1px solid var(--lm-border-light)' }}>
+                      <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)', display: 'block' }}>预估节省</Text>
+                      <Text strong style={{ color: '#13c2c2', fontSize: 18 }}>
+                        ≈{((cost.dedup_savings?.estimated_tokens_saved || 0) / 1000).toFixed(1)}K
+                      </Text>
+                    </div>
+                  </div>
+                </Col>
+              </Row>
+            ) : (
+              <div style={{ textAlign: 'center', padding: 40, color: 'var(--lm-text-tertiary)' }}>暂无成本数据</div>
+            )}
+          </Card>
+        </Col>
+      </Row>
     </div>
   );
 };
 
 export default Dashboard;
+
