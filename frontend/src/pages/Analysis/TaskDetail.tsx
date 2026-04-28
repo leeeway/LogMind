@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Card, Tag, Typography, Space, Button, Spin, Descriptions, List, message, Tooltip, Tabs, Dropdown } from 'antd';
-import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined, FileTextOutlined, FilePdfOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined, FileTextOutlined, FilePdfOutlined, FieldTimeOutlined } from '@ant-design/icons';
 import { analysisApi } from '@/api/analysis';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import IncidentTimeline from '@/components/IncidentTimeline';
 import dayjs from 'dayjs';
 
 const { Title, Text, Paragraph } = Typography;
@@ -344,6 +345,18 @@ const TaskDetail: React.FC = () => {
               </div>
             )}
           </div>
+        </Card>
+      )}
+
+      {/* Incident Timeline */}
+      {task.status === 'completed' && taskId && (
+        <Card
+          title={<Space><FieldTimeOutlined /> 事件时间线</Space>}
+          size="small"
+          style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12, marginTop: 16 }}
+          styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+        >
+          <IncidentTimeline taskId={taskId} />
         </Card>
       )}
     </div>

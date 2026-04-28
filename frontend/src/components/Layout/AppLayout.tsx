@@ -17,6 +17,8 @@ import {
   BugOutlined,
   SafetyCertificateOutlined,
   BulbOutlined,
+  MessageOutlined,
+  ApartmentOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
@@ -29,9 +31,11 @@ const { Text } = Typography;
 
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '总览' },
+  { key: '/chat', icon: <MessageOutlined />, label: 'AI 诊断' },
   { key: '/analysis', icon: <ExperimentOutlined />, label: '分析中心' },
   { key: '/alerts', icon: <AlertOutlined />, label: '告警管理' },
   { key: '/logs', icon: <FileSearchOutlined />, label: '日志搜索' },
+  { key: '/topology', icon: <ApartmentOutlined />, label: '服务拓扑' },
   { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
   { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
   { key: '/sla', icon: <SafetyCertificateOutlined />, label: 'SLA 监控' },
@@ -48,6 +52,8 @@ const breadcrumbMap: Record<string, string> = {
   'business-lines': '服务管理',
   'known-issues': '已知问题',
   sla: 'SLA 监控',
+  chat: 'AI 诊断',
+  topology: '服务拓扑',
   'ai-insights': 'AI 洞察',
   knowledge: '知识库',
   settings: '系统设置',
@@ -192,7 +198,7 @@ const AppLayout: React.FC = () => {
             fontSize: 11,
             color: 'var(--lm-text-tertiary)',
           }}>
-            <div>LogMind v2.7</div>
+            <div>LogMind v2.8</div>
             <div style={{ opacity: 0.5 }}>AI 智能日志分析平台</div>
           </div>
         )}

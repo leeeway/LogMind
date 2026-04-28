@@ -576,3 +576,31 @@ body {
   border: none;
   border-top: 1px solid var(--lm-border-light);
 }
+
+/* ── Chat Cursor Blink ──────────────────────────── */
+.lm-cursor-blink {
+  animation: lm-blink 0.8s infinite;
+}
+
+@keyframes lm-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ── Timeline Fade Slide In ─────────────────────── */
+@keyframes lm-fadeSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Pulse glow for topology ────────────────────── */
+@keyframes lm-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px currentColor; }
+  50% { opacity: 0.5; box-shadow: 0 0 12px currentColor; }
+}
