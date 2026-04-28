@@ -167,11 +167,15 @@ def _register_routes(app: FastAPI):
     from logmind.domain.provider.router import router as provider_router
     from logmind.domain.prompt.router import router as prompt_router
     from logmind.domain.log.router import router as log_router
+    from logmind.domain.log.nl_query_router import router as nl_query_router
     from logmind.domain.analysis.router import router as analysis_router
     from logmind.domain.analysis.known_issues_router import router as known_issues_router
+    from logmind.domain.analysis.report_router import router as report_router
     from logmind.domain.alert.router import router as alert_router
     from logmind.domain.dashboard.router import router as dashboard_router
+    from logmind.domain.dashboard.sla_router import router as sla_router
     from logmind.domain.rag.router import router as rag_router
+    from logmind.domain.tenant.audit_router import router as audit_router
 
     api_router.include_router(auth_router)
     api_router.include_router(tenant_router)
@@ -179,13 +183,21 @@ def _register_routes(app: FastAPI):
     api_router.include_router(provider_router)
     api_router.include_router(prompt_router)
     api_router.include_router(log_router)
+    api_router.include_router(nl_query_router)
     api_router.include_router(analysis_router)
     api_router.include_router(known_issues_router)
+    api_router.include_router(report_router)
     api_router.include_router(alert_router)
     api_router.include_router(dashboard_router)
+    api_router.include_router(sla_router)
     api_router.include_router(rag_router)
+    api_router.include_router(audit_router)
 
     app.include_router(api_router)
+
+    # ── WebSocket Endpoint ───────────────────────────────
+    from logmind.core.websocket import websocket_endpoint
+    app.add_api_websocket_route("/ws/events", websocket_endpoint)
 
     # ── Frontend Static Files (SPA) ──────────────────────
     # Only serve frontend in production (Docker).

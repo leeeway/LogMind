@@ -4,6 +4,9 @@ export const logsApi = {
   search: (data: { index_pattern?: string; business_line_id?: string; time_from: string; time_to: string; query?: string; severity?: string; size?: number }) =>
     client.post('/logs/search', data),
 
+  naturalQuery: (question: string) =>
+    client.post('/logs/natural-query', { question }),
+
   getStats: (businessLineId: string) =>
     client.get('/logs/stats', { params: { business_line_id: businessLineId } }),
 

@@ -15,11 +15,14 @@ import {
   MenuUnfoldOutlined,
   ThunderboltOutlined,
   BugOutlined,
+  SafetyCertificateOutlined,
+  BulbOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import NotificationBell from '@/components/NotificationBell';
+import { useTheme } from '@/hooks/useTheme';
 
 const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
@@ -31,6 +34,7 @@ const menuItems = [
   { key: '/logs', icon: <FileSearchOutlined />, label: '日志搜索' },
   { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
   { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
+  { key: '/sla', icon: <SafetyCertificateOutlined />, label: 'SLA 监控' },
   { key: '/ai-insights', icon: <ThunderboltOutlined />, label: 'AI 洞察' },
   { key: '/knowledge', icon: <BookOutlined />, label: '知识库' },
   { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
@@ -43,6 +47,7 @@ const breadcrumbMap: Record<string, string> = {
   logs: '日志搜索',
   'business-lines': '服务管理',
   'known-issues': '已知问题',
+  sla: 'SLA 监控',
   'ai-insights': 'AI 洞察',
   knowledge: '知识库',
   settings: '系统设置',
@@ -55,6 +60,7 @@ const AppLayout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuthStore();
+  const { theme, toggleTheme, isDark } = useTheme();
 
   const selectedKey = '/' + (location.pathname.split('/')[1] || '');
 
@@ -186,7 +192,7 @@ const AppLayout: React.FC = () => {
             fontSize: 11,
             color: 'var(--lm-text-tertiary)',
           }}>
-            <div>LogMind v2.6</div>
+            <div>LogMind v2.7</div>
             <div style={{ opacity: 0.5 }}>AI 智能日志分析平台</div>
           </div>
         )}
@@ -219,6 +225,12 @@ const AppLayout: React.FC = () => {
             <Tooltip title="搜索日志 (⌘K)">
               <FileSearchOutlined
                 onClick={() => navigate('/logs')}
+                style={{ fontSize: 16, color: 'var(--lm-text-tertiary)', cursor: 'pointer' }}
+              />
+            </Tooltip>
+            <Tooltip title={isDark ? '切换浅色主题' : '切换深色主题'}>
+              <BulbOutlined
+                onClick={toggleTheme}
                 style={{ fontSize: 16, color: 'var(--lm-text-tertiary)', cursor: 'pointer' }}
               />
             </Tooltip>

@@ -18,4 +18,7 @@ export const analysisApi = {
 
   submitFeedback: (resultId: string, score: number, comment?: string) =>
     client.put(`/analysis/results/${resultId}/feedback`, null, { params: { score, comment } }),
+
+  generateReport: (taskId: string, format: 'html' | 'markdown' = 'html') =>
+    client.post(`/analysis/${taskId}/report`, null, { params: { format } }),
 };

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Tag, Typography, Space, Button, Spin, Descriptions, List, message, Tooltip, Tabs } from 'antd';
-import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined } from '@ant-design/icons';
+import { Card, Tag, Typography, Space, Button, Spin, Descriptions, List, message, Tooltip, Tabs, Dropdown } from 'antd';
+import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined, FileTextOutlined, FilePdfOutlined } from '@ant-design/icons';
 import { analysisApi } from '@/api/analysis';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -74,6 +74,30 @@ const TaskDetail: React.FC = () => {
     message.success('已导出');
   };
 
+  const exportReport = async (format: 'html' | 'markdown') => {
+    if (!taskId) return;
+    try {
+      const { data } = await analysisApi.generateReport(taskId, format);
+      const mimeType = format === 'html' ? 'text/html' : 'text/markdown';
+      const blob = new Blob([data.content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      if (format === 'html') {
+        // Open HTML report in new tab for preview
+        window.open(url, '_blank');
+        message.success('报告已在新标签页打开');
+      } else {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = data.filename || `report.${format === 'markdown' ? 'md' : 'html'}`;
+        a.click();
+        URL.revokeObjectURL(url);
+        message.success('报告已导出');
+      }
+    } catch {
+      message.error('报告生成失败');
+    }
+  };
+
   if (loading && !task) return <div style={{ textAlign: 'center', paddingTop: 120 }}><Spin size="large" /></div>;
   if (!task) return <div style={{ textAlign: 'center', paddingTop: 120 }}><Text>任务不存在</Text></div>;
 
@@ -99,7 +123,14 @@ const TaskDetail: React.FC = () => {
         </Space>
         <Space>
           {task.status === 'running' && <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>}
-          <Button icon={<DownloadOutlined />} onClick={exportResults} disabled={!task.results?.length}>导出</Button>
+          <Dropdown menu={{ items: [
+            { key: 'html', label: '📄 导出 HTML 报告', icon: <FileTextOutlined />, onClick: () => exportReport('html') },
+            { key: 'md', label: '📝 导出 Markdown', icon: <FileTextOutlined />, onClick: () => exportReport('markdown') },
+            { type: 'divider' as const },
+            { key: 'txt', label: '导出纯文本', icon: <DownloadOutlined />, onClick: exportResults, disabled: !task.results?.length },
+          ] }}>
+            <Button icon={<DownloadOutlined />}>导出报告 ▾</Button>
+          </Dropdown>
           <Button icon={<CopyOutlined />} onClick={() => copyToClipboard(taskId || '')}>复制 ID</Button>
         </Space>
       </div>

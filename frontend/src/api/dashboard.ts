@@ -21,4 +21,7 @@ export const dashboardApi = {
 
   getAgentAnalytics: (days = 7, businessLineId?: string) =>
     client.get('/dashboard/agent-tool-analytics', { params: { days, business_line_id: businessLineId } }),
+
+  getSLA: (days = 7) =>
+    client.get('/dashboard/sla', { params: { days } }),
 };

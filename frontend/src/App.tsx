@@ -17,6 +17,7 @@ import KnownIssues from '@/pages/KnownIssues';
 import KnowledgeBase from '@/pages/Knowledge';
 import Settings from '@/pages/Settings';
 import BusinessLineDetail from '@/pages/BusinessLines/Detail';
+import SLADashboard from '@/pages/Dashboard/SLADashboard';
 
 // Hydrate auth synchronously on module load — before any component renders
 useAuthStore.getState().hydrate();
@@ -81,6 +82,7 @@ const App: React.FC = () => {
               <Route path="business-lines/:id" element={<BusinessLineDetail />} />
               <Route path="ai-insights" element={<AIInsights />} />
               <Route path="known-issues" element={<KnownIssues />} />
+              <Route path="sla" element={<SLADashboard />} />
               <Route path="knowledge" element={<KnowledgeBase />} />
               <Route path="settings" element={<Settings />} />
             </Route>

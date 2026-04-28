@@ -1,7 +1,10 @@
-import React, { useEffect, useState } from 'react';
-import { Card, Tabs, Table, Tag, Button, Space, Typography, Modal, Form, Input, Select, message, Descriptions, Badge } from 'antd';
+import React, { useEffect, useState, lazy, Suspense } from 'react';
+import { Card, Tabs, Table, Tag, Button, Space, Typography, Modal, Form, Input, Select, message, Descriptions, Badge, Spin } from 'antd';
 import { PlusOutlined, DeleteOutlined, EditOutlined, HeartOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import { providerApi, promptApi, systemApi } from '@/api/services';
+
+const UserManagement = lazy(() => import('./UserManagement'));
+const AuditLog = lazy(() => import('./AuditLog'));
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -185,6 +188,22 @@ const Settings: React.FC = () => {
                 ))}
               </div>
             ) : <Text>加载中...</Text>,
+          },
+          {
+            key: 'users', label: '用户管理',
+            children: (
+              <Suspense fallback={<Spin />}>
+                <UserManagement />
+              </Suspense>
+            ),
+          },
+          {
+            key: 'audit', label: '操作审计',
+            children: (
+              <Suspense fallback={<Spin />}>
+                <AuditLog />
+              </Suspense>
+            ),
           },
         ]} />
       </Card>
