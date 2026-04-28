@@ -20,6 +20,9 @@ import BusinessLineDetail from '@/pages/BusinessLines/Detail';
 import SLADashboard from '@/pages/Dashboard/SLADashboard';
 import ChatPage from '@/pages/Chat';
 import ServiceTopology from '@/pages/Topology';
+import CommandCenter from '@/pages/CommandCenter';
+import ErrorHeatmap from '@/pages/Dashboard/ErrorHeatmap';
+import TimeTravel from '@/pages/Logs/TimeTravel';
 
 // Hydrate auth synchronously on module load — before any component renders
 useAuthStore.getState().hydrate();
@@ -87,6 +90,9 @@ const App: React.FC = () => {
               <Route path="sla" element={<SLADashboard />} />
               <Route path="chat" element={<ChatPage />} />
               <Route path="topology" element={<ServiceTopology />} />
+              <Route path="command-center" element={<CommandCenter />} />
+              <Route path="heatmap" element={<ErrorHeatmap />} />
+              <Route path="time-travel" element={<TimeTravel />} />
               <Route path="knowledge" element={<KnowledgeBase />} />
               <Route path="settings" element={<Settings />} />
             </Route>

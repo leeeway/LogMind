@@ -1,14 +1,17 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   Table, Tag, Button, Space, Typography, Card, Tabs, message, Badge, Tooltip,
-  Select, Popconfirm, Row, Col, Drawer, Descriptions, Modal, Form, Input,
+  Select, Popconfirm, Row, Col, Drawer, Descriptions, Modal, Form, Input, Spin,
 } from 'antd';
 import {
   CheckOutlined, CheckCircleOutlined, ReloadOutlined, AlertOutlined,
   FilterOutlined, BellOutlined, PlusOutlined, EyeOutlined,
-  FireOutlined, ExclamationCircleOutlined,
+  FireOutlined, ExclamationCircleOutlined, BulbOutlined,
 } from '@ant-design/icons';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { alertsApi } from '@/api/alerts';
+import client from '@/api/client';
 import { businessLineApi } from '@/api/services';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -39,6 +42,21 @@ const AlertList: React.FC = () => {
   // Detail Drawer
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [detailAlert, setDetailAlert] = useState<any>(null);
+
+  // Smart Context
+  const [alertContext, setAlertContext] = useState<any>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+
+  // Auto-load context when drawer opens
+  useEffect(() => {
+    if (drawerOpen && detailAlert?.id) {
+      setContextLoading(true);
+      client.get(`/alerts/${detailAlert.id}/context`)
+        .then(res => setAlertContext(res.data))
+        .catch(() => setAlertContext(null))
+        .finally(() => setContextLoading(false));
+    }
+  }, [drawerOpen, detailAlert?.id]);
 
   // Rule create modal
   const [ruleModalOpen, setRuleModalOpen] = useState(false);
@@ -257,12 +275,12 @@ const AlertList: React.FC = () => {
         ]} />
       </Card>
 
-      {/* Alert Detail Drawer */}
+      {/* Smart Alert Card Drawer */}
       <Drawer
         title={
           <Space>
             <AlertOutlined />
-            <span>告警详情</span>
+            <span>智能告警卡片</span>
             {detailAlert && (
               <Tag color={priorityColors[detailAlert.priority]} style={{ borderRadius: 4, fontWeight: 600 }}>
                 {detailAlert.priority}
@@ -271,12 +289,13 @@ const AlertList: React.FC = () => {
           </Space>
         }
         open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        width={520}
-        styles={{ body: { background: 'var(--lm-bg-layout)' } }}
+        onClose={() => { setDrawerOpen(false); setAlertContext(null); }}
+        width={560}
+        styles={{ body: { background: 'var(--lm-bg-layout)', padding: 16 } }}
       >
         {detailAlert && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {/* Basic Info */}
             <Card size="small" style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10 }}>
               <Descriptions size="small" column={2}>
                 <Descriptions.Item label="优先级">
@@ -305,13 +324,99 @@ const AlertList: React.FC = () => {
                 )}
               </Descriptions>
             </Card>
+
+            {/* Alert Message */}
             <Card size="small" title="告警信息" style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10 }}
               styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
               <Paragraph style={{ color: 'var(--lm-text-secondary)', whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.8, margin: 0 }}>
                 {detailAlert.message}
               </Paragraph>
             </Card>
-            <div style={{ display: 'flex', gap: 8 }}>
+
+            {/* Smart Context Section */}
+            {contextLoading ? (
+              <div style={{ textAlign: 'center', padding: 24 }}><Spin size="small" /> 加载上下文...</div>
+            ) : alertContext && (
+              <>
+                {/* Frequency Trend */}
+                {alertContext.frequency_trend?.length > 0 && (
+                  <Card size="small"
+                    title={<Space size={4}><FireOutlined style={{ color: '#fa8c16' }} /><span>7 天触发频率</span></Space>}
+                    style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10 }}
+                    styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 60 }}>
+                      {alertContext.frequency_trend.map((p: any, i: number) => {
+                        const maxFreq = Math.max(...alertContext.frequency_trend.map((t: any) => t.count), 1);
+                        const h = Math.max((p.count / maxFreq) * 50, 2);
+                        return (
+                          <Tooltip key={i} title={`${p.date}: ${p.count} 次`}>
+                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                              <div style={{
+                                width: '100%', height: h, borderRadius: 3,
+                                background: p.count > maxFreq * 0.7 ? '#ff4d4f' : p.count > 0 ? '#fa8c16' : 'rgba(255,255,255,0.06)',
+                                transition: 'height 0.3s',
+                              }} />
+                              <span style={{ fontSize: 9, color: 'var(--lm-text-tertiary)' }}>{p.date}</span>
+                            </div>
+                          </Tooltip>
+                        );
+                      })}
+                    </div>
+                  </Card>
+                )}
+
+                {/* Similar Alerts */}
+                {alertContext.similar_alerts?.length > 0 && (
+                  <Card size="small"
+                    title={<Space size={4}><ExclamationCircleOutlined style={{ color: '#722ed1' }} /><span>相似告警 ({alertContext.total_similar})</span></Space>}
+                    style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10 }}
+                    styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+                  >
+                    <div style={{ maxHeight: 160, overflow: 'auto' }}>
+                      {alertContext.similar_alerts.map((sa: any, i: number) => (
+                        <div key={i} style={{
+                          padding: '6px 0',
+                          borderBottom: i < alertContext.similar_alerts.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          fontSize: 12,
+                        }}>
+                          <div style={{ flex: 1, overflow: 'hidden' }}>
+                            <Tag color={sa.severity === 'critical' ? '#ff4d4f' : '#faad14'} style={{ borderRadius: 3, fontSize: 10, marginRight: 6 }}>
+                              {sa.severity}
+                            </Tag>
+                            <Text style={{ color: 'var(--lm-text-secondary)', fontSize: 11 }}>
+                              {sa.message?.slice(0, 60)}
+                            </Text>
+                          </div>
+                          <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 10, flexShrink: 0, marginLeft: 8 }}>
+                            {sa.fired_at ? dayjs(sa.fired_at).fromNow() : ''}
+                          </Text>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                )}
+
+                {/* AI Suggestion */}
+                {alertContext.ai_suggestion && (
+                  <Card size="small"
+                    title={<Space size={4}><BulbOutlined style={{ color: '#52c41a' }} /><span>AI 处置建议</span></Space>}
+                    style={{ background: 'var(--lm-bg-card)', border: '1px solid rgba(82,196,26,0.15)', borderRadius: 10 }}
+                    styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+                  >
+                    <div className="lm-markdown-content" style={{ fontSize: 13, lineHeight: 1.7 }}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{alertContext.ai_suggestion}</ReactMarkdown>
+                    </div>
+                  </Card>
+                )}
+              </>
+            )}
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {detailAlert.status === 'fired' && (
                 <Button icon={<CheckOutlined />} onClick={() => { handleAck(detailAlert.id); setDetailAlert({ ...detailAlert, status: 'acknowledged' }); }}>
                   确认

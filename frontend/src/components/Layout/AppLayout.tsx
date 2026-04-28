@@ -19,6 +19,9 @@ import {
   BulbOutlined,
   MessageOutlined,
   ApartmentOutlined,
+  RocketOutlined,
+  HeatMapOutlined,
+  HistoryOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
@@ -30,11 +33,14 @@ const { Sider, Header, Content } = Layout;
 const { Text } = Typography;
 
 const menuItems = [
+  { key: '/command-center', icon: <RocketOutlined />, label: '指挥中心' },
   { key: '/', icon: <DashboardOutlined />, label: '总览' },
   { key: '/chat', icon: <MessageOutlined />, label: 'AI 诊断' },
   { key: '/analysis', icon: <ExperimentOutlined />, label: '分析中心' },
   { key: '/alerts', icon: <AlertOutlined />, label: '告警管理' },
   { key: '/logs', icon: <FileSearchOutlined />, label: '日志搜索' },
+  { key: '/time-travel', icon: <HistoryOutlined />, label: '时光回溯' },
+  { key: '/heatmap', icon: <HeatMapOutlined />, label: '错误热力图' },
   { key: '/topology', icon: <ApartmentOutlined />, label: '服务拓扑' },
   { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
   { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
@@ -54,6 +60,9 @@ const breadcrumbMap: Record<string, string> = {
   sla: 'SLA 监控',
   chat: 'AI 诊断',
   topology: '服务拓扑',
+  'command-center': '指挥中心',
+  heatmap: '错误热力图',
+  'time-travel': '时光回溯',
   'ai-insights': 'AI 洞察',
   knowledge: '知识库',
   settings: '系统设置',
@@ -198,7 +207,7 @@ const AppLayout: React.FC = () => {
             fontSize: 11,
             color: 'var(--lm-text-tertiary)',
           }}>
-            <div>LogMind v2.8</div>
+            <div>LogMind v2.9</div>
             <div style={{ opacity: 0.5 }}>AI 智能日志分析平台</div>
           </div>
         )}
