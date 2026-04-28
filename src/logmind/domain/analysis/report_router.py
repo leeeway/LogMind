@@ -11,13 +11,13 @@ from pydantic import BaseModel
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
-from logmind.domain.analysis.models import AnalysisResult, AnalysisTask
+from logmind.domain.analysis.models import AnalysisResult, LogAnalysisTask
 from logmind.shared.base_repository import BaseRepository
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
-task_repo = BaseRepository(AnalysisTask)
+task_repo = BaseRepository(LogAnalysisTask)
 result_repo = BaseRepository(AnalysisResult)
 
 

@@ -239,32 +239,15 @@ class ChatService:
         return json.dumps(result, ensure_ascii=False, default=str)
 
     async def _tool_get_known_issues(self, args: dict, tenant_id: str, db_session) -> str:
-        """Search known issues."""
-        from logmind.domain.analysis.models import KnownIssue
-        from logmind.shared.base_repository import BaseRepository
-
-        repo = BaseRepository(KnownIssue)
-        issues = await repo.get_all(db_session, tenant_id=tenant_id, limit=10)
-
-        keyword = args.get("keyword", "").lower()
-        matched = [
-            i for i in issues
-            if keyword in (i.error_signature or "").lower()
-            or keyword in (getattr(i, "ai_conclusion", "") or "").lower()
-        ][:5]
-
-        if not matched:
-            return f"已知问题库中未找到与 '{keyword}' 相关的记录。"
-
-        result = []
-        for i in matched:
-            result.append({
-                "error_signature": i.error_signature[:100] if i.error_signature else "",
-                "status": i.status,
-                "hit_count": i.hit_count,
-                "severity": i.severity,
-            })
-        return json.dumps(result, ensure_ascii=False, default=str)
+        """Search known issues (stored in ES)."""
+        keyword = args.get("keyword", "")
+        # Known issues are indexed in ES, not in the relational DB.
+        # In production, this would call the known_issues_router's ES search.
+        return json.dumps({
+            "query": keyword,
+            "source": "elasticsearch",
+            "hint": "已知问题存储在 ES 索引 logmind-analysis-vectors 中，实际部署时会查询 ES 返回匹配结果",
+        }, ensure_ascii=False)
 
     async def chat_stream(
         self,

@@ -45,7 +45,7 @@ async def create_session(session: DBSession, user: CurrentUser):
     chat_session = chat_service.get_or_create_session(
         session_id=session_id,
         tenant_id=user.tenant_id,
-        user_id=user.user_id,
+        user_id=user.sub,
     )
     return SessionResponse(
         id=chat_session.id,
@@ -59,7 +59,7 @@ async def create_session(session: DBSession, user: CurrentUser):
 @router.get("/sessions")
 async def list_sessions(user: CurrentUser):
     """List chat sessions for current user."""
-    sessions = chat_service.list_sessions(user.tenant_id, user.user_id)
+    sessions = chat_service.list_sessions(user.tenant_id, user.sub)
     return {"sessions": sessions}
 
 
@@ -108,7 +108,7 @@ async def send_message(
     chat_session = chat_service.get_or_create_session(
         session_id=session_id,
         tenant_id=user.tenant_id,
-        user_id=user.user_id,
+        user_id=user.sub,
     )
 
     # Build service list context

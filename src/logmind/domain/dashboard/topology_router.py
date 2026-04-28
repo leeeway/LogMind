@@ -66,25 +66,33 @@ async def get_topology(
     )
 
     # Get recent alerts (last 24h) for health coloring
+    # AlertHistory doesn't have business_line_id directly — join via AlertRule
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     from sqlalchemy import select
-    stmt = select(AlertHistory).where(
-        AlertHistory.tenant_id == user.tenant_id,
-        AlertHistory.fired_at >= since,
+    from logmind.domain.alert.models import AlertRule
+
+    stmt = (
+        select(AlertRule.business_line_id, AlertHistory.severity)
+        .join(AlertRule, AlertHistory.alert_rule_id == AlertRule.id, isouter=True)
+        .where(
+            AlertHistory.tenant_id == user.tenant_id,
+            AlertHistory.fired_at >= since,
+        )
     )
     result = await session.execute(stmt)
-    recent_alerts = list(result.scalars().all())
+    alert_rows = result.all()
 
     # Count alerts per business line
     alert_counts: dict[str, dict] = {}
-    for a in recent_alerts:
-        biz_id = a.business_line_id or ""
+    for row in alert_rows:
+        biz_id = row[0] or ""
+        severity = row[1] or "warning"
         if biz_id not in alert_counts:
             alert_counts[biz_id] = {"critical": 0, "warning": 0, "total": 0}
         alert_counts[biz_id]["total"] += 1
-        if a.severity == "critical":
+        if severity == "critical":
             alert_counts[biz_id]["critical"] += 1
-        elif a.severity == "warning":
+        elif severity == "warning":
             alert_counts[biz_id]["warning"] += 1
 
     nodes = []

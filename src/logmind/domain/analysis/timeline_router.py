@@ -13,14 +13,14 @@ from pydantic import BaseModel
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
-from logmind.domain.analysis.models import AnalysisTask, AnalysisResult
+from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
 from logmind.domain.alert.models import AlertHistory
 from logmind.shared.base_repository import BaseRepository
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
-task_repo = BaseRepository(AnalysisTask)
+task_repo = BaseRepository(LogAnalysisTask)
 result_repo = BaseRepository(AnalysisResult)
 alert_repo = BaseRepository(AlertHistory)
 
@@ -74,21 +74,21 @@ async def get_incident_timeline(
         ))
 
     # 2. Stage trace events
-    if hasattr(task, "stage_trace") and task.stage_trace:
+    if hasattr(task, "stage_metrics") and task.stage_metrics:
         try:
-            trace = json.loads(task.stage_trace)
-            stages = trace.get("stages", [])
-            for s in stages:
-                sev = "info" if s.get("status") == "ok" else "warning" if s.get("status") == "skipped" else "critical"
-                events.append(TimelineEvent(
-                    timestamp=task.created_at.isoformat() if hasattr(task.created_at, 'isoformat') else str(task.created_at),
-                    event_type="stage",
-                    severity=sev,
-                    title=f"Pipeline: {s.get('stage', '')}",
-                    description=f"耗时 {s.get('duration_ms', 0)}ms — {s.get('status', '')}",
-                    source="pipeline",
-                    metadata={"duration_ms": s.get("duration_ms", 0), "status": s.get("status", "")},
-                ))
+            stages = json.loads(task.stage_metrics)
+            if isinstance(stages, list):
+                for s in stages:
+                    sev = "info" if s.get("status") == "ok" else "warning" if s.get("status") == "skipped" else "critical"
+                    events.append(TimelineEvent(
+                        timestamp=task.created_at.isoformat() if hasattr(task.created_at, 'isoformat') else str(task.created_at),
+                        event_type="stage",
+                        severity=sev,
+                        title=f"Pipeline: {s.get('stage', '')}",
+                        description=f"耗时 {s.get('duration_ms', 0)}ms — {s.get('status', '')}",
+                        source="pipeline",
+                        metadata={"duration_ms": s.get("duration_ms", 0), "status": s.get("status", "")},
+                    ))
         except (json.JSONDecodeError, TypeError):
             pass
 
