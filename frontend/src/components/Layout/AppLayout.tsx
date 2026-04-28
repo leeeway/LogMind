@@ -22,6 +22,9 @@ import {
   RocketOutlined,
   HeatMapOutlined,
   HistoryOutlined,
+  FileTextOutlined,
+  TableOutlined,
+  RadarChartOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
@@ -36,18 +39,49 @@ const menuItems = [
   { key: '/command-center', icon: <RocketOutlined />, label: '指挥中心' },
   { key: '/', icon: <DashboardOutlined />, label: '总览' },
   { key: '/chat', icon: <MessageOutlined />, label: 'AI 诊断' },
-  { key: '/analysis', icon: <ExperimentOutlined />, label: '分析中心' },
-  { key: '/alerts', icon: <AlertOutlined />, label: '告警管理' },
-  { key: '/logs', icon: <FileSearchOutlined />, label: '日志搜索' },
-  { key: '/time-travel', icon: <HistoryOutlined />, label: '时光回溯' },
-  { key: '/heatmap', icon: <HeatMapOutlined />, label: '错误热力图' },
-  { key: '/topology', icon: <ApartmentOutlined />, label: '服务拓扑' },
-  { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
-  { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
-  { key: '/sla', icon: <SafetyCertificateOutlined />, label: 'SLA 监控' },
-  { key: '/ai-insights', icon: <ThunderboltOutlined />, label: 'AI 洞察' },
-  { key: '/knowledge', icon: <BookOutlined />, label: '知识库' },
-  { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
+  {
+    key: 'grp-monitor',
+    icon: <RadarChartOutlined />,
+    label: '态势感知',
+    children: [
+      { key: '/patrol', icon: <RadarChartOutlined />, label: '异常巡逻' },
+      { key: '/heatmap', icon: <HeatMapOutlined />, label: '错误热力图' },
+      { key: '/topology', icon: <ApartmentOutlined />, label: '服务拓扑' },
+      { key: '/sla', icon: <SafetyCertificateOutlined />, label: 'SLA 监控' },
+    ],
+  },
+  {
+    key: 'grp-analysis',
+    icon: <ExperimentOutlined />,
+    label: '分析排查',
+    children: [
+      { key: '/analysis', icon: <ExperimentOutlined />, label: '分析中心' },
+      { key: '/alerts', icon: <AlertOutlined />, label: '告警管理' },
+      { key: '/logs', icon: <FileSearchOutlined />, label: '日志搜索' },
+      { key: '/time-travel', icon: <HistoryOutlined />, label: '时光回溯' },
+      { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
+    ],
+  },
+  {
+    key: 'grp-ops',
+    icon: <ClusterOutlined />,
+    label: '运维管理',
+    children: [
+      { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
+      { key: '/weekly-report', icon: <FileTextOutlined />, label: '巡检周报' },
+      { key: '/pivot', icon: <TableOutlined />, label: '透视分析' },
+      { key: '/ai-insights', icon: <ThunderboltOutlined />, label: 'AI 洞察' },
+    ],
+  },
+  {
+    key: 'grp-system',
+    icon: <SettingOutlined />,
+    label: '系统',
+    children: [
+      { key: '/knowledge', icon: <BookOutlined />, label: '知识库' },
+      { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
+    ],
+  },
 ];
 
 const breadcrumbMap: Record<string, string> = {
@@ -63,6 +97,9 @@ const breadcrumbMap: Record<string, string> = {
   'command-center': '指挥中心',
   heatmap: '错误热力图',
   'time-travel': '时光回溯',
+  'weekly-report': '巡检周报',
+  pivot: '透视分析',
+  patrol: '异常巡逻',
   'ai-insights': 'AI 洞察',
   knowledge: '知识库',
   settings: '系统设置',
@@ -79,17 +116,39 @@ const AppLayout: React.FC = () => {
 
   const selectedKey = '/' + (location.pathname.split('/')[1] || '');
 
+  // Determine which sub-menu should be open based on current path
+  const getOpenKeys = (): string[] => {
+    const flatMap: Record<string, string> = {
+      '/patrol': 'grp-monitor', '/heatmap': 'grp-monitor', '/topology': 'grp-monitor', '/sla': 'grp-monitor',
+      '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis',
+      '/business-lines': 'grp-ops', '/weekly-report': 'grp-ops', '/pivot': 'grp-ops', '/ai-insights': 'grp-ops',
+      '/knowledge': 'grp-system', '/settings': 'grp-system',
+    };
+    const grp = flatMap[selectedKey];
+    return grp ? [grp] : [];
+  };
+
+  const [openKeys, setOpenKeys] = useState<string[]>(getOpenKeys());
+
+  // Sync open keys on route change
+  useEffect(() => {
+    const newKeys = getOpenKeys();
+    setOpenKeys(prev => {
+      const merged = new Set([...prev, ...newKeys]);
+      return Array.from(merged);
+    });
+  }, [selectedKey]);
+
   // Fetch unresolved alert count
   useEffect(() => {
     const fetchAlertCount = async () => {
       try {
         const { data } = await alertsApi.listHistory({ page: 1, page_size: 1 });
-        // Count non-resolved alerts
         setAlertCount(data.total || 0);
       } catch { /* ignore */ }
     };
     fetchAlertCount();
-    const timer = setInterval(fetchAlertCount, 120000); // every 2 min
+    const timer = setInterval(fetchAlertCount, 120000);
     return () => clearInterval(timer);
   }, []);
 
@@ -132,6 +191,21 @@ const AppLayout: React.FC = () => {
     return () => window.removeEventListener('keydown', handler);
   }, [navigate]);
 
+  // Inject alert badge into menu items
+  const processedMenuItems = menuItems.map(item => {
+    if (item.children) {
+      return {
+        ...item,
+        children: item.children.map(child =>
+          child.key === '/alerts' && alertCount > 0
+            ? { ...child, label: <Space>{child.label}<Badge count={alertCount} size="small" /></Space> }
+            : child
+        ),
+      };
+    }
+    return item;
+  });
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
@@ -139,7 +213,7 @@ const AppLayout: React.FC = () => {
         collapsed={collapsed}
         onCollapse={setCollapsed}
         trigger={null}
-        width={240}
+        width={220}
         style={{
           background: 'var(--lm-bg-container)',
           borderRight: '1px solid var(--lm-border-light)',
@@ -148,72 +222,68 @@ const AppLayout: React.FC = () => {
           top: 0,
           bottom: 0,
           zIndex: 100,
-          overflow: 'auto',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
         }}
       >
         <div style={{
-          height: 60,
+          height: 56,
           display: 'flex',
           alignItems: 'center',
           justifyContent: collapsed ? 'center' : 'flex-start',
-          padding: collapsed ? '0' : '0 18px',
+          padding: collapsed ? '0' : '0 16px',
           borderBottom: '1px solid var(--lm-border-light)',
           gap: 10,
+          flexShrink: 0,
         }}>
           <div style={{
-            width: 34, height: 34, borderRadius: 10,
+            width: 32, height: 32, borderRadius: 8,
             background: 'linear-gradient(135deg, rgba(22,119,255,0.2) 0%, rgba(114,46,209,0.2) 100%)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             border: '1px solid rgba(22,119,255,0.15)',
             flexShrink: 0,
           }}>
-            <ThunderboltOutlined style={{ fontSize: 18, color: '#1677ff' }} />
+            <ThunderboltOutlined style={{ fontSize: 16, color: '#1677ff' }} />
           </div>
           {!collapsed && (
-            <Text strong className="lm-gradient-text" style={{ fontSize: 17, letterSpacing: 1.5 }}>
+            <Text strong className="lm-gradient-text" style={{ fontSize: 16, letterSpacing: 1.5 }}>
               LogMind
             </Text>
           )}
         </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selectedKey]}
-          items={menuItems.map(item => item.key === '/alerts' ? {
-            ...item,
-            label: (
-              <Space>
-                {item.label}
-                {alertCount > 0 && <Badge count={alertCount} size="small" offset={[0, 0]} />}
-              </Space>
-            ),
-          } : item)}
-          onClick={({ key }) => navigate(key)}
-          style={{
-            background: 'transparent',
-            border: 'none',
-            marginTop: 8,
-          }}
-        />
+        <div style={{ flex: 1, overflow: 'auto', overflowX: 'hidden' }}>
+          <Menu
+            mode="inline"
+            selectedKeys={[selectedKey]}
+            openKeys={collapsed ? [] : openKeys}
+            onOpenChange={keys => setOpenKeys(keys as string[])}
+            items={processedMenuItems}
+            onClick={({ key }) => { if (!key.startsWith('grp-')) navigate(key); }}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              fontSize: 13,
+            }}
+          />
+        </div>
 
         {/* Sidebar Footer */}
         {!collapsed && (
           <div style={{
-            position: 'absolute',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            padding: '12px 20px',
+            padding: '10px 16px',
             borderTop: '1px solid var(--lm-border-light)',
-            fontSize: 11,
+            fontSize: 10,
             color: 'var(--lm-text-tertiary)',
+            flexShrink: 0,
           }}>
-            <div>LogMind v2.9</div>
+            <div>LogMind v3.0</div>
             <div style={{ opacity: 0.5 }}>AI 智能日志分析平台</div>
           </div>
         )}
       </Sider>
 
-      <Layout style={{ marginLeft: collapsed ? 64 : 240, transition: 'margin-left 0.2s' }}>
+      <Layout style={{ marginLeft: collapsed ? 64 : 220, transition: 'margin-left 0.2s' }}>
         <Header style={{
           background: 'var(--lm-bg-container)',
           borderBottom: '1px solid var(--lm-border-light)',

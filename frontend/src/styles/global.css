@@ -373,6 +373,29 @@ body {
   border-radius: 0 3px 3px 0;
 }
 
+/* ── Compact Menu Items ──────────────────────────────── */
+.ant-menu-inline .ant-menu-item,
+.ant-menu-inline .ant-menu-submenu-title {
+  height: 36px !important;
+  line-height: 36px !important;
+  margin-block: 2px !important;
+}
+
+.ant-menu-inline .ant-menu-sub .ant-menu-item {
+  height: 32px !important;
+  line-height: 32px !important;
+  padding-left: 40px !important;
+  font-size: 12px;
+}
+
+.ant-menu-submenu-title .anticon {
+  font-size: 14px !important;
+}
+
+.ant-menu-inline .ant-menu-sub {
+  background: transparent !important;
+}
+
 /* ── Ambient Background Glow ─────────────────────────── */
 @keyframes ambientGlow {
   0%, 100% { opacity: 0.4; }

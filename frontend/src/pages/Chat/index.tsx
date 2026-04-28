@@ -1,14 +1,16 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import { Button, Input, Typography, Space, Spin, Tag, message, Tooltip } from 'antd';
 import {
   SendOutlined, PlusOutlined, DeleteOutlined, RobotOutlined,
-  UserOutlined, SearchOutlined, AlertOutlined, BugOutlined,
-  LoadingOutlined, ThunderboltOutlined, CopyOutlined,
+  UserOutlined, ThunderboltOutlined, CopyOutlined,
+  LoadingOutlined, BranchesOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { chatApi } from '@/api/chat';
 import { useAuthStore } from '@/stores/authStore';
+import AgentStepCard, { ToolStep } from '@/components/AgentStepCard';
 
 const { Text, Title } = Typography;
 
@@ -16,21 +18,16 @@ interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp?: string;
-  tool_calls?: { name: string; args: any; result?: string }[];
   isStreaming?: boolean;
 }
-
-const toolIcons: Record<string, React.ReactNode> = {
-  search_logs: <SearchOutlined />,
-  get_alerts: <AlertOutlined />,
-  get_known_issues: <BugOutlined />,
-};
 
 const WELCOME_SUGGESTIONS = [
   '最近1小时有哪些关键错误？',
   '帮我分析 auth-service 的超时问题',
   '最近有什么告警需要关注？',
   '系统整体健康状况如何？',
+  '对比今天和昨天的错误分布',
+  '帮我追踪 NPE 的调用链',
 ];
 
 const ChatPage: React.FC = () => {
@@ -39,10 +36,27 @@ const ChatPage: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [toolCalls, setToolCalls] = useState<{ name: string; args: any; result?: string }[]>([]);
+  const [toolSteps, setToolSteps] = useState<ToolStep[]>([]);
+  const [thinkingRound, setThinkingRound] = useState(0);
+  const [thinkingText, setThinkingText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<any>(null);
   const token = useAuthStore((s) => s.token);
+  const location = useLocation();
+
+  // Handle prefill from QuickDiagnose
+  useEffect(() => {
+    const state = location.state as any;
+    if (state?.prefill) {
+      setInput(state.prefill);
+      // Clear the state
+      window.history.replaceState({}, document.title);
+      // Auto-send after a short delay
+      setTimeout(() => {
+        sendMessage(state.prefill);
+      }, 300);
+    }
+  }, [location.state]);
 
   // Load sessions
   const loadSessions = useCallback(async () => {
@@ -57,7 +71,7 @@ const ChatPage: React.FC = () => {
   // Scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, toolCalls]);
+  }, [messages, toolSteps, thinkingRound]);
 
   // Create new session
   const createSession = async () => {
@@ -65,7 +79,8 @@ const ChatPage: React.FC = () => {
       const { data } = await chatApi.createSession();
       setActiveSessionId(data.id);
       setMessages([]);
-      setToolCalls([]);
+      setToolSteps([]);
+      setThinkingRound(0);
       loadSessions();
     } catch { message.error('创建会话失败'); }
   };
@@ -73,7 +88,8 @@ const ChatPage: React.FC = () => {
   // Load session messages
   const loadSession = async (sessionId: string) => {
     setActiveSessionId(sessionId);
-    setToolCalls([]);
+    setToolSteps([]);
+    setThinkingRound(0);
     try {
       const { data } = await chatApi.getSession(sessionId);
       setMessages((data?.messages || []).map((m: any) => ({
@@ -96,7 +112,7 @@ const ChatPage: React.FC = () => {
     } catch { /* ignore */ }
   };
 
-  // Send message with SSE streaming
+  // Send message with SSE streaming + multi-round ReAct
   const sendMessage = async (content?: string) => {
     const text = content || input.trim();
     if (!text || sending) return;
@@ -115,7 +131,9 @@ const ChatPage: React.FC = () => {
     // Add user message
     setMessages(prev => [...prev, { role: 'user', content: text, timestamp: new Date().toISOString() }]);
     setSending(true);
-    setToolCalls([]);
+    setToolSteps([]);
+    setThinkingRound(0);
+    setThinkingText('');
 
     // Add placeholder for assistant
     setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
@@ -151,8 +169,33 @@ const ChatPage: React.FC = () => {
             try {
               const event = JSON.parse(line.slice(6));
 
-              if (event.type === 'token') {
+              if (event.type === 'thinking') {
+                setThinkingRound(event.round);
+                setThinkingText(event.content);
+
+              } else if (event.type === 'tool_call') {
+                setToolSteps(prev => [...prev, {
+                  name: event.name,
+                  args: event.args,
+                  round: event.round,
+                  status: 'running',
+                  startTime: Date.now(),
+                }]);
+
+              } else if (event.type === 'tool_result') {
+                setToolSteps(prev => prev.map(s =>
+                  s.name === event.name && s.status === 'running'
+                    ? { ...s, result: event.result, summary: event.summary, status: 'done' as const, endTime: Date.now() }
+                    : s
+                ));
+
+              } else if (event.type === 'step_done') {
+                // Round complete, waiting for next
+                setThinkingText(`第 ${event.round}/${event.total_rounds} 轮完成，继续分析...`);
+
+              } else if (event.type === 'token') {
                 assistantContent += event.content;
+                setThinkingRound(0); // Hide thinking indicator
                 setMessages(prev => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
@@ -161,12 +204,7 @@ const ChatPage: React.FC = () => {
                   }
                   return updated;
                 });
-              } else if (event.type === 'tool_call') {
-                setToolCalls(prev => [...prev, { name: event.name, args: event.args }]);
-              } else if (event.type === 'tool_result') {
-                setToolCalls(prev =>
-                  prev.map(tc => tc.name === event.name ? { ...tc, result: event.result } : tc)
-                );
+
               } else if (event.type === 'done') {
                 setMessages(prev => {
                   const updated = [...prev];
@@ -176,6 +214,7 @@ const ChatPage: React.FC = () => {
                   }
                   return updated;
                 });
+
               } else if (event.type === 'error') {
                 message.error(event.message);
               }
@@ -194,6 +233,8 @@ const ChatPage: React.FC = () => {
       });
     } finally {
       setSending(false);
+      setThinkingRound(0);
+      setThinkingText('');
       loadSessions();
       inputRef.current?.focus();
     }
@@ -254,7 +295,7 @@ const ChatPage: React.FC = () => {
         <div style={{ flex: 1, overflow: 'auto', padding: '24px 0' }}>
           <div style={{ maxWidth: 800, margin: '0 auto', padding: '0 24px' }}>
             {messages.length === 0 && (
-              <div style={{ textAlign: 'center', paddingTop: 80 }}>
+              <div style={{ textAlign: 'center', paddingTop: 60 }}>
                 <div style={{
                   width: 72, height: 72, borderRadius: 20, margin: '0 auto 20px',
                   background: 'linear-gradient(135deg, rgba(22,119,255,0.15), rgba(114,46,209,0.15))',
@@ -267,15 +308,15 @@ const ChatPage: React.FC = () => {
                   LogMind AI 诊断助手
                 </Title>
                 <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 14 }}>
-                  用自然语言描述你的问题，AI 会自动搜索日志、分析根因、给出建议
+                  自主排查 Agent · 多轮推理 · 真实 ES 日志查询 · 12 种诊断工具
                 </Text>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 32 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 28 }}>
                   {WELCOME_SUGGESTIONS.map((s, i) => (
                     <div
                       key={i}
                       onClick={() => sendMessage(s)}
                       style={{
-                        padding: '10px 16px', borderRadius: 10, cursor: 'pointer', fontSize: 13,
+                        padding: '8px 14px', borderRadius: 10, cursor: 'pointer', fontSize: 13,
                         background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)',
                         color: 'var(--lm-text-secondary)', transition: 'all 0.2s',
                         maxWidth: 240,
@@ -292,12 +333,12 @@ const ChatPage: React.FC = () => {
 
             {messages.map((msg, idx) => (
               <div key={idx} style={{
-                display: 'flex', gap: 12, marginBottom: 24,
+                display: 'flex', gap: 12, marginBottom: 20,
                 flexDirection: msg.role === 'user' ? 'row-reverse' : 'row',
               }}>
                 {/* Avatar */}
                 <div style={{
-                  width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+                  width: 34, height: 34, borderRadius: 10, flexShrink: 0,
                   background: msg.role === 'user'
                     ? 'linear-gradient(135deg, #1677ff, #4096ff)'
                     : 'linear-gradient(135deg, rgba(114,46,209,0.2), rgba(22,119,255,0.2))',
@@ -305,14 +346,14 @@ const ChatPage: React.FC = () => {
                   border: msg.role === 'user' ? 'none' : '1px solid rgba(114,46,209,0.15)',
                 }}>
                   {msg.role === 'user'
-                    ? <UserOutlined style={{ color: '#fff', fontSize: 16 }} />
-                    : <RobotOutlined style={{ color: '#722ed1', fontSize: 16 }} />
+                    ? <UserOutlined style={{ color: '#fff', fontSize: 14 }} />
+                    : <RobotOutlined style={{ color: '#722ed1', fontSize: 14 }} />
                   }
                 </div>
 
                 {/* Bubble */}
                 <div style={{
-                  maxWidth: '75%', padding: '12px 16px', borderRadius: 14,
+                  maxWidth: '78%', padding: '10px 14px', borderRadius: 14,
                   background: msg.role === 'user' ? 'var(--lm-primary)' : 'var(--lm-bg-card)',
                   border: msg.role === 'user' ? 'none' : '1px solid var(--lm-border-light)',
                   color: msg.role === 'user' ? '#fff' : 'var(--lm-text)',
@@ -348,29 +389,48 @@ const ChatPage: React.FC = () => {
               </div>
             ))}
 
-            {/* Tool Calls */}
-            {toolCalls.length > 0 && (
-              <div style={{ marginBottom: 16, marginLeft: 48 }}>
-                {toolCalls.map((tc, i) => (
-                  <div key={i} style={{
-                    padding: '8px 12px', borderRadius: 8, marginBottom: 6,
-                    background: 'rgba(22,119,255,0.04)', border: '1px solid rgba(22,119,255,0.1)',
-                    fontSize: 12,
-                  }}>
-                    <Space>
-                      {toolIcons[tc.name] || <ThunderboltOutlined />}
-                      <Tag color="blue" style={{ borderRadius: 4 }}>{tc.name}</Tag>
-                      <Text style={{ color: 'var(--lm-text-secondary)', fontSize: 11 }}>
-                        {JSON.stringify(tc.args)}
-                      </Text>
-                      {tc.result ? (
-                        <Tag color="green" style={{ borderRadius: 4 }}>✓ 完成</Tag>
-                      ) : (
-                        <LoadingOutlined style={{ color: '#1677ff' }} />
-                      )}
-                    </Space>
-                  </div>
+            {/* Agent Thinking Chain */}
+            {(toolSteps.length > 0 || thinkingRound > 0) && (
+              <div style={{
+                marginBottom: 16, marginLeft: 46,
+                padding: '12px 14px', borderRadius: 12,
+                background: 'rgba(22,119,255,0.03)',
+                border: '1px solid rgba(22,119,255,0.08)',
+                animation: 'lm-fadeSlideIn 0.3s ease-out',
+              }}>
+                {/* Header */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <BranchesOutlined style={{ color: '#722ed1', fontSize: 14 }} />
+                  <Text style={{ fontSize: 12, fontWeight: 600, color: 'var(--lm-text)' }}>
+                    Agent 推理链
+                  </Text>
+                  {thinkingRound > 0 && (
+                    <Tag color="processing" style={{ borderRadius: 4, fontSize: 10, margin: 0 }}>
+                      第 {thinkingRound} 轮
+                    </Tag>
+                  )}
+                  {toolSteps.length > 0 && (
+                    <Text style={{ fontSize: 10, color: 'var(--lm-text-tertiary)', marginLeft: 'auto' }}>
+                      {toolSteps.filter(s => s.status === 'done').length}/{toolSteps.length} 步完成
+                    </Text>
+                  )}
+                </div>
+
+                {/* Steps */}
+                {toolSteps.map((step, i) => (
+                  <AgentStepCard key={`${step.name}-${i}`} step={step} isLast={i === toolSteps.length - 1 && !thinkingText} />
                 ))}
+
+                {/* Current thinking */}
+                {thinkingText && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    paddingLeft: 24, paddingTop: 4, fontSize: 11, color: 'var(--lm-text-tertiary)',
+                  }}>
+                    <LoadingOutlined style={{ color: '#722ed1' }} />
+                    {thinkingText}
+                  </div>
+                )}
               </div>
             )}
 
@@ -380,7 +440,7 @@ const ChatPage: React.FC = () => {
 
         {/* Input Area */}
         <div style={{
-          padding: '16px 24px 24px', borderTop: '1px solid var(--lm-border-light)',
+          padding: '12px 24px 20px', borderTop: '1px solid var(--lm-border-light)',
           background: 'var(--lm-bg-container)',
         }}>
           <div style={{ maxWidth: 800, margin: '0 auto' }}>
@@ -394,7 +454,7 @@ const ChatPage: React.FC = () => {
                 ref={inputRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                placeholder="描述你的问题... (Ctrl+Enter 发送)"
+                placeholder="描述你的问题... (Ctrl+Enter 发送，Ctrl+Shift+D 快捷诊断)"
                 autoSize={{ minRows: 1, maxRows: 4 }}
                 style={{ border: 'none', background: 'transparent', boxShadow: 'none', fontSize: 14, resize: 'none', padding: '4px 0' }}
                 onPressEnter={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); sendMessage(); } }}
@@ -409,9 +469,9 @@ const ChatPage: React.FC = () => {
                 style={{ flexShrink: 0 }}
               />
             </div>
-            <div style={{ textAlign: 'center', marginTop: 8 }}>
+            <div style={{ textAlign: 'center', marginTop: 6 }}>
               <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-                LogMind AI · Ctrl+Enter 发送 · AI 可能产生不准确的信息
+                LogMind AI v4.0 · 12 种诊断工具 · ReAct 多轮推理 · Ctrl+Enter 发送
               </Text>
             </div>
           </div>

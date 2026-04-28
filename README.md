@@ -427,7 +427,7 @@ sequenceDiagram
 | **Web Dashboard** | 🆕 React 18 + TypeScript + Vite + AntD 5 暗色主题 | ✅ |
 | | 🆕 运维总览 (6 KPI + 多系列趋势图 + 服务健康矩阵) | ✅ |
 | | 🆕 日志搜索 (快速时间预设 + 关键词高亮 + 导出) | ✅ |
-| | 🆕 告警管理 (状态筛选 + ACK/Resolve + Popconfirm) | ✅ |
+| | 🆕 告警管理 (状态筛选 + ACK/Resolve + 智能上下文卡片) | ✅ |
 | | 🆕 服务管理 (完整 CRUD + AI Switch + 夜间策略) | ✅ |
 | | 🆕 AI 洞察 (效果追踪 + 工具策略分析) | ✅ |
 | | 🆕 知识库管理 (CRUD + 文档上传) | ✅ |
@@ -435,6 +435,14 @@ sequenceDiagram
 | | 🆕 登录页 (Canvas 粒子动画 + Glassmorphism) | ✅ |
 | | 🆕 Zustand Auth Store (刷新不丢登录态) | ✅ |
 | | 🆕 ErrorBoundary 路由感知 + 自动轮询 | ✅ |
+| **AI 交互诊断** | 🆕 AI 对话诊断 (ChatGPT 风格 SSE 流式 + Tool Calling) | ✅ |
+| | 🆕 会话管理 (创建/列表/删除 + 10轮上下文窗口) | ✅ |
+| **可视化分析** | 🆕 服务拓扑图 (Canvas 力导向图 + 粒子流动 + 健康着色) | ✅ |
+| | 🆕 AI 事件时间线 (任务详情内嵌 + 动画滑入) | ✅ |
+| | 🆕 指挥中心 (NASA 风格全屏大屏 + 健康矩阵 + ECG 波形) | ✅ |
+| | 🆕 错误热力图 (GitHub Contribution 风格 + 5级色阶 + 点击钻取) | ✅ |
+| | 🆕 日志时光回溯 (DVR 播放器 + 波形拖动 + 异常标记) | ✅ |
+| **智能告警增强** | 🆕 智能告警上下文卡片 (频率趋势 + 相似告警 + AI 建议) | ✅ |
 
 ---
 
@@ -684,6 +692,13 @@ docker-compose --env-file .env.production up -d --build
 | `GET` | `/api/v1/metrics` | 🆕 Prometheus 指标导出 |
 | `POST` | `/api/v1/alerts/history/{id}/ack` | 🆕 确认告警 |
 | `POST` | `/api/v1/alerts/history/{id}/resolve` | 🆕 解决告警 |
+| `GET` | `/api/v1/alerts/{id}/context` | 🆕 告警智能上下文 (相似告警+频率+AI建议) |
+| `POST` | `/api/v1/chat/sessions` | 🆕 创建 AI 对话会话 |
+| `GET` | `/api/v1/chat/sessions` | 🆕 列出历史会话 |
+| `POST` | `/api/v1/chat/sessions/{id}/messages` | 🆕 发送消息 (SSE 流式) |
+| `GET` | `/api/v1/dashboard/heatmap` | 🆕 错误热力图数据 (服务×时间矩阵) |
+| `GET` | `/api/v1/dashboard/topology` | 🆕 服务拓扑图数据 |
+| `GET` | `/api/v1/logs/replay` | 🆕 日志时光回溯 (时间桶聚合) |
 
 ### 🆕 知识库管理 API
 
@@ -848,7 +863,12 @@ LogMind/
 │   │   │   └── adapters/           # OpenAI/Claude/Gemini/DeepSeek/Ollama
 │   │   ├── prompt/                 # Prompt 模板引擎
 │   │   ├── rag/                    # RAG 知识库 (ES 向量检索 + 管理 API)
-│   │   └── dashboard/              # 仪表盘统计 (5 端点)
+│   │   ├── dashboard/              # 仪表盘统计 + 拓扑 + 热力图
+│   │   │   ├── topology_router.py  # 🆕 服务拓扑图 API
+│   │   │   └── heatmap_router.py   # 🆕 错误热力图 API
+│   │   └── chat/                   # 🆕 AI 对话诊断
+│   │       ├── router.py           #   SSE 流式端点
+│   │       └── service.py          #   会话管理 + Tool Calling
 │   ├── shared/                     # 通用组件
 │   └── main.py                     # FastAPI 入口
 ├── integrations/                   # 🆕 Agent 生态集成
@@ -861,17 +881,21 @@ LogMind/
 ├── tests/                          # 🆕 单元测试 (274 用例)
 ├── frontend/                       # 🆕 Web Dashboard (React 18 + Vite 6)
 │   ├── src/
-│   │   ├── pages/                  #   9 个页面模块
+│   │   ├── pages/                  #   15 个页面模块
 │   │   │   ├── Login.tsx           #   登录 (粒子动画 + 毛玻璃)
-│   │   │   ├── Dashboard/          #   运维总览 (KPI + 趋势 + 健康)
-│   │   │   ├── Analysis/           #   分析中心 (任务列表/详情/对比)
-│   │   │   ├── Alerts/             #   告警管理 (记录 + 规则)
-│   │   │   ├── Logs/               #   日志搜索 (快速时间 + 高亮)
+│   │   │   ├── Dashboard/          #   运维总览 + SLA + 错误热力图
+│   │   │   ├── CommandCenter/      #   🆕 指挥中心 (NASA 全屏大屏)
+│   │   │   ├── Chat/               #   🆕 AI 对话诊断 (SSE 流式)
+│   │   │   ├── Analysis/           #   分析中心 (详情含时间线)
+│   │   │   ├── Alerts/             #   告警管理 (智能上下文卡片)
+│   │   │   ├── Logs/               #   日志搜索 + 时光回溯
+│   │   │   ├── Topology/           #   🆕 服务拓扑 (Canvas 力导向图)
 │   │   │   ├── BusinessLines/      #   服务管理 (CRUD + AI Switch)
 │   │   │   ├── AIInsights/         #   AI 洞察 (效果追踪 + 工具分析)
 │   │   │   ├── Knowledge/          #   知识库管理
+│   │   │   ├── KnownIssues/        #   已知问题管理
 │   │   │   └── Settings/           #   系统设置 (Provider + Prompt)
-│   │   ├── components/             #   通用组件 (ErrorBoundary/Layout)
+│   │   ├── components/             #   通用组件 (ErrorBoundary/Layout/Timeline)
 │   │   ├── api/                    #   API 层 (Axios + JWT 拦截)
 │   │   ├── stores/                 #   Zustand 状态管理
 │   │   └── styles/                 #   全局样式 (Glassmorphism + 动画)
@@ -999,7 +1023,7 @@ LogMind/
 - [x] 🆕 智能日志采样 (自适应预算 + 严重度加权 + 多样性保证 + 时序分布)
 - [x] 🆕 数据字段闭环 (cost_usd 计算 / notify_result 记录 / source_log_refs 提取)
 
-### v2.5 — 运维深度集成 + Web Dashboard ✅ ← 当前
+### v2.5 — 运维深度集成 + Web Dashboard ✅
 
 - [x] 🆕 错误变点检测 (Z-Score 时间序列分析 + 错误率突增自动发现 + AI Prompt 注入)
 - [x] 🆕 分析对比 API (两次分析结果 Diff: 新增/修复/恶化/改善 + MCP 工具)
@@ -1014,17 +1038,54 @@ LogMind/
   - [x] 知识库管理 + 系统设置 (Provider + Prompt + 健康检查)
   - [x] 全局: ErrorBoundary 路由感知 + Zustand Auth 持久化 + 面包屑导航
   - [x] 设计系统: 深色主题 + Glassmorphism + 渐变边框 + Ambient Glow
-- [ ] K8s Event 关联分析 + ConfigMap 变更追踪
-- [ ] 部署系统联动：近期发布记录与错误关联
-- [ ] 多 ES 集群联邦查询
-- [ ] MCP 协议 Agent 工具内部解耦 (Pipeline → MCP Tools)
+
+### v2.8 — AI 诊断 + 服务拓扑 + 事件时间线 ✅
+
+- [x] 🆕 AI 对话诊断 (ChatGPT 风格 SSE 流式 + 多轮上下文 10 轮窗口)
+  - [x] Tool Calling (搜索日志 / 查看告警 / 查询已知问题)
+  - [x] 流式渲染 + 工具调用可视化 + 会话管理
+- [x] 🆕 服务拓扑图 (Canvas 力导向图引擎, 零外部依赖)
+  - [x] 粒子流动动画 (基于健康状态) + 节点发光效果
+  - [x] 交互信息卡片 + 拖拽定位
+- [x] 🆕 AI 事件时间线 (任务详情内嵌)
+  - [x] Pipeline 阶段 + AI 发现 + 关联告警 → 时间排序
+  - [x] 严重度着色 + 动画滑入效果
+
+### v2.9 — 指挥中心 + 热力图 + 时光回溯 + 智能告警 ✅ ← 当前
+
+- [x] 🆕 指挥中心 (Command Center)
+  - [x] NASA 任务控制风格全屏大屏 + 一键全屏
+  - [x] 系统状态判定 (OPERATIONAL / WARNING / DEGRADED)
+  - [x] 4 KPI 翻牌计数器 + Critical 脉冲动画
+  - [x] Canvas 服务健康矩阵 (呼吸发光 + 颜色编码)
+  - [x] 实时事件流 (自动滚动 + 滑入动画)
+  - [x] ECG 心电图式错误率波形 (贝塞尔曲线 + 尾部发光点)
+- [x] 🆕 错误热力图矩阵 (Error Heatmap)
+  - [x] GitHub Contribution Chart 风格 SVG 热力图
+  - [x] 自适应粒度 (1天=24小时列, 7天=按天列)
+  - [x] 5级色阶 (蓝→紫→红) + Hover 放大 + 点击钻取日志
+- [x] 🆕 日志时光回溯 (Log Time Travel)
+  - [x] DVR 播放器 UI: Play/Pause/0.5x/1x/2x/4x/⏮/⏭
+  - [x] Canvas 波形图 + 可拖动黄色播放头
+  - [x] 日志快照面板 + 错误/警告/信息统计仪表
+  - [x] 异常时间点侧边栏 (点击跳转)
+- [x] 🆕 智能告警上下文卡片 (Smart Alert Cards)
+  - [x] 7天触发频率趋势图 (柱状色编码)
+  - [x] 30天相似告警历史列表
+  - [x] AI 处置建议 (Markdown 渲染)
+  - [x] 打开 Drawer 自动加载上下文
 
 ### v3.0 — Auto-Remediation 自动自愈
 
+- [ ] AI 根因链图谱 (因果关系有向图可视化)
+- [ ] 智能巡检周报 (AI 摘要 + 趋势图 + 建议行动)
+- [ ] 实时流式图表引擎 (Canvas 零依赖)
+- [ ] 多维分析透视表 (动态 pivot + 热力色编码)
+- [ ] 主动式异常巡逻雷达 (Canvas 扫描动画)
 - [ ] Agent 自治行动：`restart_pod`, `scale_deployment`
 - [ ] 交互式审批修复：企微审批卡片 → 一键执行
 - [ ] AI Fix PR 建议 (对接 GitLab/GitHub)
-- [ ] 跨服务分布式链路追踪 (Trace) 关联
+- [ ] K8s Event 关联分析 + ConfigMap 变更追踪
 - [ ] Text-to-DSL 自然语言日志查询
 
 ---

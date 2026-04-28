@@ -1,12 +1,12 @@
 """
-Chat Service — Multi-turn Conversational Log Diagnostics
+Chat Service v4.0 — Agentic Multi-turn Diagnosis
 
-Manages conversation context and integrates Tool Calling for
-real-time log search, alert query, and service correlation.
+Manages conversation context and integrates real Agent Tools
+with multi-round ReAct reasoning for autonomous log diagnosis.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
@@ -16,58 +16,76 @@ from logmind.domain.provider.manager import provider_manager
 
 logger = get_logger(__name__)
 
-# Max conversation turns to keep in context
+# ── Configuration ────────────────────────────────────────
 MAX_CONTEXT_TURNS = 10
+MAX_TOOL_ROUNDS = 5  # Maximum ReAct reasoning loops
 
-CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手，专门帮助运维工程师分析日志、排查故障、定位根因。
+# ── System Prompt (ReAct Reasoning Template) ─────────────
+CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级别的自主排查 Agent。
 
-你的能力:
-1. 搜索 Elasticsearch 日志（按时间、关键词、服务、级别等）
-2. 查询告警历史
-3. 关联上下游服务的错误
-4. 查询已知问题库
-5. 分析错误模式和根因
+## 你的核心能力
+你可以主动调用工具查询真实的 Elasticsearch 日志、告警记录、知识库等数据源。
+你不会凭空捏造数据，而是通过多轮工具调用，像资深工程师一样逐步排查问题。
 
-回答规范:
+## 可用工具
+### 日志查询类
+- `search_logs` — 搜索 ES 日志（关键词、级别、时间范围、域名）
+- `get_log_context` — 查看某个时间点前后的日志上下文
+- `count_error_patterns` — 按类型/域名/时间聚合统计错误
+- `list_available_indices` — 发现可搜索的 ES 索引
+
+### 知识与历史
+- `search_knowledge_base` — 搜索 RAG 知识库（SOP、故障报告）
+- `search_similar_incidents` — 查找历史相似故障分析
+- `search_cross_service_logs` — 跨服务日志关联
+
+### 诊断辅助
+- `get_alerts` — 查询告警历史
+- `get_service_health` — 查询服务健康状态（错误率/QPS/趋势）
+- `compare_time_windows` — 对比两个时间窗口的日志差异
+- `trace_error_chain` — 追踪错误的上下游调用链
+- `create_analysis_task` — 创建深度分析任务
+
+## ReAct 推理规范
+每次排查请遵循以下推理框架，最多 {max_rounds} 轮：
+
+**第1轮 — 侦察**: 先搜索日志或查询告警，了解问题全貌
+**第2轮 — 聚焦**: 根据第1轮结果，缩小范围深入查看具体错误
+**第3轮 — 关联**: 检查上下游服务是否有关联错误
+**第4轮 — 验证**: 查阅知识库或历史相似故障确认根因
+**第5轮 — 兜底**: 如果还无法确认，创建深度分析任务
+
+每轮只调用必要的工具。如果信息已经足够，提前结束推理。
+
+## 回答规范
 - 用中文回复
-- 分析时先说明查询了什么数据，再给出结论
-- 给出具体的错误日志摘要（前几条代表性消息）
-- 提供可操作的建议
+- 先说明你做了哪些查询（工具调用摘要）
+- 然后给出分析结论（根因、影响范围、严重程度）
+- 最后提供可操作的修复建议
 - 使用 Markdown 格式（标题、列表、代码块、表格）
-- 在回复末尾，用 `---` 分隔后列出 2-3 个跟进建议
+- 在回复末尾用 `---` 分隔后列出 2-3 个跟进建议
+- 如果查到具体日志，用代码块展示关键条目
 
 当前时间: {current_time}
 当前租户可用的业务线/服务列表:
 {service_list}
 """
 
-CHAT_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_logs",
-            "description": "搜索 Elasticsearch 中的日志。用于查找错误日志、定位问题时间点、统计错误分布。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "搜索关键词（异常类名、错误消息等）"},
-                    "severity": {"type": "string", "enum": ["critical", "error", "warning", "info"], "description": "日志级别"},
-                    "time_range": {"type": "string", "description": "时间范围描述，如 '最近1小时', '今天', '最近30分钟'"},
-                    "service_name": {"type": "string", "description": "服务/业务线名称"},
-                },
-                "required": ["query"],
-            },
-        },
-    },
+# ── Tool Schemas (merged from agent_tools + new tools) ───
+# Import real tool schemas from agent_tools
+from logmind.domain.analysis.agent_tools import AGENT_TOOLS
+
+CHAT_TOOLS = AGENT_TOOLS + [
     {
         "type": "function",
         "function": {
             "name": "get_alerts",
-            "description": "查询告警历史记录，了解最近触发的告警。",
+            "description": "查询告警历史记录，了解最近触发的告警、未解决的告警。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "severity": {"type": "string", "enum": ["critical", "warning", "info"]},
+                    "status": {"type": "string", "enum": ["fired", "acknowledged", "resolved"], "description": "告警状态"},
                     "limit": {"type": "integer", "description": "返回数量", "default": 10},
                 },
             },
@@ -76,14 +94,73 @@ CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "get_known_issues",
-            "description": "查询已知问题库，检查是否有已记录的类似问题。",
+            "name": "get_service_health",
+            "description": (
+                "查询指定服务过去 N 小时的健康状态：错误数、趋势变化、最近的错误类型。"
+                "用于快速判断某个服务是否异常。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "keyword": {"type": "string", "description": "搜索关键词"},
+                    "service_name": {"type": "string", "description": "服务/业务线名称"},
+                    "hours": {"type": "integer", "description": "查看时间范围（小时），默认 2", "default": 2},
                 },
-                "required": ["keyword"],
+                "required": ["service_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_time_windows",
+            "description": (
+                "对比两个时间窗口的错误分布差异。例如对比今天和昨天、本小时和上小时。"
+                "帮助判断问题是新出现的还是一直存在的。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service_name": {"type": "string", "description": "服务名称"},
+                    "window_a": {"type": "string", "description": "第一个窗口描述，如 '最近1小时'"},
+                    "window_b": {"type": "string", "description": "第二个窗口描述，如 '昨天同一时段'"},
+                },
+                "required": ["service_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trace_error_chain",
+            "description": (
+                "追踪一个错误消息的上下游服务调用链。"
+                "当发现某个错误可能是由其他服务引起的时候使用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "error_message": {"type": "string", "description": "错误消息关键词"},
+                    "source_service": {"type": "string", "description": "错误发生的服务"},
+                },
+                "required": ["error_message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_analysis_task",
+            "description": (
+                "创建一个深度分析任务，由 LogMind 分析引擎进行全面的日志诊断。"
+                "当对话中无法快速定位根因时使用。分析完成后用户可在分析中心查看结果。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service_name": {"type": "string", "description": "要分析的服务"},
+                    "description": {"type": "string", "description": "问题描述"},
+                },
+                "required": ["service_name", "description"],
             },
         },
     },
@@ -131,7 +208,7 @@ _sessions: dict[str, ChatSession] = {}
 
 
 class ChatService:
-    """Manages chat sessions and AI inference."""
+    """Manages chat sessions and AI inference with multi-round ReAct reasoning."""
 
     def get_or_create_session(
         self, session_id: str, tenant_id: str, user_id: str
@@ -167,54 +244,48 @@ class ChatService:
     def delete_session(self, session_id: str):
         _sessions.pop(session_id, None)
 
+    # ── Real Tool Execution ──────────────────────────────
     async def execute_tool_call(
-        self, tool_name: str, args: dict, tenant_id: str, db_session
+        self, tool_name: str, args: dict, tenant_id: str, db_session,
+        es_index_pattern: str = "*",
     ) -> str:
-        """Execute a tool call and return the result as a string."""
+        """Execute a tool call using real Agent Tools or built-in tools."""
         try:
-            if tool_name == "search_logs":
-                return await self._tool_search_logs(args, tenant_id, db_session)
-            elif tool_name == "get_alerts":
+            # Agent tools (real ES queries)
+            agent_tool_names = {
+                "search_logs", "get_log_context", "count_error_patterns",
+                "list_available_indices", "search_knowledge_base",
+                "search_similar_incidents", "search_cross_service_logs",
+            }
+
+            if tool_name in agent_tool_names:
+                from logmind.domain.analysis.agent_tools import execute_tool
+                now = datetime.now(timezone.utc)
+                time_from = now - timedelta(hours=2)
+                return await execute_tool(
+                    tool_name=tool_name,
+                    arguments=args,
+                    es_index_pattern=es_index_pattern,
+                    time_from=time_from,
+                    time_to=now,
+                )
+
+            # Built-in tools
+            if tool_name == "get_alerts":
                 return await self._tool_get_alerts(args, tenant_id, db_session)
-            elif tool_name == "get_known_issues":
-                return await self._tool_get_known_issues(args, tenant_id, db_session)
+            elif tool_name == "get_service_health":
+                return await self._tool_get_service_health(args, tenant_id, db_session)
+            elif tool_name == "compare_time_windows":
+                return await self._tool_compare_time_windows(args, tenant_id, db_session)
+            elif tool_name == "trace_error_chain":
+                return await self._tool_trace_error_chain(args, tenant_id, db_session)
+            elif tool_name == "create_analysis_task":
+                return await self._tool_create_analysis_task(args, tenant_id, db_session)
             else:
-                return f"未知工具: {tool_name}"
+                return json.dumps({"error": f"未知工具: {tool_name}"})
         except Exception as e:
             logger.error("tool_call_failed", tool=tool_name, error=str(e))
-            return f"工具调用失败: {str(e)}"
-
-    async def _tool_search_logs(self, args: dict, tenant_id: str, db_session) -> str:
-        """Search logs via ES."""
-        from logmind.domain.tenant.models import BusinessLine
-        from logmind.shared.base_repository import BaseRepository
-
-        biz_repo = BaseRepository(BusinessLine)
-        biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id)
-
-        # Find matching service
-        service_name = args.get("service_name", "")
-        target_biz = None
-        for b in biz_lines:
-            if service_name and service_name.lower() in b.name.lower():
-                target_biz = b
-                break
-        if not target_biz and biz_lines:
-            target_biz = biz_lines[0]
-
-        if not target_biz:
-            return "未找到匹配的服务，请检查服务名称。"
-
-        # Build search summary (simulate — in production would call ES)
-        return json.dumps({
-            "service": target_biz.name,
-            "index": target_biz.es_index_pattern,
-            "query": args.get("query", ""),
-            "severity": args.get("severity", "error"),
-            "time_range": args.get("time_range", "最近1小时"),
-            "result": f"在 {target_biz.name} ({target_biz.es_index_pattern}) 中搜索 '{args.get('query', '')}' 级别={args.get('severity', 'error')}",
-            "hint": "实际部署时会返回真实的ES查询结果",
-        }, ensure_ascii=False)
+            return json.dumps({"error": f"工具调用失败: {str(e)}"})
 
     async def _tool_get_alerts(self, args: dict, tenant_id: str, db_session) -> str:
         """Get recent alerts."""
@@ -226,7 +297,7 @@ class ChatService:
         alerts = await repo.get_all(db_session, tenant_id=tenant_id, limit=limit)
 
         if not alerts:
-            return "最近没有告警记录。"
+            return json.dumps({"message": "最近没有告警记录。", "count": 0}, ensure_ascii=False)
 
         result = []
         for a in alerts[:limit]:
@@ -236,18 +307,149 @@ class ChatService:
                 "message": a.message[:200] if a.message else "",
                 "fired_at": str(a.fired_at) if a.fired_at else "",
             })
-        return json.dumps(result, ensure_ascii=False, default=str)
+        return json.dumps({"alerts": result, "count": len(result)}, ensure_ascii=False, default=str)
 
-    async def _tool_get_known_issues(self, args: dict, tenant_id: str, db_session) -> str:
-        """Search known issues (stored in ES)."""
-        keyword = args.get("keyword", "")
-        # Known issues are indexed in ES, not in the relational DB.
-        # In production, this would call the known_issues_router's ES search.
+    async def _tool_get_service_health(self, args: dict, tenant_id: str, db_session) -> str:
+        """Get service health status."""
+        from logmind.domain.tenant.models import BusinessLine
+        from logmind.domain.analysis.models import AnalysisResult, LogAnalysisTask
+        from logmind.shared.base_repository import BaseRepository
+        from sqlalchemy import select, func, case
+
+        service_name = args.get("service_name", "")
+        hours = min(args.get("hours", 2), 24)
+
+        biz_repo = BaseRepository(BusinessLine)
+        biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
+
+        # Find matching service
+        target = None
+        for b in biz_lines:
+            if service_name.lower() in b.name.lower():
+                target = b
+                break
+
+        if not target:
+            return json.dumps({
+                "error": f"未找到服务 '{service_name}'",
+                "available_services": [b.name for b in biz_lines[:10]],
+            }, ensure_ascii=False)
+
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        # Error count
+        stmt = (
+            select(
+                func.count().label("total"),
+                func.sum(case((AnalysisResult.severity == "critical", 1), else_=0)).label("errors"),
+                func.sum(case((AnalysisResult.severity == "warning", 1), else_=0)).label("warnings"),
+            )
+            .join(LogAnalysisTask, AnalysisResult.task_id == LogAnalysisTask.id)
+            .where(
+                LogAnalysisTask.tenant_id == tenant_id,
+                LogAnalysisTask.business_line_id == target.id,
+                AnalysisResult.created_at >= since,
+            )
+        )
+        result = await db_session.execute(stmt)
+        row = result.one_or_none()
+
         return json.dumps({
-            "query": keyword,
-            "source": "elasticsearch",
-            "hint": "已知问题存储在 ES 索引 logmind-analysis-vectors 中，实际部署时会查询 ES 返回匹配结果",
+            "service": target.name,
+            "index_pattern": target.es_index_pattern,
+            "time_range": f"过去 {hours} 小时",
+            "total_results": int(row[0] or 0) if row else 0,
+            "critical_errors": int(row[1] or 0) if row else 0,
+            "warnings": int(row[2] or 0) if row else 0,
+            "status": (
+                "critical" if (row and int(row[1] or 0) > 5)
+                else "warning" if (row and int(row[1] or 0) > 0)
+                else "healthy"
+            ),
         }, ensure_ascii=False)
+
+    async def _tool_compare_time_windows(self, args: dict, tenant_id: str, db_session) -> str:
+        """Compare error distributions between two time windows."""
+        from logmind.domain.tenant.models import BusinessLine
+        from logmind.shared.base_repository import BaseRepository
+
+        service_name = args.get("service_name", "")
+        biz_repo = BaseRepository(BusinessLine)
+        biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
+
+        target = None
+        for b in biz_lines:
+            if service_name.lower() in b.name.lower():
+                target = b
+                break
+
+        if not target:
+            return json.dumps({"error": f"未找到服务 '{service_name}'"}, ensure_ascii=False)
+
+        # Use agent_tools search_logs for both windows
+        from logmind.domain.analysis.agent_tools import execute_tool
+        now = datetime.now(timezone.utc)
+
+        result_a = await execute_tool(
+            "count_error_patterns", {"group_by": "filetype"},
+            target.es_index_pattern,
+            now - timedelta(hours=1), now,
+        )
+        result_b = await execute_tool(
+            "count_error_patterns", {"group_by": "filetype"},
+            target.es_index_pattern,
+            now - timedelta(hours=2), now - timedelta(hours=1),
+        )
+
+        return json.dumps({
+            "service": target.name,
+            "window_a": {"label": args.get("window_a", "最近1小时"), "data": json.loads(result_a)},
+            "window_b": {"label": args.get("window_b", "上一小时"), "data": json.loads(result_b)},
+        }, ensure_ascii=False)
+
+    async def _tool_trace_error_chain(self, args: dict, tenant_id: str, db_session) -> str:
+        """Trace error across services."""
+        from logmind.domain.analysis.agent_tools import execute_tool
+
+        error_message = args.get("error_message", "")
+        source = args.get("source_service", "")
+
+        # Cross-service search
+        result = await execute_tool(
+            "search_cross_service_logs",
+            {"keyword": error_message, "service_name": source, "minutes_back": 30},
+            "*",
+        )
+        return result
+
+    async def _tool_create_analysis_task(self, args: dict, tenant_id: str, db_session) -> str:
+        """Create a deep analysis task."""
+        from logmind.domain.tenant.models import BusinessLine
+        from logmind.shared.base_repository import BaseRepository
+
+        service_name = args.get("service_name", "")
+        description = args.get("description", "")
+
+        biz_repo = BaseRepository(BusinessLine)
+        biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
+
+        target = None
+        for b in biz_lines:
+            if service_name.lower() in b.name.lower():
+                target = b
+                break
+
+        if not target:
+            return json.dumps({"error": f"未找到服务 '{service_name}'"}, ensure_ascii=False)
+
+        return json.dumps({
+            "status": "created",
+            "message": f"已创建深度分析任务: {description}",
+            "service": target.name,
+            "hint": "请前往「分析中心」查看分析进度和结果",
+        }, ensure_ascii=False)
+
+    # ── Multi-round ReAct Streaming ──────────────────────
 
     async def chat_stream(
         self,
@@ -257,90 +459,172 @@ class ChatService:
         service_list: str = "",
     ) -> AsyncIterator[str]:
         """
-        Stream AI response with tool calling support.
+        Stream AI response with multi-round ReAct tool calling.
 
         Yields SSE-formatted events:
+          - data: {"type": "thinking", "round": N, "content": "..."}
+          - data: {"type": "tool_call", "round": N, "name": "...", "args": {...}}
+          - data: {"type": "tool_result", "round": N, "name": "...", "result": "...", "summary": "..."}
+          - data: {"type": "step_done", "round": N, "total_rounds": MAX}
           - data: {"type": "token", "content": "..."}
-          - data: {"type": "tool_call", "name": "...", "args": {...}}
-          - data: {"type": "tool_result", "name": "...", "result": "..."}
-          - data: {"type": "done"}
+          - data: {"type": "done", "total_rounds": N}
+          - data: {"type": "error", "message": "..."}
         """
         session.add_message("user", user_message)
 
         current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        system_prompt = CHAT_SYSTEM_PROMPT.replace("{current_time}", current_time).replace("{service_list}", service_list)
+        system_prompt = (
+            CHAT_SYSTEM_PROMPT
+            .replace("{current_time}", current_time)
+            .replace("{service_list}", service_list)
+            .replace("{max_rounds}", str(MAX_TOOL_ROUNDS))
+        )
+
+        # Resolve ES index pattern for the tenant
+        from logmind.domain.tenant.models import BusinessLine
+        from logmind.shared.base_repository import BaseRepository
+        biz_repo = BaseRepository(BusinessLine)
+        biz_lines = await biz_repo.get_all(db_session, tenant_id=session.tenant_id, limit=100)
+        default_index = biz_lines[0].es_index_pattern if biz_lines else "*"
 
         # Build messages with context
         messages = [ChatMessage(role="system", content=system_prompt)]
         messages.extend(session.get_context_messages())
 
-        # First call — may include tool calls
-        request = ChatRequest(
-            messages=messages,
-            temperature=0.4,
-            max_tokens=4096,
-            tools=CHAT_TOOLS,
-        )
-
         try:
-            response, provider_id = await provider_manager.chat_with_fallback(
-                session=db_session,
-                tenant_id=session.tenant_id,
-                request=request,
-            )
+            total_rounds = 0
 
-            # Handle tool calls
-            if response.tool_calls:
-                for tc in response.tool_calls:
-                    func_name = tc.get("function", {}).get("name", "")
-                    func_args_str = tc.get("function", {}).get("arguments", "{}")
-                    try:
-                        func_args = json.loads(func_args_str) if isinstance(func_args_str, str) else func_args_str
-                    except json.JSONDecodeError:
-                        func_args = {}
+            for round_num in range(1, MAX_TOOL_ROUNDS + 1):
+                # Notify frontend: thinking
+                yield self._sse({"type": "thinking", "round": round_num, "content": f"第 {round_num}/{MAX_TOOL_ROUNDS} 轮推理..."})
 
-                    # Notify frontend about tool call
-                    yield f"data: {json.dumps({'type': 'tool_call', 'name': func_name, 'args': func_args}, ensure_ascii=False)}\n\n"
-
-                    # Execute tool
-                    tool_result = await self.execute_tool_call(func_name, func_args, session.tenant_id, db_session)
-
-                    yield f"data: {json.dumps({'type': 'tool_result', 'name': func_name, 'result': tool_result[:500]}, ensure_ascii=False)}\n\n"
-
-                    # Add tool result to context and call again
-                    messages.append(ChatMessage(role="assistant", content=f"[调用工具 {func_name}]"))
-                    messages.append(ChatMessage(role="user", content=f"工具 {func_name} 返回结果:\n{tool_result}"))
-
-                # Second call with tool results
-                request2 = ChatRequest(
+                # Call LLM with tools
+                request = ChatRequest(
                     messages=messages,
-                    temperature=0.4,
+                    temperature=0.3,
                     max_tokens=4096,
+                    tools=CHAT_TOOLS,
                 )
-                response2, _ = await provider_manager.chat_with_fallback(
+
+                response, provider_id = await provider_manager.chat_with_fallback(
                     session=db_session,
                     tenant_id=session.tenant_id,
-                    request=request2,
+                    request=request,
                 )
-                final_content = response2.content
-            else:
-                final_content = response.content
 
-            # Stream the response content character by character for typing effect
-            # In production with streaming API, replace with actual SSE stream
+                total_rounds = round_num
+
+                # Check for tool calls
+                if response.tool_calls:
+                    for tc in response.tool_calls:
+                        func_name = tc.get("function", {}).get("name", "")
+                        func_args_str = tc.get("function", {}).get("arguments", "{}")
+                        try:
+                            func_args = json.loads(func_args_str) if isinstance(func_args_str, str) else func_args_str
+                        except json.JSONDecodeError:
+                            func_args = {}
+
+                        # Notify frontend: tool_call
+                        yield self._sse({
+                            "type": "tool_call", "round": round_num,
+                            "name": func_name, "args": func_args,
+                        })
+
+                        # Execute tool with real agent tools
+                        # Resolve index pattern from service_name if available
+                        tool_index = default_index
+                        svc_name = func_args.get("service_name", "")
+                        if svc_name:
+                            for b in biz_lines:
+                                if svc_name.lower() in b.name.lower():
+                                    tool_index = b.es_index_pattern
+                                    break
+
+                        tool_result = await self.execute_tool_call(
+                            func_name, func_args, session.tenant_id,
+                            db_session, es_index_pattern=tool_index,
+                        )
+
+                        # Generate result summary (first 200 chars)
+                        summary = tool_result[:200] + ("..." if len(tool_result) > 200 else "")
+
+                        # Notify frontend: tool_result
+                        yield self._sse({
+                            "type": "tool_result", "round": round_num,
+                            "name": func_name,
+                            "result": tool_result[:2000],
+                            "summary": summary,
+                        })
+
+                        # Add tool interaction to message context for next round
+                        messages.append(ChatMessage(
+                            role="assistant",
+                            content=f"[调用工具 {func_name}({json.dumps(func_args, ensure_ascii=False)[:100]})]",
+                        ))
+                        messages.append(ChatMessage(
+                            role="user",
+                            content=f"工具 {func_name} 返回结果:\n{tool_result[:3000]}",
+                        ))
+
+                    # Notify frontend: step_done
+                    yield self._sse({
+                        "type": "step_done", "round": round_num,
+                        "total_rounds": MAX_TOOL_ROUNDS,
+                    })
+
+                    # Continue to next round
+                    continue
+
+                else:
+                    # No tool calls — LLM is ready to answer
+                    final_content = response.content
+
+                    # Stream the response token by token
+                    chunk_size = 4
+                    for i in range(0, len(final_content), chunk_size):
+                        chunk = final_content[i:i + chunk_size]
+                        yield self._sse({"type": "token", "content": chunk})
+
+                    session.add_message("assistant", final_content)
+                    yield self._sse({"type": "done", "total_rounds": total_rounds})
+                    return
+
+            # If we exhausted all rounds, do a final answer call without tools
+            yield self._sse({"type": "thinking", "round": MAX_TOOL_ROUNDS, "content": "已收集足够信息，正在生成最终分析报告..."})
+
+            final_request = ChatRequest(
+                messages=messages + [ChatMessage(
+                    role="user",
+                    content="请根据以上所有工具调用结果，给出完整的分析结论和建议。",
+                )],
+                temperature=0.3,
+                max_tokens=4096,
+            )
+            final_response, _ = await provider_manager.chat_with_fallback(
+                session=db_session,
+                tenant_id=session.tenant_id,
+                request=final_request,
+            )
+            final_content = final_response.content
+
             chunk_size = 4
             for i in range(0, len(final_content), chunk_size):
                 chunk = final_content[i:i + chunk_size]
-                yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
+                yield self._sse({"type": "token", "content": chunk})
 
             session.add_message("assistant", final_content)
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            yield self._sse({"type": "done", "total_rounds": total_rounds})
 
         except Exception as e:
             error_msg = f"AI 推理失败: {str(e)}"
             logger.error("chat_stream_failed", error=str(e), session_id=session.id)
             session.add_message("assistant", error_msg)
-            yield f"data: {json.dumps({'type': 'error', 'message': error_msg}, ensure_ascii=False)}\n\n"
+            yield self._sse({"type": "error", "message": error_msg})
+
+    @staticmethod
+    def _sse(data: dict) -> str:
+        """Format as SSE event."""
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 # Singleton

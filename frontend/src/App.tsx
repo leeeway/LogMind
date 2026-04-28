@@ -23,6 +23,9 @@ import ServiceTopology from '@/pages/Topology';
 import CommandCenter from '@/pages/CommandCenter';
 import ErrorHeatmap from '@/pages/Dashboard/ErrorHeatmap';
 import TimeTravel from '@/pages/Logs/TimeTravel';
+import WeeklyReport from '@/pages/Dashboard/WeeklyReport';
+import PivotTable from '@/pages/Dashboard/PivotTable';
+import PatrolRadar from '@/pages/Dashboard/PatrolRadar';
 
 // Hydrate auth synchronously on module load — before any component renders
 useAuthStore.getState().hydrate();
@@ -93,6 +96,9 @@ const App: React.FC = () => {
               <Route path="command-center" element={<CommandCenter />} />
               <Route path="heatmap" element={<ErrorHeatmap />} />
               <Route path="time-travel" element={<TimeTravel />} />
+              <Route path="weekly-report" element={<WeeklyReport />} />
+              <Route path="pivot" element={<PivotTable />} />
+              <Route path="patrol" element={<PatrolRadar />} />
               <Route path="knowledge" element={<KnowledgeBase />} />
               <Route path="settings" element={<Settings />} />
             </Route>

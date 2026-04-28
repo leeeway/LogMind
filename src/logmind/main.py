@@ -182,6 +182,10 @@ def _register_routes(app: FastAPI):
     from logmind.domain.dashboard.heatmap_router import router as heatmap_router
     from logmind.domain.log.replay_router import router as replay_router
     from logmind.domain.alert.context_router import router as alert_context_router
+    from logmind.domain.analysis.rootcause_router import router as rootcause_router
+    from logmind.domain.dashboard.report_generator import router as weekly_report_router
+    from logmind.domain.dashboard.pivot_router import router as pivot_router
+    from logmind.domain.dashboard.patrol_router import router as patrol_router
 
     api_router.include_router(auth_router)
     api_router.include_router(tenant_router)
@@ -204,6 +208,10 @@ def _register_routes(app: FastAPI):
     api_router.include_router(heatmap_router)
     api_router.include_router(replay_router)
     api_router.include_router(alert_context_router)
+    api_router.include_router(rootcause_router)
+    api_router.include_router(weekly_report_router)
+    api_router.include_router(pivot_router)
+    api_router.include_router(patrol_router)
 
     app.include_router(api_router)
 
