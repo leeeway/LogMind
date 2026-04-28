@@ -69,7 +69,7 @@ export const QuickDiagnoseProvider: React.FC<{ children: React.ReactNode }> = ({
         centered
         width={520}
         styles={{
-          content: {
+          body: {
             background: 'var(--lm-bg-card)',
             border: '1px solid var(--lm-border-light)',
             borderRadius: 16,

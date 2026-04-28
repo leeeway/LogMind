@@ -627,3 +627,18 @@ body {
   0%, 100% { opacity: 1; box-shadow: 0 0 4px currentColor; }
   50% { opacity: 0.5; box-shadow: 0 0 12px currentColor; }
 }
+
+/* ── Breathe glow for agent steps ──────────────── */
+@keyframes lm-breathe {
+  0%, 100% { box-shadow: 0 0 4px rgba(22,119,255,0.3); }
+  50% { box-shadow: 0 0 12px rgba(22,119,255,0.6); }
+}
+
+/* ── Cursor blink for streaming ────────────────── */
+.lm-cursor-blink {
+  animation: lm-cursorBlink 0.8s steps(2) infinite;
+}
+@keyframes lm-cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}

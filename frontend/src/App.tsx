@@ -26,6 +26,7 @@ import TimeTravel from '@/pages/Logs/TimeTravel';
 import WeeklyReport from '@/pages/Dashboard/WeeklyReport';
 import PivotTable from '@/pages/Dashboard/PivotTable';
 import PatrolRadar from '@/pages/Dashboard/PatrolRadar';
+import { QuickDiagnoseProvider } from '@/components/QuickDiagnose';
 
 // Hydrate auth synchronously on module load — before any component renders
 useAuthStore.getState().hydrate();
@@ -79,7 +80,7 @@ const App: React.FC = () => {
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
-            <Route path="/" element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
+            <Route path="/" element={<ProtectedRoute><QuickDiagnoseProvider><AppLayout /></QuickDiagnoseProvider></ProtectedRoute>}>
               <Route index element={<Dashboard />} />
               <Route path="analysis" element={<TaskList />} />
               <Route path="analysis/:taskId" element={<TaskDetail />} />

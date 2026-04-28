@@ -6,8 +6,9 @@ import {
 import {
   CheckOutlined, CheckCircleOutlined, ReloadOutlined, AlertOutlined,
   FilterOutlined, BellOutlined, PlusOutlined, EyeOutlined,
-  FireOutlined, ExclamationCircleOutlined, BulbOutlined,
+  FireOutlined, ExclamationCircleOutlined, BulbOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
+import { useQuickDiagnose } from '@/components/QuickDiagnose';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { alertsApi } from '@/api/alerts';
@@ -30,6 +31,7 @@ const statusLabels: Record<string, { color: string; label: string }> = {
 };
 
 const AlertList: React.FC = () => {
+  const quickDiagnose = useQuickDiagnose();
   const [loading, setLoading] = useState(false);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
@@ -159,9 +161,15 @@ const AlertList: React.FC = () => {
       ) : '-',
     },
     {
-      title: '操作', width: 160,
+      title: '操作', width: 200,
       render: (_: any, r: any) => (
         <Space>
+          <Tooltip title="AI 排查">
+            <Button size="small" icon={<ThunderboltOutlined />}
+              style={{ color: '#722ed1', borderColor: '#722ed133' }}
+              onClick={() => quickDiagnose.open({ context: `帮我排查这个告警: ${r.message?.slice(0, 100)}\n严重度: ${r.severity}\n触发时间: ${r.fired_at}`, source: '告警列表' })}
+            />
+          </Tooltip>
           <Tooltip title="查看详情">
             <Button size="small" icon={<EyeOutlined />} onClick={() => { setDetailAlert(r); setDrawerOpen(true); }} />
           </Tooltip>

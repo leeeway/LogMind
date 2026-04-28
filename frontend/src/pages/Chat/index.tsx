@@ -4,7 +4,8 @@ import { Button, Input, Typography, Space, Spin, Tag, message, Tooltip } from 'a
 import {
   SendOutlined, PlusOutlined, DeleteOutlined, RobotOutlined,
   UserOutlined, ThunderboltOutlined, CopyOutlined,
-  LoadingOutlined, BranchesOutlined,
+  LoadingOutlined, BranchesOutlined, ExportOutlined,
+  HistoryOutlined, QuestionCircleOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -39,6 +40,7 @@ const ChatPage: React.FC = () => {
   const [toolSteps, setToolSteps] = useState<ToolStep[]>([]);
   const [thinkingRound, setThinkingRound] = useState(0);
   const [thinkingText, setThinkingText] = useState('');
+  const [followUps, setFollowUps] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<any>(null);
   const token = useAuthStore((s) => s.token);
@@ -134,6 +136,7 @@ const ChatPage: React.FC = () => {
     setToolSteps([]);
     setThinkingRound(0);
     setThinkingText('');
+    setFollowUps([]);
 
     // Add placeholder for assistant
     setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
@@ -215,6 +218,17 @@ const ChatPage: React.FC = () => {
                   return updated;
                 });
 
+                // Extract follow-up suggestions from response
+                const dividerIdx = assistantContent.lastIndexOf('---');
+                if (dividerIdx > 0) {
+                  const afterDivider = assistantContent.slice(dividerIdx + 3);
+                  const suggestions = afterDivider
+                    .split('\n')
+                    .map(l => l.replace(/^[\s\-\d.*]+/, '').trim())
+                    .filter(l => l.length > 4 && l.length < 60 && !l.startsWith('#'));
+                  setFollowUps(suggestions.slice(0, 3));
+                }
+
               } else if (event.type === 'error') {
                 message.error(event.message);
               }
@@ -244,6 +258,15 @@ const ChatPage: React.FC = () => {
     navigator.clipboard.writeText(text).then(() => message.success('已复制'));
   };
 
+  const exportSession = () => {
+    if (!messages.length) return;
+    const md = messages
+      .map(m => m.role === 'user' ? `## 🧑 用户\n${m.content}` : `## 🤖 AI 助手\n${m.content}`)
+      .join('\n\n---\n\n');
+    const header = `# LogMind 诊断报告\n\n> 时间: ${new Date().toLocaleString()}\n> 工具调用: ${toolSteps.length} 次\n\n---\n\n`;
+    navigator.clipboard.writeText(header + md).then(() => message.success('诊断报告已复制到剪贴板'));
+  };
+
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - 56px)', margin: '-24px', overflow: 'hidden' }}>
       {/* Left Sidebar — Sessions */}
@@ -251,11 +274,15 @@ const ChatPage: React.FC = () => {
         width: 260, borderRight: '1px solid var(--lm-border-light)', display: 'flex', flexDirection: 'column',
         background: 'var(--lm-bg-container)',
       }}>
-        <div style={{ padding: 16 }}>
-          <Button type="primary" icon={<PlusOutlined />} block onClick={createSession}
-            style={{ borderRadius: 8, height: 40 }}>
+        <div style={{ padding: 16, display: 'flex', gap: 8 }}>
+          <Button type="primary" icon={<PlusOutlined />} style={{ borderRadius: 8, height: 40, flex: 1 }} onClick={createSession}>
             新对话
           </Button>
+          {messages.length > 0 && (
+            <Tooltip title="导出诊断报告">
+              <Button icon={<ExportOutlined />} style={{ borderRadius: 8, height: 40 }} onClick={exportSession} />
+            </Tooltip>
+          )}
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
           {sessions.map((s: any) => (
@@ -431,6 +458,32 @@ const ChatPage: React.FC = () => {
                     {thinkingText}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Follow-up Suggestions */}
+            {followUps.length > 0 && !sending && (
+              <div style={{
+                marginBottom: 16, marginLeft: 46,
+                display: 'flex', flexWrap: 'wrap', gap: 6,
+                animation: 'lm-fadeSlideIn 0.3s ease-out',
+              }}>
+                <QuestionCircleOutlined style={{ color: 'var(--lm-text-tertiary)', fontSize: 12, marginTop: 5 }} />
+                {followUps.map((q, i) => (
+                  <div
+                    key={i}
+                    onClick={() => sendMessage(q)}
+                    style={{
+                      padding: '5px 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                      background: 'var(--lm-bg-elevated)', border: '1px solid var(--lm-border-light)',
+                      color: 'var(--lm-text-secondary)', transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(114,46,209,0.3)'; e.currentTarget.style.color = 'var(--lm-text)'; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--lm-border-light)'; e.currentTarget.style.color = 'var(--lm-text-secondary)'; }}
+                  >
+                    {q}
+                  </div>
+                ))}
               </div>
             )}
 
