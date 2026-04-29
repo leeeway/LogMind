@@ -214,7 +214,7 @@ async def get_change_impact(
 
     # Count correlated alerts
     alert_count = (await session.execute(
-        select(func.count()).where(
+        select(func.count()).select_from(AlertHistory).where(
             AlertHistory.tenant_id == user.tenant_id,
             AlertHistory.fired_at >= ts,
             AlertHistory.fired_at <= after_end,

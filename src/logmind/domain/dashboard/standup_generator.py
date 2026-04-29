@@ -67,7 +67,7 @@ async def generate_standup_report(tenant_id: str, target_date: datetime | None =
 
         # Previous day comparison
         prev_alert_count = (await session.execute(
-            select(func.count()).where(
+            select(func.count()).select_from(AlertHistory).where(
                 AlertHistory.tenant_id == tenant_id,
                 AlertHistory.fired_at >= prev_day_start,
                 AlertHistory.fired_at < day_start,
@@ -76,7 +76,7 @@ async def generate_standup_report(tenant_id: str, target_date: datetime | None =
 
         # Previous week comparison
         prev_week_avg = (await session.execute(
-            select(func.count()).where(
+            select(func.count()).select_from(AlertHistory).where(
                 AlertHistory.tenant_id == tenant_id,
                 AlertHistory.fired_at >= prev_week_start,
                 AlertHistory.fired_at < day_start,
