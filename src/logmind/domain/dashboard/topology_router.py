@@ -66,14 +66,14 @@ async def get_topology(
     )
 
     # Get recent alerts (last 24h) for health coloring
-    # AlertHistory doesn't have business_line_id directly — join via AlertRule
+    # AlertHistory links to business lines via analysis_task_id → LogAnalysisTask
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     from sqlalchemy import select
-    from logmind.domain.alert.models import AlertRule
+    from logmind.domain.analysis.models import LogAnalysisTask
 
     stmt = (
-        select(AlertRule.business_line_id, AlertHistory.severity)
-        .join(AlertRule, AlertHistory.alert_rule_id == AlertRule.id, isouter=True)
+        select(LogAnalysisTask.business_line_id, AlertHistory.severity)
+        .join(LogAnalysisTask, AlertHistory.analysis_task_id == LogAnalysisTask.id, isouter=True)
         .where(
             AlertHistory.tenant_id == user.tenant_id,
             AlertHistory.fired_at >= since,
