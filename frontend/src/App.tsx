@@ -31,6 +31,9 @@ import IncidentList from '@/pages/Incidents/IncidentList';
 import WarRoom from '@/pages/Incidents/WarRoom';
 import DashboardBuilder from '@/pages/Dashboard/DashboardBuilder';
 import RootCauseGraph from '@/pages/Analysis/RootCauseGraph';
+import DailyStandup from '@/pages/Dashboard/DailyStandup';
+import ChangeTimeline from '@/pages/Changes/ChangeTimeline';
+import OnCallSchedule from '@/pages/OnCall/Schedule';
 import { QuickDiagnoseProvider } from '@/components/QuickDiagnose';
 
 // Hydrate auth synchronously on module load — before any component renders
@@ -126,6 +129,9 @@ const App: React.FC = () => {
               <Route path="pivot" element={<PivotTable />} />
               <Route path="patrol" element={<PatrolRadar />} />
               <Route path="knowledge" element={<KnowledgeBase />} />
+              <Route path="daily-standup" element={<DailyStandup />} />
+              <Route path="changes" element={<ChangeTimeline />} />
+              <Route path="oncall" element={<OnCallSchedule />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           </Routes>

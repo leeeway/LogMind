@@ -222,6 +222,15 @@ def _register_routes(app: FastAPI):
     from logmind.domain.alert.runbook_templates import router as runbook_tpl_router
     api_router.include_router(runbook_tpl_router)
 
+    from logmind.domain.dashboard.standup_router import router as standup_router
+    api_router.include_router(standup_router)
+
+    from logmind.domain.analysis.change_router import router as change_router
+    api_router.include_router(change_router)
+
+    from logmind.domain.oncall.router import router as oncall_router
+    api_router.include_router(oncall_router)
+
     app.include_router(api_router)
 
     # ── WebSocket Endpoints ──────────────────────────────

@@ -69,7 +69,13 @@ const CommandCenter: React.FC = () => {
         dashboardApi.getBusinessHealth(1),
       ]);
       setOverview(ovRes.data);
-      setHealth(hlRes.data?.services || []);
+      const services = (hlRes.data?.items || []).map((s: any) => ({
+        ...s,
+        name: s.business_line_name,
+        critical: s.critical_count || 0,
+        warning: s.warning_count || 0,
+      }));
+      setHealth(services);
 
       // Build synthetic event feed from data
       const newEvents: any[] = [];
@@ -256,8 +262,8 @@ const CommandCenter: React.FC = () => {
   }, [loading]);
 
   // Stats
-  const criticalCount = overview?.severity_distribution?.find((d: any) => d.severity === 'critical')?.count || 0;
-  const warningCount = overview?.severity_distribution?.find((d: any) => d.severity === 'warning')?.count || 0;
+  const criticalCount = overview?.severity_distribution?.find((d: any) => d.severity === 'critical')?.count || health.reduce((s: number, h: any) => s + (h.critical || 0), 0);
+  const warningCount = overview?.severity_distribution?.find((d: any) => d.severity === 'warning')?.count || health.reduce((s: number, h: any) => s + (h.warning || 0), 0);
   const healthyCount = health.filter((s: any) => !s.critical && !s.warning).length;
   const totalServices = health.length;
 

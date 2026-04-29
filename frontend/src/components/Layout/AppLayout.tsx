@@ -28,6 +28,9 @@ import {
   WifiOutlined,
   AppstoreOutlined,
   WarningOutlined,
+  DeploymentUnitOutlined,
+  CalendarOutlined,
+  TeamOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
@@ -77,6 +80,9 @@ const menuItems = [
       { key: '/pivot', icon: <TableOutlined />, label: '透视分析' },
       { key: '/dashboard-builder', icon: <AppstoreOutlined />, label: '看板编辑器' },
       { key: '/ai-insights', icon: <ThunderboltOutlined />, label: 'AI 洞察' },
+      { key: '/daily-standup', icon: <CalendarOutlined />, label: '每日站会' },
+      { key: '/changes', icon: <DeploymentUnitOutlined />, label: '变更追踪' },
+      { key: '/oncall', icon: <TeamOutlined />, label: '值班排班' },
     ],
   },
   {
