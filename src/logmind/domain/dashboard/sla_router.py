@@ -70,20 +70,29 @@ async def get_sla_metrics(
     )
 
     # Get alert history for the time window
+    # AlertHistory has no business_line_id — join through analysis_task_id
     stmt = (
-        select(AlertHistory)
+        select(
+            AlertHistory,
+            LogAnalysisTask.business_line_id.label("biz_line_id"),
+        )
+        .outerjoin(
+            LogAnalysisTask,
+            AlertHistory.analysis_task_id == LogAnalysisTask.id,
+        )
         .where(
             AlertHistory.tenant_id == user.tenant_id,
             AlertHistory.fired_at >= since,
         )
     )
     result = await session.execute(stmt)
-    all_alerts = list(result.scalars().all())
+    all_rows = list(result.all())
+    all_alerts = [row[0] for row in all_rows]
 
-    # Group alerts by business line
+    # Group alerts by business line (resolved via task join)
     alerts_by_biz: dict[str, list] = {}
-    for alert in all_alerts:
-        biz_id = alert.business_line_id or "unknown"
+    for alert, biz_line_id in all_rows:
+        biz_id = biz_line_id or "unknown"
         alerts_by_biz.setdefault(biz_id, []).append(alert)
 
     metrics = []
@@ -190,17 +199,22 @@ async def get_capacity_prediction(
     )
 
     # Get daily alert counts per business line
+    # AlertHistory has no business_line_id — join through analysis_task_id
     stmt = (
         select(
-            AlertHistory.business_line_id,
+            LogAnalysisTask.business_line_id,
             cast(AlertHistory.fired_at, Date).label("day"),
             func.count().label("cnt"),
+        )
+        .outerjoin(
+            LogAnalysisTask,
+            AlertHistory.analysis_task_id == LogAnalysisTask.id,
         )
         .where(
             AlertHistory.tenant_id == user.tenant_id,
             AlertHistory.fired_at >= since,
         )
-        .group_by(AlertHistory.business_line_id, "day")
+        .group_by(LogAnalysisTask.business_line_id, "day")
         .order_by("day")
     )
     result = await session.execute(stmt)
