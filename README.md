@@ -399,7 +399,7 @@ sequenceDiagram
 | **优先级决策** | 🆕 5 维加权评分 (P0/P1/P2 自动分级) | ✅ |
 | | 🆕 夜间不打扰策略 (always/p0_only/silent) | ✅ |
 | | 🆕 业务线权重配置 (1-10) + 核心路径标记 | ✅ |
-| | 🆕 自动修复 Runbook 框架 (预留) | ⚠️ 阶段 B |
+| | 🆕 自动修复 Runbook 框架 (webhook 动作 + 冷却保护) | ✅ |
 | **自学习** | 🆕 分析结论反馈 API (✅有帮助 / ❌不准确) | ✅ |
 | | 🆕 AI 信号自学习 (error_signals → Channel B 扩展) | ✅ |
 | | 🆕 业务线智能画像 (历史结论注入 Prompt) | ✅ |
@@ -443,6 +443,17 @@ sequenceDiagram
 | | 🆕 错误热力图 (GitHub Contribution 风格 + 5级色阶 + 点击钻取) | ✅ |
 | | 🆕 日志时光回溯 (DVR 播放器 + 波形拖动 + 异常标记) | ✅ |
 | **智能告警增强** | 🆕 智能告警上下文卡片 (频率趋势 + 相似告警 + AI 建议) | ✅ |
+| **自动修复** | 🆕 Runbook 自动修复 (P0/P1 触发 webhook + 冷却 + 模板变量) | ✅ |
+| | 🆕 前端 Runbook 配置编辑器 (JSON + 预设模板: 钉钉/飞书/CI) | ✅ |
+| **高级可视化** | 🆕 Dashboard Builder 自定义大屏 (拖拽布局 + 多 Widget 类型) | ✅ |
+| | 🆕 日志实时流 LiveTail (WebSocket SSE + 过滤 + 高亮) | ✅ |
+| | 🆕 多维透视表 PivotTable (动态聚合 + 热力色编码) | ✅ |
+| | 🆕 巡检雷达 PatrolRadar (主动扫描 + Canvas 动画) | ✅ |
+| **Incident 管理** | 🆕 Incident 生命周期管理 (创建/升级/解决 + 事件时间线) | ✅ |
+| | 🆕 War Room 作战室 (实时协作 + 事件流 + AI 复盘) | ✅ |
+| | 🆕 AI 自动生成故障复盘 (RCA报告: 根因+时间线+改进建议) | ✅ |
+| **智能查询** | 🆕 自然语言日志查询 (Text-to-DSL: 中文→ES查询自动转换) | ✅ |
+| | 🆕 根因链图谱 (分析结果→因果关系可视化) | ✅ |
 
 ---
 
@@ -1051,7 +1062,7 @@ LogMind/
   - [x] Pipeline 阶段 + AI 发现 + 关联告警 → 时间排序
   - [x] 严重度着色 + 动画滑入效果
 
-### v2.9 — 指挥中心 + 热力图 + 时光回溯 + 智能告警 ✅ ← 当前
+### v2.9 — 指挥中心 + 热力图 + 时光回溯 + 智能告警 ✅
 
 - [x] 🆕 指挥中心 (Command Center)
   - [x] NASA 任务控制风格全屏大屏 + 一键全屏
@@ -1075,18 +1086,33 @@ LogMind/
   - [x] AI 处置建议 (Markdown 渲染)
   - [x] 打开 Drawer 自动加载上下文
 
-### v3.0 — Auto-Remediation 自动自愈
+### v3.0 — Auto-Remediation 自动自愈 + 高级平台 ✅
 
-- [ ] AI 根因链图谱 (因果关系有向图可视化)
-- [ ] 智能巡检周报 (AI 摘要 + 趋势图 + 建议行动)
-- [ ] 实时流式图表引擎 (Canvas 零依赖)
-- [ ] 多维分析透视表 (动态 pivot + 热力色编码)
-- [ ] 主动式异常巡逻雷达 (Canvas 扫描动画)
-- [ ] Agent 自治行动：`restart_pod`, `scale_deployment`
+- [x] Runbook 自动修复引擎 (P0/P1 告警 → webhook 动作 + 模板变量 + 冷却保护)
+- [x] 前端 Runbook 配置编辑器 (JSON + 钉钉/飞书/CI 预设模板)
+- [x] Incident War Room 作战室 (实时事件流 + 协作 + AI 复盘)
+- [x] AI 故障复盘 (自动收集分析结果+告警+时间线 → LLM 生成 RCA 报告)
+- [x] 自然语言日志查询 (中文/英文 → ES DSL 自动转换)
+- [x] 日志实时流 LiveTail (WebSocket SSE 流式)
+- [x] Dashboard Builder 自定义大屏 (拖拽 Widget + 多图表类型)
+- [x] 多维透视表 PivotTable (动态聚合 + 热力编码)
+- [x] 根因链图谱 API (分析结果因果关系可视化)
+- [x] Z-Score 异常触发巡检 (5m 窗口 vs 24h 基线, 代替固定轮询)
+- [x] 日报 AI 增强 (LLM 趋势分析 + 风险预警 + 建议)
+- [x] 指挥中心 7 KPI 升级 (活跃事件/异常数/风暴/AI洞察)
+- [x] 自学习双闭环验证 (error_signals + experience_rule 完整接通)
+
+### v3.1 — 下一代智能运维 (Roadmap)
+
+- [ ] AI 根因链可视化 (因果有向图 + 前端 Canvas 交互)
+- [ ] 容量预测 (历史 Z-Score 基线 → 未来资源瓶颈预估)
+- [ ] 多模态 RAG (Trace Span + Metric 注入知识库)
+- [ ] Runbook Marketplace (社区共享修复策略模板)
+- [ ] Agent 自治行动：`restart_pod`, `scale_deployment` (需 K8s API)
 - [ ] 交互式审批修复：企微审批卡片 → 一键执行
 - [ ] AI Fix PR 建议 (对接 GitLab/GitHub)
-- [ ] K8s Event 关联分析 + ConfigMap 变更追踪
-- [ ] Text-to-DSL 自然语言日志查询
+- [ ] K8s Event 关联分析 + ConfigMap 变更追踪 (需 K8s API)
+- [ ] Security-Aware 可观测性 (安全事件融合告警流)
 
 ---
 
