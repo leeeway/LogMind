@@ -330,6 +330,22 @@ async def generate_postmortem(incident_id: str, db: DBSession, user: CurrentUser
         db.add(evt)
         await db.commit()
 
+        # 7. Auto-index postmortem into RAG knowledge base for future retrieval
+        try:
+            from logmind.domain.rag.tasks import index_document_chunks
+            doc_title = f"故障复盘: {inc.title}"
+            doc_content = f"# {doc_title}\n\n**严重度**: {inc.severity}\n**持续时间**: {duration_text}\n\n{postmortem_text}"
+            index_document_chunks.delay(
+                content=doc_content,
+                filename=f"postmortem-{incident_id[:8]}.md",
+                tenant_id=user.tenant_id,
+                knowledge_base_id=None,  # auto-create or use default
+                metadata={"source": "ai_postmortem", "incident_id": incident_id},
+            )
+            logger.info("postmortem_rag_indexed", incident_id=incident_id)
+        except Exception as e:
+            logger.warning("postmortem_rag_index_failed", error=str(e))
+
         logger.info("ai_postmortem_generated", incident_id=incident_id)
         return {"ok": True, "postmortem": postmortem_text}
 

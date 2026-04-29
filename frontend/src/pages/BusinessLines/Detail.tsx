@@ -11,6 +11,7 @@ import { businessLineApi } from '@/api/services';
 import { analysisApi } from '@/api/analysis';
 import { dashboardApi } from '@/api/dashboard';
 import { knownIssuesApi } from '@/api/knownIssues';
+import client from '@/api/client';
 import { useTheme } from '@/hooks/useTheme';
 import dayjs from 'dayjs';
 
@@ -35,6 +36,7 @@ const BusinessLineDetail: React.FC = () => {
   const [runbookConfig, setRunbookConfig] = useState('');
   const [runbookEditing, setRunbookEditing] = useState(false);
   const [runbookSaving, setRunbookSaving] = useState(false);
+  const [runbookTemplates, setRunbookTemplates] = useState<any[]>([]);
   const { isDark } = useTheme();
 
   const load = useCallback(async () => {
@@ -178,6 +180,7 @@ const BusinessLineDetail: React.FC = () => {
             <Button size="small" icon={<EditOutlined />} onClick={() => {
               setRunbookConfig(biz.auto_remediation_config || '{"actions": []}');
               setRunbookEditing(true);
+              client.get('/runbook-templates').then(res => setRunbookTemplates(res.data || [])).catch(() => {});
             }}>编辑</Button>
           )
         }
@@ -196,40 +199,18 @@ const BusinessLineDetail: React.FC = () => {
                 padding: 12, resize: 'vertical',
               }}
             />
-            <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <Text type="secondary" style={{ fontSize: 11 }}>快速模板：</Text>
-              <Button size="small" type="dashed" onClick={() => setRunbookConfig(JSON.stringify({
-                actions: [{
-                  name: '钉钉升级通知',
-                  type: 'webhook',
-                  url: 'https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN',
-                  trigger_on: ['P0'],
-                  cooldown_minutes: 30,
-                  body: { msgtype: 'text', text: { content: '🔧 [Runbook] {{service_name}}: {{alert_message}}' } },
-                }],
-              }, null, 2))}>钉钉通知</Button>
-              <Button size="small" type="dashed" onClick={() => setRunbookConfig(JSON.stringify({
-                actions: [{
-                  name: '飞书升级通知',
-                  type: 'webhook',
-                  url: 'https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_HOOK',
-                  trigger_on: ['P0', 'P1'],
-                  cooldown_minutes: 15,
-                  body: { msg_type: 'text', content: { text: '🔧 [Runbook] {{service_name}}: {{alert_message}}' } },
-                }],
-              }, null, 2))}>飞书通知</Button>
-              <Button size="small" type="dashed" onClick={() => setRunbookConfig(JSON.stringify({
-                actions: [{
-                  name: 'CI/CD 重启',
-                  type: 'webhook',
-                  method: 'POST',
-                  url: 'https://ci.example.com/api/restart',
-                  headers: { Authorization: 'Bearer YOUR_TOKEN' },
-                  trigger_on: ['P0'],
-                  cooldown_minutes: 60,
-                  body: { service: '{{service_name}}', reason: '{{alert_message}}' },
-                }],
-              }, null, 2))}>CI 重启</Button>
+            <div style={{ marginTop: 8 }}>
+              <Text type="secondary" style={{ fontSize: 11, marginBottom: 6, display: 'block' }}>模板市场：</Text>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {runbookTemplates.map((tpl: any) => (
+                  <Tooltip key={tpl.id} title={tpl.description}>
+                    <Button size="small" type="dashed" onClick={() => setRunbookConfig(JSON.stringify(tpl.config, null, 2))}>
+                      {tpl.icon} {tpl.name}
+                    </Button>
+                  </Tooltip>
+                ))}
+                {runbookTemplates.length === 0 && <Text type="secondary" style={{ fontSize: 11 }}>加载模板中...</Text>}
+              </div>
             </div>
           </div>
         ) : (

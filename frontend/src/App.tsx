@@ -30,6 +30,7 @@ import LiveTail from '@/pages/Logs/LiveTail';
 import IncidentList from '@/pages/Incidents/IncidentList';
 import WarRoom from '@/pages/Incidents/WarRoom';
 import DashboardBuilder from '@/pages/Dashboard/DashboardBuilder';
+import RootCauseGraph from '@/pages/Analysis/RootCauseGraph';
 import { QuickDiagnoseProvider } from '@/components/QuickDiagnose';
 
 // Hydrate auth synchronously on module load — before any component renders
@@ -104,6 +105,7 @@ const App: React.FC = () => {
               <Route path="analysis" element={<TaskList />} />
               <Route path="analysis/:taskId" element={<TaskDetail />} />
               <Route path="analysis/compare" element={<TaskCompare />} />
+              <Route path="analysis/rootcause" element={<RootCauseGraph />} />
               <Route path="alerts" element={<AlertList />} />
               <Route path="logs" element={<LogSearch />} />
               <Route path="live-tail" element={<LiveTail />} />

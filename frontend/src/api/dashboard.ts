@@ -24,4 +24,7 @@ export const dashboardApi = {
 
   getSLA: (days = 7) =>
     client.get('/dashboard/sla', { params: { days } }),
+
+  getCapacityPrediction: (days = 7) =>
+    client.get('/dashboard/capacity-prediction', { params: { lookback_days: days } }),
 };

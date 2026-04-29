@@ -21,4 +21,7 @@ export const analysisApi = {
 
   generateReport: (taskId: string, format: 'html' | 'markdown' = 'html') =>
     client.post(`/analysis/${taskId}/report`, null, { params: { format } }),
+
+  getRootcauseChain: (taskId: string) =>
+    client.get(`/analysis/${taskId}/rootcause-chain`),
 };

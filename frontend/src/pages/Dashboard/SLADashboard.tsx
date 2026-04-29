@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Card, Typography, Row, Col, Table, Tag, Space, Progress, Statistic, Button, Select } from 'antd';
-import { DashboardOutlined, ReloadOutlined, CheckCircleOutlined, ClockCircleOutlined, WarningOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { DashboardOutlined, ReloadOutlined, CheckCircleOutlined, ClockCircleOutlined, WarningOutlined, SafetyCertificateOutlined, RocketOutlined, ArrowUpOutlined, ArrowDownOutlined, MinusOutlined } from '@ant-design/icons';
 import { dashboardApi } from '@/api/dashboard';
 import dayjs from 'dayjs';
 
@@ -10,12 +10,17 @@ const SLADashboard: React.FC = () => {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [days, setDays] = useState(7);
+  const [predictions, setPredictions] = useState<any>(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const { data: sla } = await dashboardApi.getSLA(days);
-      setData(sla);
+      const [slaRes, predRes] = await Promise.all([
+        dashboardApi.getSLA(days),
+        dashboardApi.getCapacityPrediction(days).catch(() => ({ data: null })),
+      ]);
+      setData(slaRes.data);
+      setPredictions(predRes.data);
     } catch { /* ignore */ }
     setLoading(false);
   };
@@ -191,6 +196,67 @@ const SLADashboard: React.FC = () => {
           locale={{ emptyText: '暂无数据' }}
         />
       </Card>
+
+      {/* Capacity Prediction */}
+      {predictions && predictions.predictions?.length > 0 && (
+        <Card
+          title={<Space><RocketOutlined /> 容量预测 <Tag color={predictions.high_risk_count > 0 ? '#ff4d4f' : '#52c41a'}>{predictions.high_risk_count} 高风险</Tag></Space>}
+          size="small"
+          style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12, marginTop: 16 }}
+          styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {predictions.predictions.map((p: any) => {
+              const burnColor = p.burn_rate > 2 ? '#ff4d4f' : p.burn_rate > 1 ? '#faad14' : '#52c41a';
+              const trendIcon = p.trend_direction === 'rising' ? <ArrowUpOutlined style={{ color: '#ff4d4f' }} />
+                : p.trend_direction === 'falling' ? <ArrowDownOutlined style={{ color: '#52c41a' }} />
+                : <MinusOutlined style={{ color: '#8c8c8c' }} />;
+              return (
+                <div key={p.business_line_id} style={{
+                  padding: '10px 14px', background: 'var(--lm-bg-elevated)',
+                  borderRadius: 8, border: `1px solid ${burnColor}20`,
+                  display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
+                }}>
+                  <div style={{ minWidth: 140, fontWeight: 600, color: 'var(--lm-text)' }}>
+                    {p.business_line_name}
+                  </div>
+                  <Space size={16}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>燃烧率</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: burnColor }}>
+                        {p.burn_rate.toFixed(1)}x
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>趋势</div>
+                      <div style={{ fontSize: 14 }}>
+                        {trendIcon} <span style={{ marginLeft: 4, color: 'var(--lm-text-secondary)' }}>
+                          {p.trend_slope > 0 ? '+' : ''}{p.trend_slope}/天
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>预算耗尽 ETA</div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: p.budget_exhaustion_eta_hours != null && p.budget_exhaustion_eta_hours < 48 ? '#ff4d4f' : 'var(--lm-text)' }}>
+                        {p.budget_exhaustion_eta_hours != null ? `${p.budget_exhaustion_eta_hours}h` : '—'}
+                      </div>
+                    </div>
+                    <Tag
+                      color={p.prediction_confidence > 0.7 ? '#52c41a' : p.prediction_confidence > 0.4 ? '#faad14' : '#8c8c8c'}
+                      style={{ borderRadius: 4, fontSize: 10 }}
+                    >
+                      置信度 {(p.prediction_confidence * 100).toFixed(0)}%
+                    </Tag>
+                  </Space>
+                  <div style={{ flex: 1, fontSize: 12, color: 'var(--lm-text-secondary)', textAlign: 'right', minWidth: 200 }}>
+                    {p.suggestion}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
     </div>
   );
 };
