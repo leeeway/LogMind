@@ -241,7 +241,7 @@ def _register_routes(app: FastAPI):
         from fastapi.staticfiles import StaticFiles
         from starlette.responses import FileResponse
 
-        logger.info("spa_enabled", dist_path=str(frontend_dist))
+        print(f"[logmind] SPA enabled, serving from: {frontend_dist}")
 
         # Mount static assets (JS/CSS/images) directly
         assets_dir = frontend_dist / "assets"

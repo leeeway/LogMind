@@ -139,7 +139,7 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
     index_pattern = "*"
     filters: dict = {}
     paused = False
-    cursor = datetime.now(timezone.utc) - timedelta(seconds=5)
+    cursor = datetime.now(timezone.utc) - timedelta(seconds=60)  # 60s lookback for Filebeat ingestion delay
     log_count = 0
     rate_window: list[int] = []
 
@@ -163,7 +163,7 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
                 if action == "subscribe":
                     index_pattern = msg.get("index_pattern", "*")
                     filters = msg.get("filters", {})
-                    cursor = datetime.now(timezone.utc) - timedelta(seconds=5)
+                    cursor = datetime.now(timezone.utc) - timedelta(seconds=60)  # 60s lookback for Filebeat delay
                     paused = False
                     log_count = 0
                     rate_window = []
@@ -180,7 +180,7 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
 
                 elif action == "resume":
                     paused = False
-                    cursor = datetime.now(timezone.utc) - timedelta(seconds=2)
+                    cursor = datetime.now(timezone.utc) - timedelta(seconds=30)  # 30s for Filebeat delay
                     await websocket.send_text(json.dumps({
                         "type": "status", "state": "streaming", "rate": 0,
                     }))

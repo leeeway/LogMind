@@ -236,6 +236,7 @@ const AppLayout: React.FC = () => {
           flexDirection: 'column',
         }}
       >
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
         <div style={{
           height: 56,
           display: 'flex',
@@ -277,7 +278,7 @@ const AppLayout: React.FC = () => {
           />
         </div>
 
-        {/* Sidebar Footer */}
+        {/* Sidebar Footer — pinned to bottom */}
         {!collapsed && (
           <div style={{
             padding: '10px 16px',
@@ -285,11 +286,13 @@ const AppLayout: React.FC = () => {
             fontSize: 10,
             color: 'var(--lm-text-tertiary)',
             flexShrink: 0,
+            marginTop: 'auto',
           }}>
             <div>LogMind v5.0</div>
             <div style={{ opacity: 0.5 }}>AI 智能日志分析平台</div>
           </div>
         )}
+        </div>
       </Sider>
 
       <Layout style={{ marginLeft: collapsed ? 64 : 220, transition: 'margin-left 0.2s' }}>
