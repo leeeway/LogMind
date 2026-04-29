@@ -136,7 +136,7 @@ async def acknowledge_alert(
 
     alert.status = "acknowledged"
     alert.acked_at = datetime.now(timezone.utc)
-    alert.acked_by = user.username
+    alert.acked_by = user.sub
     await session.flush()
 
     return AlertHistoryResponse.model_validate(alert)
@@ -161,11 +161,11 @@ async def resolve_alert(
 
     alert.status = "resolved"
     alert.resolved_at = datetime.now(timezone.utc)
-    alert.resolved_by = user.username
+    alert.resolved_by = user.sub
     # Auto-ack if not yet acknowledged
     if not alert.acked_at:
         alert.acked_at = alert.resolved_at
-        alert.acked_by = user.username
+        alert.acked_by = user.sub
     await session.flush()
 
     return AlertHistoryResponse.model_validate(alert)
