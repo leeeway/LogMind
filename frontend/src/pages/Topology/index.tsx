@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Typography, Spin, Button, Space, Tag, Card } from 'antd';
-import { ReloadOutlined, FullscreenOutlined, ApartmentOutlined } from '@ant-design/icons';
+import { Typography, Spin, Button, Space, Tag, Card, message } from 'antd';
+import { ReloadOutlined, ApartmentOutlined, AimOutlined, CloseOutlined } from '@ant-design/icons';
 import { topologyApi } from '@/api/chat';
 
 const { Title, Text } = Typography;
@@ -57,6 +57,10 @@ const ServiceTopology: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [nodeInfo, setNodeInfo] = useState<TopoNode | null>(null);
   const timeRef = useRef(0);
+  // Blast Radius state
+  const [blastData, setBlastData] = useState<any>(null);
+  const blastNodesRef = useRef<Set<string>>(new Set());
+  const blastSourceRef = useRef<string>('');
 
   // ── Load Data ─────────────────────────────────
   const loadTopology = useCallback(async () => {
@@ -219,6 +223,33 @@ const ServiceTopology: React.FC = () => {
         ctx.restore();
       }
 
+      // ── Draw Blast Radius Shockwave ────────
+      const blastSet = blastNodesRef.current;
+      const blastSrc = blastSourceRef.current;
+      if (blastSrc && blastSet.size > 0) {
+        for (let e = 0; e < edges.length; e++) {
+          const si2 = getNodeIndex(edges[e].source);
+          const ti2 = getNodeIndex(edges[e].target);
+          if (si2 < 0 || ti2 < 0) continue;
+          const srcId = nodes[si2].id;
+          const tgtId = nodes[ti2].id;
+          const isBlast = (blastSet.has(srcId) || srcId === blastSrc) && (blastSet.has(tgtId) || tgtId === blastSrc);
+          if (!isBlast) continue;
+          const s2 = nodes[si2];
+          const t2 = nodes[ti2];
+          const mx2 = (s2.x + t2.x) / 2;
+          const my2 = (s2.y + t2.y) / 2 - 30;
+          // Pulsing red edge
+          const pulseAlpha = Math.sin(timeRef.current * 3) * 0.3 + 0.6;
+          ctx.beginPath();
+          ctx.moveTo(s2.x, s2.y);
+          ctx.quadraticCurveTo(mx2, my2, t2.x, t2.y);
+          ctx.strokeStyle = `rgba(255,77,79,${pulseAlpha})`;
+          ctx.lineWidth = 3.5;
+          ctx.stroke();
+        }
+      }
+
       // ── Draw Particles ──────────────────────
       for (const p of particles) {
         const edge = edges[p.edge];
@@ -258,18 +289,22 @@ const ServiceTopology: React.FC = () => {
       // ── Draw Nodes ─────────────────────────
       for (let i = 0; i < nodes.length; i++) {
         const n = nodes[i];
-        const colors = healthColors[n.health] || healthColors.unknown;
+        const isBlastNode = blastSet.has(n.id);
+        const isBlastSource = n.id === blastSrc;
+        const effectiveColors = (isBlastNode || isBlastSource) ? healthColors.critical : (healthColors[n.health] || healthColors.unknown);
+        const colors = effectiveColors;
         const isHover = hoverNodeRef.current === i;
-        const r = isHover ? NODE_RADIUS + 4 : NODE_RADIUS;
-        const pulse = n.health === 'critical' ? Math.sin(timeRef.current * 4) * 0.3 + 0.7 : 1;
+        const r = isHover ? NODE_RADIUS + 4 : (isBlastSource ? NODE_RADIUS + 6 : NODE_RADIUS);
+        const pulse = (n.health === 'critical' || isBlastNode) ? Math.sin(timeRef.current * 4) * 0.3 + 0.7 : 1;
 
         // Outer glow
-        if (n.health !== 'healthy' || isHover) {
-          const gradient = ctx.createRadialGradient(n.x, n.y, r, n.x, n.y, r * 2.5);
+        if (n.health !== 'healthy' || isHover || isBlastNode || isBlastSource) {
+          const glowRadius = isBlastSource ? r * 3.5 : r * 2.5;
+          const gradient = ctx.createRadialGradient(n.x, n.y, r, n.x, n.y, glowRadius);
           gradient.addColorStop(0, `${colors.glow}${Math.round(pulse * 25).toString(16).padStart(2, '0')}`);
           gradient.addColorStop(1, 'rgba(0,0,0,0)');
           ctx.beginPath();
-          ctx.arc(n.x, n.y, r * 2.5, 0, Math.PI * 2);
+          ctx.arc(n.x, n.y, glowRadius, 0, Math.PI * 2);
           ctx.fillStyle = gradient;
           ctx.fill();
         }
@@ -370,6 +405,19 @@ const ServiceTopology: React.FC = () => {
       }
     };
 
+    const onDblClick = async (e: MouseEvent) => {
+      const pos = getCanvasPos(e);
+      const idx = findNode(pos);
+      if (idx < 0) { blastNodesRef.current = new Set(); blastSourceRef.current = ''; setBlastData(null); return; }
+      const node = nodesRef.current[idx];
+      try {
+        const { data } = await topologyApi.getBlastRadius(node.id);
+        blastSourceRef.current = node.id;
+        blastNodesRef.current = new Set((data.affected_nodes || []).map((n: any) => n.id));
+        setBlastData(data);
+      } catch { message.error('爆炸半径计算失败'); }
+    };
+
     const onMouseMove = (e: MouseEvent) => {
       const pos = getCanvasPos(e);
       hoverNodeRef.current = findNode(pos);
@@ -407,6 +455,7 @@ const ServiceTopology: React.FC = () => {
     };
 
     canvas.addEventListener('mousedown', onMouseDown);
+    canvas.addEventListener('dblclick', onDblClick);
     canvas.addEventListener('mousemove', onMouseMove);
     canvas.addEventListener('mouseup', onMouseUp);
     canvas.addEventListener('mouseleave', onMouseUp);
@@ -414,6 +463,7 @@ const ServiceTopology: React.FC = () => {
 
     return () => {
       canvas.removeEventListener('mousedown', onMouseDown);
+      canvas.removeEventListener('dblclick', onDblClick);
       canvas.removeEventListener('mousemove', onMouseMove);
       canvas.removeEventListener('mouseup', onMouseUp);
       canvas.removeEventListener('mouseleave', onMouseUp);
@@ -434,6 +484,7 @@ const ServiceTopology: React.FC = () => {
           <Tag color="blue">{nodesRef.current.length} 个服务</Tag>
         </Space>
         <Space>
+          {blastData && <Button icon={<CloseOutlined />} size="small" danger onClick={() => { blastNodesRef.current = new Set(); blastSourceRef.current = ''; setBlastData(null); }}>退出爆炸半径</Button>}
           <Button icon={<ReloadOutlined />} onClick={loadTopology} size="small">刷新</Button>
         </Space>
       </div>
@@ -485,6 +536,33 @@ const ServiceTopology: React.FC = () => {
                 </Tag>
               </div>
             </Space>
+          </Card>
+        )}
+
+        {/* Blast Radius Panel */}
+        {blastData && (
+          <Card
+            size="small"
+            style={{
+              position: 'absolute', bottom: 60, right: 16, width: 280, zIndex: 20,
+              background: 'rgba(60,20,20,0.92)', border: '1px solid rgba(255,77,79,0.4)',
+              borderRadius: 12, boxShadow: '0 0 30px rgba(255,77,79,0.15)',
+            }}
+            title={<Space><AimOutlined style={{ color: '#ff4d4f' }} /><Text style={{ color: '#ff4d4f', fontWeight: 700 }}>爆炸半径</Text></Space>}
+          >
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.85)' }}>
+              <div style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>{blastData.source_name}</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px' }}>
+                <div><Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>影响服务</Text><div style={{ fontWeight: 700, fontSize: 18, color: '#ff4d4f' }}>{blastData.total_affected}</div></div>
+                <div><Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>传播深度</Text><div style={{ fontWeight: 700, fontSize: 18, color: '#faad14' }}>{blastData.max_depth} 层</div></div>
+                <div><Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>核心路径</Text><div style={{ fontWeight: 700, fontSize: 18, color: '#ff7875' }}>{blastData.affected_core_paths}</div></div>
+                <div><Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>影响评分</Text><div style={{ fontWeight: 700, fontSize: 18, color: blastData.impact_score >= 70 ? '#ff4d4f' : blastData.impact_score >= 45 ? '#fa8c16' : '#faad14' }}>{blastData.impact_score}</div></div>
+              </div>
+              <Tag color={blastData.impact_level === 'critical' ? '#ff4d4f' : blastData.impact_level === 'high' ? '#fa8c16' : '#faad14'} style={{ marginTop: 8, borderRadius: 4, fontWeight: 700 }}>
+                {blastData.impact_level === 'critical' ? '🔴 极高影响' : blastData.impact_level === 'high' ? '🟠 高影响' : blastData.impact_level === 'medium' ? '🟡 中等影响' : '🟢 低影响'}
+              </Tag>
+              <div style={{ marginTop: 8, fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>双击节点查看 · 双击空白退出</div>
+            </div>
           </Card>
         )}
 

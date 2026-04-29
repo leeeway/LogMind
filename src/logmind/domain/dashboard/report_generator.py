@@ -223,11 +223,81 @@ async def get_weekly_report(
             change_pct=change,
         ))
 
-    # 6. AI Summary (template — production would call LLM)
-    trend_desc = "稳定" if total_errors < 5 else "偏高" if total_errors < 20 else "严重"
-    top_svc_desc = "、".join([s.service_name for s in top_services[:3]]) if top_services else "无"
+    # 6. AI Summary — powered by real LLM
+    ai_summary = ""
+    action_items = []
 
-    ai_summary = f"""## 本周运维概况
+    # Build context for AI
+    trend_lines = "\n".join([
+        f"  {d.date}: {d.error_count} errors, {d.warning_count} warnings"
+        for d in daily_trends
+    ]) or "  无趋势数据"
+
+    top_svc_lines = "\n".join([
+        f"  #{i+1} {s.service_name}: {s.error_count} errors (环比 {'+' if s.change_pct > 0 else ''}{s.change_pct}%)"
+        for i, s in enumerate(top_services)
+    ]) or "  无服务数据"
+
+    ai_prompt = f"""请基于以下运维数据生成一份专业的智能巡检周报（{week_start.strftime('%m-%d')} ~ {week_end.strftime('%m-%d')}）。
+
+## 数据摘要
+- 分析任务: {total_tasks} 次，成功率 {success_rate}%
+- 严重错误: {total_errors}，告警级: {total_warnings}
+- 触发告警: {total_alerts} 条，P0 告警: {p0_alerts} 条
+
+## 每日趋势
+{trend_lines}
+
+## Top 问题服务（环比上周）
+{top_svc_lines}
+
+## 输出要求
+请用 Markdown 格式输出，包含以下章节：
+1. **本周概况**：一句话总结整体运维态势
+2. **趋势分析**：分析错误数变化趋势，是否有异常波动
+3. **重点服务**：分析 Top 3 问题服务的根因假设
+4. **风险预警**：基于趋势预测下周可能出现的风险
+5. **建议行动**：给出 3-5 条可操作的运维建议（每条一行，以 `- ` 开头）
+
+请直接输出报告内容，不要加"好的"等前缀。"""
+
+    try:
+        from logmind.domain.provider.base import ChatMessage, ChatRequest
+        from logmind.domain.provider.manager import provider_manager
+
+        provider = await provider_manager.get_provider(session, user.tenant_id)
+        if provider:
+            request = ChatRequest(
+                messages=[
+                    ChatMessage(role="system", content="你是 LogMind 运维 AI 分析师，擅长撰写专业运维巡检报告。"),
+                    ChatMessage(role="user", content=ai_prompt),
+                ],
+                temperature=0.3,
+                max_tokens=2000,
+            )
+            response = await provider.chat(request)
+            full_text = response.content
+
+            # Extract action items from the response (lines starting with "- ")
+            ai_summary_parts = []
+            for line in full_text.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("- ") and len(stripped) > 10:
+                    # Check if this is in the "建议行动" section
+                    if action_items is not None:
+                        action_items.append(stripped[2:])
+                ai_summary_parts.append(line)
+
+            ai_summary = "\n".join(ai_summary_parts)
+            logger.info("weekly_report_ai_generated", tenant_id=user.tenant_id)
+    except Exception as e:
+        logger.warning("weekly_report_ai_fallback", error=str(e))
+
+    # Fallback if AI unavailable or failed
+    if not ai_summary:
+        trend_desc = "稳定" if total_errors < 5 else "偏高" if total_errors < 20 else "严重"
+        top_svc_desc = "、".join([s.service_name for s in top_services[:3]]) if top_services else "无"
+        ai_summary = f"""## 本周运维概况
 
 本周共执行 **{total_tasks}** 次分析任务，成功率 **{success_rate}%**。
 发现 **{total_errors}** 个严重错误和 **{total_warnings}** 个告警级问题。
@@ -238,17 +308,17 @@ async def get_weekly_report(
 {"⚠️ P0 告警较多，建议重点关注。" if p0_alerts > 2 else "整体运维态势可控。"}
 """
 
-    action_items = []
-    for s in top_services[:3]:
-        if s.error_count > 0:
-            arrow = "↑" if s.change_pct > 0 else "↓" if s.change_pct < 0 else "—"
-            action_items.append(
-                f"{s.service_name}: {s.error_count} 个错误 ({arrow}{abs(s.change_pct)}%)，建议排查根因"
-            )
-    if p0_alerts > 0:
-        action_items.append(f"本周有 {p0_alerts} 条 P0 告警，建议复盘处置流程")
     if not action_items:
-        action_items.append("本周运维状况良好，继续保持 ✅")
+        for s in top_services[:3]:
+            if s.error_count > 0:
+                arrow = "↑" if s.change_pct > 0 else "↓" if s.change_pct < 0 else "—"
+                action_items.append(
+                    f"{s.service_name}: {s.error_count} 个错误 ({arrow}{abs(s.change_pct)}%)，建议排查根因"
+                )
+        if p0_alerts > 0:
+            action_items.append(f"本周有 {p0_alerts} 条 P0 告警，建议复盘处置流程")
+        if not action_items:
+            action_items.append("本周运维状况良好，继续保持 ✅")
 
     return WeeklyReportResponse(
         week_start=week_start.strftime("%Y-%m-%d"),

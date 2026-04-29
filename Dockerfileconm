@@ -1,0 +1,31 @@
+# 声明使用的公司统一基础镜像 (该镜像需提前通过工单创建)
+# 基础镜像要求：基于 Python 3.12，并预装 uv 包管理工具
+FROM gyyx/python-3.12-uv:1.0
+
+WORKDIR /app
+
+# 设置环境变量
+ENV UV_NO_SYNC=1 \
+    PYTHONPATH=/app/src \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# 1. 复制依赖文件
+COPY pyproject.toml ./
+
+# 2. 提前安装依赖，利用 Docker 缓存加速构建
+# 此处直接使用基础镜像中已有的 uv 工具进行安装
+RUN uv pip install --system ".[prod]"
+
+# 3. 复制应用代码和配置
+COPY src/ ./src/
+COPY configs/ ./configs/
+COPY migrations/ ./migrations/
+COPY alembic.ini ./
+COPY .env* ./
+
+# 暴露端口
+EXPOSE 8000
+
+# 启动命令
+CMD ["sh", "-c", "mkdir -p /data/logs && uvicorn logmind.main:app --host 0.0.0.0 --port 8000 --workers 4"]

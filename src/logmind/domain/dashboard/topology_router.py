@@ -143,3 +143,176 @@ async def get_topology(
                 ))
 
     return TopologyResponse(nodes=nodes, edges=edges)
+
+
+# ── Blast Radius Endpoint ─────────────────────────────────
+
+class BlastRadiusNode(BaseModel):
+    id: str
+    name: str
+    depth: int  # 0=source, 1=direct downstream, 2=indirect...
+    health: str
+    alert_count: int
+    business_weight: int
+    is_core_path: bool
+
+
+class BlastRadiusResponse(BaseModel):
+    source_id: str
+    source_name: str
+    affected_nodes: list[BlastRadiusNode]
+    total_affected: int
+    max_depth: int
+    affected_core_paths: int
+    impact_score: float  # 0-100, weighted by business_weight + core_path
+    impact_level: str  # low | medium | high | critical
+
+
+@router.get("/topology/blast-radius", response_model=BlastRadiusResponse)
+async def get_blast_radius(
+    node_id: str,
+    session: DBSession,
+    user: CurrentUser,
+):
+    """
+    Calculate the blast radius of a service failure.
+
+    BFS traversal from the given node through all downstream dependencies
+    to determine how many services and users would be affected.
+    """
+    # Load full topology first
+    biz_lines = await biz_repo.get_all(
+        session, tenant_id=user.tenant_id, filters={"is_active": True}
+    )
+    biz_map = {b.id: b for b in biz_lines}
+
+    if node_id not in biz_map:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    # Build adjacency list (source → [downstream targets])
+    adjacency: dict[str, list[str]] = {b.id: [] for b in biz_lines}
+    biz_ids = set(biz_map.keys())
+
+    for biz in biz_lines:
+        try:
+            related = json.loads(biz.related_services) if biz.related_services else {}
+        except (json.JSONDecodeError, TypeError):
+            related = {}
+
+        for downstream_id in related.get("downstream", []):
+            if downstream_id in biz_ids:
+                adjacency[biz.id].append(downstream_id)
+
+        # If B lists A as upstream, A→B is a downstream edge
+        for upstream_id in related.get("upstream", []):
+            if upstream_id in biz_ids:
+                if biz.id not in adjacency.get(upstream_id, []):
+                    adjacency.setdefault(upstream_id, []).append(biz.id)
+
+    # Get alert counts (reuse topology logic)
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select
+    from logmind.domain.analysis.models import LogAnalysisTask
+
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    alert_stmt = (
+        select(LogAnalysisTask.business_line_id, AlertHistory.severity)
+        .join(LogAnalysisTask, AlertHistory.analysis_task_id == LogAnalysisTask.id, isouter=True)
+        .where(
+            AlertHistory.tenant_id == user.tenant_id,
+            AlertHistory.fired_at >= since,
+        )
+    )
+    alert_result = await session.execute(alert_stmt)
+    alert_counts: dict[str, dict] = {}
+    for row in alert_result.all():
+        biz_id = row[0] or ""
+        severity = row[1] or "warning"
+        if biz_id not in alert_counts:
+            alert_counts[biz_id] = {"critical": 0, "warning": 0, "total": 0}
+        alert_counts[biz_id]["total"] += 1
+        if severity == "critical":
+            alert_counts[biz_id]["critical"] += 1
+
+    # BFS traversal
+    visited: dict[str, int] = {}  # node_id → depth
+    queue = [(node_id, 0)]
+    visited[node_id] = 0
+
+    while queue:
+        current_id, depth = queue.pop(0)
+        for downstream_id in adjacency.get(current_id, []):
+            if downstream_id not in visited:
+                visited[downstream_id] = depth + 1
+                queue.append((downstream_id, depth + 1))
+
+    # Build result
+    source_biz = biz_map[node_id]
+    affected: list[BlastRadiusNode] = []
+    affected_core = 0
+    total_weight = 0
+
+    for nid, depth in visited.items():
+        if depth == 0:
+            continue  # Skip source itself
+        biz = biz_map.get(nid)
+        if not biz:
+            continue
+
+        ac = alert_counts.get(nid, {"critical": 0, "warning": 0, "total": 0})
+        health = "critical" if ac.get("critical", 0) > 0 else "warning" if ac.get("warning", 0) > 0 else "healthy"
+
+        affected.append(BlastRadiusNode(
+            id=nid,
+            name=biz.name,
+            depth=depth,
+            health=health,
+            alert_count=ac.get("total", 0),
+            business_weight=biz.business_weight,
+            is_core_path=biz.is_core_path,
+        ))
+
+        total_weight += biz.business_weight
+        if biz.is_core_path:
+            affected_core += 1
+
+    # Sort by depth first, then by business_weight descending
+    affected.sort(key=lambda n: (n.depth, -n.business_weight))
+
+    max_depth = max((n.depth for n in affected), default=0)
+    total_affected = len(affected)
+
+    # Impact score: weighted combination
+    # - Number of affected services (30%)
+    # - Total business weight (30%)
+    # - Core path hits (25%)
+    # - Max depth (15%)
+    all_count = len(biz_lines) or 1
+    svc_factor = min(total_affected / all_count, 1.0) * 30
+    weight_factor = min(total_weight / (all_count * 5), 1.0) * 30
+    core_factor = min(affected_core / max(1, sum(1 for b in biz_lines if b.is_core_path)), 1.0) * 25
+    depth_factor = min(max_depth / 4, 1.0) * 15
+
+    impact_score = round(svc_factor + weight_factor + core_factor + depth_factor, 1)
+
+    if impact_score >= 70:
+        impact_level = "critical"
+    elif impact_score >= 45:
+        impact_level = "high"
+    elif impact_score >= 20:
+        impact_level = "medium"
+    else:
+        impact_level = "low"
+
+    return BlastRadiusResponse(
+        source_id=node_id,
+        source_name=source_biz.name,
+        affected_nodes=affected,
+        total_affected=total_affected,
+        max_depth=max_depth,
+        affected_core_paths=affected_core,
+        impact_score=impact_score,
+        impact_level=impact_level,
+    )
+

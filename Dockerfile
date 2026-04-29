@@ -45,6 +45,15 @@ RUN apt-get update && \
 COPY pyproject.toml ./
 RUN pip install ".[prod]"
 
+# ── Frontend build ───────────────────────────────────────
+FROM node:20-slim AS frontend
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --production=false
+COPY frontend/ ./
+RUN npm run build
+
 # ── Production image ─────────────────────────────────────
 FROM base AS production
 
@@ -58,7 +67,11 @@ COPY configs/ ./configs/
 COPY migrations/ ./migrations/
 COPY alembic.ini ./
 
-ENV PYTHONPATH=/app/src
+# Copy frontend build output
+COPY --from=frontend /frontend/dist ./frontend/dist/
+
+ENV PYTHONPATH=/app/src \
+    LOGMIND_SERVE_FRONTEND=1
 
 # Create non-root user
 RUN addgroup --system appgroup && \

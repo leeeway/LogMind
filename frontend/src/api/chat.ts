@@ -19,6 +19,8 @@ export const chatApi = {
 export const topologyApi = {
   getTopology: () =>
     client.get('/dashboard/topology'),
+  getBlastRadius: (nodeId: string) =>
+    client.get('/dashboard/topology/blast-radius', { params: { node_id: nodeId } }),
 };
 
 export const timelineApi = {
