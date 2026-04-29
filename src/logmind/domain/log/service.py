@@ -128,13 +128,22 @@ class LogService:
             }
         })
 
-        # Free text search
+        # Free text search — use match_phrase for CJK reliability
+        # multi_match with phrase_prefix is unreliable for Chinese text
         if request.query:
             must_clauses.append({
-                "multi_match": {
-                    "query": request.query,
-                    "fields": ["message", "log", "msg", "content"],
-                    "type": "phrase_prefix",
+                "bool": {
+                    "should": [
+                        # Strategy 1: match_phrase on message (most reliable for CJK)
+                        {"match_phrase": {"message": request.query}},
+                        # Strategy 2: query_string wildcard (catches partial matches)
+                        {"query_string": {
+                            "query": f"*{request.query}*",
+                            "fields": ["message"],
+                            "analyze_wildcard": True,
+                        }},
+                    ],
+                    "minimum_should_match": 1,
                 }
             })
 
@@ -151,7 +160,7 @@ class LogService:
             # Java: match gy.filetype (error.log, info.log, etc.)
             filetype_values = _SEVERITY_FILETYPE_MAP.get(request.severity.lower(), [])
             for ft in filetype_values:
-                severity_should.append({"term": {"gy.filetype": ft}})
+                severity_should.append({"term": {"gy.filetype.keyword": ft}})
 
             # C# / mixed-level: match level markers in message content
             # IMPORTANT: Use phrase matching with brackets/delimiters to avoid
@@ -216,12 +225,19 @@ class LogService:
 
         # GYYX gy.* field filters
         if request.domain:
-            filter_clauses.append(
-                {"term": {"gy.domain": request.domain}}
-            )
+            if "." in request.domain:
+                # Exact domain like "stage-account-login-service.gyyx.cn"
+                filter_clauses.append(
+                    {"term": {"gy.domain.keyword": request.domain}}
+                )
+            else:
+                # Fuzzy domain like "login" — use wildcard
+                filter_clauses.append(
+                    {"wildcard": {"gy.domain.keyword": f"*{request.domain}*"}}
+                )
         if request.filetype:
             filter_clauses.append(
-                {"term": {"gy.filetype": request.filetype}}
+                {"term": {"gy.filetype.keyword": request.filetype}}
             )
 
         # Extra filters from business line config

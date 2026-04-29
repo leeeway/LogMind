@@ -396,10 +396,12 @@ const ChatPage: React.FC = () => {
                         <Space><LoadingOutlined style={{ color: '#722ed1' }} /><Text style={{ color: 'var(--lm-text-tertiary)' }}>思考中...</Text></Space>
                       ) : null}
                       {msg.content && !msg.isStreaming && (
-                        <div style={{ marginTop: 8, display: 'flex', gap: 6 }}>
-                          <Tooltip title="复制">
-                            <CopyOutlined
-                              style={{ fontSize: 12, color: 'var(--lm-text-tertiary)', cursor: 'pointer' }}
+                        <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <Tooltip title="复制回答">
+                            <Button
+                              type="text" size="small"
+                              icon={<CopyOutlined />}
+                              style={{ fontSize: 12, color: 'var(--lm-text-tertiary)', padding: '0 4px', height: 22 }}
                               onClick={() => copyContent(msg.content)}
                             />
                           </Tooltip>
@@ -410,7 +412,29 @@ const ChatPage: React.FC = () => {
                       )}
                     </>
                   ) : (
-                    <div style={{ fontSize: 14, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                    <>
+                      <div style={{ fontSize: 14, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                      {!sending && (
+                        <div style={{ marginTop: 6, display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                          <Tooltip title="复制">
+                            <Button
+                              type="text" size="small"
+                              icon={<CopyOutlined />}
+                              style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', padding: '0 4px', height: 20 }}
+                              onClick={() => copyContent(msg.content)}
+                            />
+                          </Tooltip>
+                          <Tooltip title="重新提问">
+                            <Button
+                              type="text" size="small"
+                              icon={<SendOutlined />}
+                              style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', padding: '0 4px', height: 20 }}
+                              onClick={() => sendMessage(msg.content)}
+                            />
+                          </Tooltip>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>

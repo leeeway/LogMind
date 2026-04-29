@@ -150,7 +150,7 @@ async def _count_errors(
                 "should": [
                     {"match_phrase": {"message": "[ERROR]"}},
                     {"match_phrase": {"message": "] ERROR "}},
-                    {"term": {"gy.filetype": "error.log"}},
+                    {"term": {"gy.filetype.keyword": "error.log"}},
                     {"term": {"log.level": "error"}},
                 ],
                 "minimum_should_match": 1,

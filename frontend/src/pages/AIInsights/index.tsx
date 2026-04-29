@@ -3,11 +3,13 @@ import { Card, Typography, Row, Col, Select, Spin, Statistic, Space, Tag, Table,
 import { ThunderboltOutlined, RiseOutlined, ToolOutlined, TrophyOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import { Line, Column } from '@ant-design/charts';
 import { dashboardApi } from '@/api/dashboard';
+import { useTheme } from '@/hooks/useTheme';
 
 const { Title, Text } = Typography;
 
 const AIInsights: React.FC = () => {
   const [days, setDays] = useState(7);
+  const { isDark } = useTheme();
   const [loading, setLoading] = useState(true);
   const [effectiveness, setEffectiveness] = useState<any>(null);
   const [agentStats, setAgentStats] = useState<any>(null);
@@ -87,7 +89,7 @@ const AIInsights: React.FC = () => {
             styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
             {effectiveness?.accuracy_trend?.length > 0 ? (
               <Line data={effectiveness.accuracy_trend.map((item: any) => ({ ...item, value: item.accuracy * 100 }))}
-                xField="date" yField="value" height={220} smooth color="#52c41a" theme="classicDark"
+                xField="date" yField="value" height={220} smooth color="#52c41a" theme={isDark ? 'classicDark' : 'classic'}
                 yAxis={{ label: { formatter: (v: string) => `${v}%` } }} />
             ) : <Empty description="暂无数据" />}
           </Card>

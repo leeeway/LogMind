@@ -113,10 +113,23 @@ async def send_message(
 
     # Build service list context
     biz_lines = await biz_repo.get_all(db, tenant_id=user.tenant_id)
-    service_list = "\n".join(
-        f"- {b.name} (索引: {b.es_index_pattern}, 语言: {b.language})"
-        for b in biz_lines
-    ) or "暂无配置的业务线"
+    service_list_items = []
+    for b in biz_lines:
+        domain = ""
+        idx = b.es_index_pattern or ""
+        if ".gyyx.cn" in idx:
+            d = idx.rstrip("*").rstrip("-")
+            for pfx in ("master-", "develop-", ".ds-master-", ".ds-develop-"):
+                if d.startswith(pfx):
+                    d = d[len(pfx):]
+                    break
+            if ".gyyx.cn" in d:
+                domain = d.split(".gyyx.cn")[0] + ".gyyx.cn"
+        domain_hint = f", 域名: {domain}" if domain else ""
+        service_list_items.append(
+            f"- {b.name} (索引: {b.es_index_pattern}, 语言: {b.language}{domain_hint})"
+        )
+    service_list = "\n".join(service_list_items) or "暂无配置的业务线"
 
     return StreamingResponse(
         chat_service.chat_stream(

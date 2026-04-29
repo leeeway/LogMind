@@ -26,6 +26,10 @@ import TimeTravel from '@/pages/Logs/TimeTravel';
 import WeeklyReport from '@/pages/Dashboard/WeeklyReport';
 import PivotTable from '@/pages/Dashboard/PivotTable';
 import PatrolRadar from '@/pages/Dashboard/PatrolRadar';
+import LiveTail from '@/pages/Logs/LiveTail';
+import IncidentList from '@/pages/Incidents/IncidentList';
+import WarRoom from '@/pages/Incidents/WarRoom';
+import DashboardBuilder from '@/pages/Dashboard/DashboardBuilder';
 import { QuickDiagnoseProvider } from '@/components/QuickDiagnose';
 
 // Hydrate auth synchronously on module load — before any component renders
@@ -42,33 +46,48 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 };
 
 const App: React.FC = () => {
+  const [currentTheme, setCurrentTheme] = React.useState<'dark' | 'light'>(() => {
+    return (localStorage.getItem('lm-theme') as 'dark' | 'light') || 'dark';
+  });
+
+  // Listen for theme changes from AppLayout's useTheme hook
+  React.useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const t = document.documentElement.getAttribute('data-theme') as 'dark' | 'light';
+      if (t && t !== currentTheme) setCurrentTheme(t);
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, [currentTheme]);
+
+  const isDark = currentTheme === 'dark';
 
   return (
     <ConfigProvider
       locale={zhCN}
       theme={{
-        algorithm: theme.darkAlgorithm,
+        algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
         token: {
           colorPrimary: '#1677ff',
-          colorBgContainer: '#0d1220',
-          colorBgLayout: '#060a13',
-          colorBgElevated: '#141c2e',
-          colorBorder: '#1e3a5f',
-          colorBorderSecondary: 'rgba(255,255,255,0.06)',
+          colorBgContainer: isDark ? '#0d1220' : '#ffffff',
+          colorBgLayout: isDark ? '#060a13' : '#f0f2f5',
+          colorBgElevated: isDark ? '#141c2e' : '#ffffff',
+          colorBorder: isDark ? '#1e3a5f' : '#d9d9d9',
+          colorBorderSecondary: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
           borderRadius: 10,
           fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif",
         },
         components: {
           Menu: {
             itemBg: 'transparent',
-            itemSelectedBg: 'rgba(22, 119, 255, 0.12)',
-            itemHoverBg: 'rgba(255, 255, 255, 0.04)',
+            itemSelectedBg: isDark ? 'rgba(22, 119, 255, 0.12)' : 'rgba(22, 119, 255, 0.08)',
+            itemHoverBg: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.03)',
             itemSelectedColor: '#4096ff',
-            itemColor: 'rgba(255,255,255,0.55)',
+            itemColor: isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.65)',
           },
           Table: {
-            headerBg: 'rgba(255,255,255,0.02)',
-            rowHoverBg: 'rgba(22, 119, 255, 0.03)',
+            headerBg: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
+            rowHoverBg: isDark ? 'rgba(22, 119, 255, 0.03)' : 'rgba(22, 119, 255, 0.04)',
           },
           Card: {
             headerBg: 'transparent',
@@ -87,6 +106,10 @@ const App: React.FC = () => {
               <Route path="analysis/compare" element={<TaskCompare />} />
               <Route path="alerts" element={<AlertList />} />
               <Route path="logs" element={<LogSearch />} />
+              <Route path="live-tail" element={<LiveTail />} />
+              <Route path="incidents" element={<IncidentList />} />
+              <Route path="incidents/:id" element={<WarRoom />} />
+              <Route path="dashboard-builder" element={<DashboardBuilder />} />
               <Route path="business-lines" element={<BusinessLines />} />
               <Route path="business-lines/:id" element={<BusinessLineDetail />} />
               <Route path="ai-insights" element={<AIInsights />} />

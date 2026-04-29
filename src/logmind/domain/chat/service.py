@@ -57,6 +57,19 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 
 每轮只调用必要的工具。如果信息已经足够，提前结束推理。
 
+## 时区规范
+- 用户所在时区为 **UTC+8（北京时间）**
+- 当前北京时间: {current_time}
+- 调用 search_logs 时，time_from 和 time_to 请使用 ISO 8601 格式并带上 +08:00 时区，例如: 2026-04-29T05:00:00+08:00
+- 向用户展示时间时，统一使用北京时间（不要显示 UTC 时间）
+- "最近几小时" 指从当前北京时间往前推算
+
+## 搜索技巧
+- 搜索中文关键词时，直接用原始中文词即可，如 "截断"、"异常"、"超时"
+- 搜索 Java 异常时可用异常类名，如 "SQLServerException"、"NullPointerException"
+- 使用 search_logs 时建议传入 domain 参数来指定站点精确过滤
+- 如果第一次搜索无结果，尝试换关键词或去掉 severity 过滤
+
 ## 回答规范
 - 用中文回复
 - 先说明你做了哪些查询（工具调用摘要）
@@ -65,8 +78,9 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - 使用 Markdown 格式（标题、列表、代码块、表格）
 - 在回复末尾用 `---` 分隔后列出 2-3 个跟进建议
 - 如果查到具体日志，用代码块展示关键条目
+- 所有时间显示为北京时间
 
-当前时间: {current_time}
+当前北京时间: {current_time}
 当前租户可用的业务线/服务列表:
 {service_list}
 """
@@ -96,14 +110,14 @@ CHAT_TOOLS = AGENT_TOOLS + [
         "function": {
             "name": "get_service_health",
             "description": (
-                "查询指定服务过去 N 小时的健康状态：错误数、趋势变化、最近的错误类型。"
-                "用于快速判断某个服务是否异常。"
+                "直接查询 ES 日志获取指定服务的实时健康状态：错误/告警日志数量、最近的报错样本、"
+                "filetype 分布。用于快速判断某个服务是否有异常。返回的 recent_errors 包含最新的错误日志摘要。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "service_name": {"type": "string", "description": "服务/业务线名称"},
-                    "hours": {"type": "integer", "description": "查看时间范围（小时），默认 2", "default": 2},
+                    "hours": {"type": "integer", "description": "查看时间范围（小时），默认 6", "default": 6},
                 },
                 "required": ["service_name"],
             },
@@ -207,6 +221,65 @@ class ChatSession:
 _sessions: dict[str, ChatSession] = {}
 
 
+def _extract_error_core(msg: str, max_len: int = 500) -> str:
+    """
+    Smart extract error core from Java/C# log messages.
+
+    Instead of blind truncation (which often cuts off key info like
+    'SQLServerException: 将截断字符串或二进制数据'), this extracts:
+    1. The exception description (method + error summary)
+    2. Root cause Exception class + message
+    3. SQL statement if present
+
+    Example input (961 chars):
+      [2026-04-29 11:12:32] [http-nio...] ... 执行GyyxUser_LoginLog方法发生异常,
+      参数:userId:xxx,clientIP:xxx,ex:org.springframework.dao.DataIntegrityViolationException:
+      ### Error updating database. Cause: com.microsoft.sqlserver.jdbc.SQLServerException:
+      将截断字符串或二进制数据。 ### SQL: INSERT INTO ...
+
+    Output (~200 chars):
+      执行GyyxUser_LoginLog方法发生异常 | Cause: SQLServerException: 将截断字符串或二进制数据。
+      | SQL: INSERT INTO community_login_log(...)
+    """
+    if not msg or len(msg) <= max_len:
+        return msg
+
+    import re
+    parts = []
+
+    # 1. Extract the error description (after "] - " prefix in Java logs)
+    desc_match = re.search(r'\] - (.+?)(?:,参数:|,ex:|$)', msg)
+    if desc_match:
+        parts.append(desc_match.group(1).strip())
+
+    # 2. Extract Cause / root exception (most important part!)
+    # Look for patterns like "Cause: com.xxx.SomeException: error message"
+    cause_matches = re.findall(
+        r'(?:Cause|Caused by|caused by)[:\s]+(?:[\w.]+\.)?(\w+Exception[:\s]+[^\n#]+)',
+        msg
+    )
+    if cause_matches:
+        # Take the most specific cause (usually the last one)
+        for cause in cause_matches:
+            cause_clean = cause.strip().rstrip(';').strip()
+            if cause_clean and cause_clean not in str(parts):
+                parts.append(f"Cause: {cause_clean}")
+
+    # 3. Extract SQL statement if present
+    sql_match = re.search(r'###\s*SQL:\s*(.+?)(?:\s*###|$)', msg)
+    if sql_match:
+        sql = sql_match.group(1).strip()[:150]
+        parts.append(f"SQL: {sql}")
+
+    # 4. If we extracted structured parts, join them
+    if parts:
+        result = " | ".join(parts)
+        return result[:max_len]
+
+    # Fallback: just return more chars than before
+    return msg[:max_len]
+
+
 class ChatService:
     """Manages chat sessions and AI inference with multi-round ReAct reasoning."""
 
@@ -261,7 +334,15 @@ class ChatService:
             if tool_name in agent_tool_names:
                 from logmind.domain.analysis.agent_tools import execute_tool
                 now = datetime.now(timezone.utc)
-                time_from = now - timedelta(hours=2)
+                # Resolve time range from args — don't hardcode 2h
+                hours = args.get("hours", 6)
+                if isinstance(hours, str):
+                    try:
+                        hours = int(hours)
+                    except ValueError:
+                        hours = 6
+                hours = min(max(hours, 1), 24)
+                time_from = now - timedelta(hours=hours)
                 return await execute_tool(
                     tool_name=tool_name,
                     arguments=args,
@@ -310,19 +391,17 @@ class ChatService:
         return json.dumps({"alerts": result, "count": len(result)}, ensure_ascii=False, default=str)
 
     async def _tool_get_service_health(self, args: dict, tenant_id: str, db_session) -> str:
-        """Get service health status."""
+        """Get service health status — queries ES directly for real-time metrics."""
         from logmind.domain.tenant.models import BusinessLine
-        from logmind.domain.analysis.models import AnalysisResult, LogAnalysisTask
         from logmind.shared.base_repository import BaseRepository
-        from sqlalchemy import select, func, case
 
         service_name = args.get("service_name", "")
-        hours = min(args.get("hours", 2), 24)
+        hours = min(args.get("hours", 6), 24)
 
         biz_repo = BaseRepository(BusinessLine)
         biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
 
-        # Find matching service
+        # Find matching service (fuzzy)
         target = None
         for b in biz_lines:
             if service_name.lower() in b.name.lower():
@@ -335,38 +414,149 @@ class ChatService:
                 "available_services": [b.name for b in biz_lines[:10]],
             }, ensure_ascii=False)
 
-        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        # ── Query ES directly for real-time health ────────────
+        index_pattern = target.es_index_pattern if target.es_index_pattern else "*"
 
-        # Error count
-        stmt = (
-            select(
-                func.count().label("total"),
-                func.sum(case((AnalysisResult.severity == "critical", 1), else_=0)).label("errors"),
-                func.sum(case((AnalysisResult.severity == "warning", 1), else_=0)).label("warnings"),
-            )
-            .join(LogAnalysisTask, AnalysisResult.task_id == LogAnalysisTask.id)
-            .where(
-                LogAnalysisTask.tenant_id == tenant_id,
-                LogAnalysisTask.business_line_id == target.id,
-                AnalysisResult.created_at >= since,
-            )
-        )
-        result = await db_session.execute(stmt)
-        row = result.one_or_none()
+        # Extract gy.domain from index pattern or field_mapping
+        # Pattern like "master-stage-account-login-service.gyyx.cn*"
+        # → domain = "stage-account-login-service.gyyx.cn"
+        domain_filter = None
+        try:
+            fm = json.loads(target.field_mapping) if target.field_mapping else {}
+            domain_filter = fm.get("domain")
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-        return json.dumps({
-            "service": target.name,
-            "index_pattern": target.es_index_pattern,
-            "time_range": f"过去 {hours} 小时",
-            "total_results": int(row[0] or 0) if row else 0,
-            "critical_errors": int(row[1] or 0) if row else 0,
-            "warnings": int(row[2] or 0) if row else 0,
-            "status": (
-                "critical" if (row and int(row[1] or 0) > 5)
-                else "warning" if (row and int(row[1] or 0) > 0)
-                else "healthy"
-            ),
-        }, ensure_ascii=False)
+        if not domain_filter and ".gyyx.cn" in index_pattern:
+            # Extract domain from index pattern: strip leading "master-"/"develop-" and trailing "*"
+            idx_clean = index_pattern.rstrip("*").rstrip("-")
+            for prefix in ("master-", "develop-", ".ds-master-", ".ds-develop-"):
+                if idx_clean.startswith(prefix):
+                    idx_clean = idx_clean[len(prefix):]
+                    break
+            if ".gyyx.cn" in idx_clean:
+                # Truncate at ".gyyx.cn" to avoid date suffixes like "-2026.04"
+                domain_filter = idx_clean.split(".gyyx.cn")[0] + ".gyyx.cn"
+
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=hours)
+
+        try:
+            from logmind.domain.log.service import log_service
+
+            # 1) Count total + error logs by filetype
+            filter_clauses = [
+                {"range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}},
+            ]
+            if domain_filter:
+                filter_clauses.append({"term": {"gy.domain.keyword": domain_filter}})
+
+            body = {
+                "size": 0,
+                "query": {"bool": {"filter": filter_clauses}},
+                "aggs": {
+                    "by_filetype": {
+                        "terms": {"field": "gy.filetype.keyword", "size": 20}
+                    },
+                    "error_logs": {
+                        "filter": {
+                            "bool": {
+                                "should": [
+                                    {"term": {"gy.filetype.keyword": "error.log"}},
+                                    {"term": {"gy.filetype.keyword": "warn.log"}},
+                                    {"match_phrase": {"message": "Exception"}},
+                                    {"match_phrase": {"message": "异常"}},
+                                    {"match_phrase": {"message": "[ERROR]"}},
+                                    {"match_phrase": {"message": "[FATAL]"}},
+                                ],
+                                "minimum_should_match": 1,
+                            }
+                        }
+                    },
+                    "recent_errors": {
+                        "filter": {
+                            "bool": {
+                                "should": [
+                                    {"term": {"gy.filetype.keyword": "error.log"}},
+                                    {"term": {"gy.filetype.keyword": "warn.log"}},
+                                    {"match_phrase": {"message": "Exception"}},
+                                    {"match_phrase": {"message": "异常"}},
+                                ],
+                                "minimum_should_match": 1,
+                            }
+                        },
+                        "aggs": {
+                            "top_errors": {
+                                "top_hits": {
+                                    "size": 5,
+                                    "sort": [{"@timestamp": {"order": "desc"}}],
+                                    "_source": ["message", "@timestamp", "gy.filetype"],
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            result = await log_service.es.search(index=index_pattern, body=body)
+
+            total_hits = result["hits"]["total"]["value"]
+            error_count = result["aggregations"]["error_logs"]["doc_count"]
+            filetype_buckets = result["aggregations"]["by_filetype"]["buckets"]
+            recent_error_hits = result["aggregations"]["recent_errors"]["top_errors"]["hits"]["hits"]
+
+            # Format filetype distribution
+            filetype_dist = {b["key"]: b["doc_count"] for b in filetype_buckets}
+
+            # Format recent error samples — smart extraction
+            recent_errors = []
+            for hit in recent_error_hits:
+                src = hit["_source"]
+                msg = src.get("message", "")
+                # Smart extract: find Exception/Cause messages instead of blind truncation
+                extracted = _extract_error_core(msg)
+                recent_errors.append({
+                    "time": src.get("@timestamp", ""),
+                    "filetype": src.get("gy", {}).get("filetype", ""),
+                    "message": extracted,
+                })
+
+            # Determine status
+            if error_count > 50:
+                status = "critical"
+            elif error_count > 10:
+                status = "warning"
+            elif error_count > 0:
+                status = "attention"
+            else:
+                status = "healthy"
+
+            return json.dumps({
+                "service": target.name,
+                "index_pattern": index_pattern,
+                "domain": domain_filter or "N/A",
+                "time_range": f"过去 {hours} 小时",
+                "total_logs": total_hits,
+                "error_and_warning_logs": error_count,
+                "filetype_distribution": filetype_dist,
+                "status": status,
+                "recent_errors": recent_errors,
+                "diagnosis_hint": (
+                    f"发现 {error_count} 条错误/告警日志。"
+                    + (f"最新错误摘要: {recent_errors[0]['message'][:200]}" if recent_errors else "")
+                ),
+            }, ensure_ascii=False, default=str)
+
+        except Exception as e:
+            logger.warning("es_health_query_failed", service=service_name, error=str(e))
+            # Fallback: return basic info + hint to use search_logs
+            return json.dumps({
+                "service": target.name,
+                "index_pattern": index_pattern,
+                "time_range": f"过去 {hours} 小时",
+                "error": f"ES 查询异常: {str(e)[:100]}",
+                "fallback_hint": "请使用 search_logs 工具直接查询日志",
+            }, ensure_ascii=False)
 
     async def _tool_compare_time_windows(self, args: dict, tenant_id: str, db_session) -> str:
         """Compare error distributions between two time windows."""
@@ -472,7 +662,9 @@ class ChatService:
         """
         session.add_message("user", user_message)
 
-        current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        # Show Beijing time (UTC+8) to match user's timezone
+        beijing_tz = timezone(timedelta(hours=8))
+        current_time = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M (北京时间)")
         system_prompt = (
             CHAT_SYSTEM_PROMPT
             .replace("{current_time}", current_time)
@@ -531,14 +723,30 @@ class ChatService:
                         })
 
                         # Execute tool with real agent tools
-                        # Resolve index pattern from service_name if available
+                        # Resolve index pattern from service_name or domain arg
                         tool_index = default_index
-                        svc_name = func_args.get("service_name", "")
+                        svc_name = func_args.get("service_name", "") or func_args.get("domain", "")
+                        matched_biz = None
                         if svc_name:
                             for b in biz_lines:
                                 if svc_name.lower() in b.name.lower():
                                     tool_index = b.es_index_pattern
+                                    matched_biz = b
                                     break
+
+                        # For search_logs: inject exact gy.domain if we matched a biz line
+                        # AI often passes imprecise domain like "login" — resolve to exact value
+                        if matched_biz and func_name == "search_logs":
+                            idx_pat = matched_biz.es_index_pattern or ""
+                            if ".gyyx.cn" in idx_pat:
+                                exact_domain = idx_pat.rstrip("*").rstrip("-")
+                                for pfx in ("master-", "develop-", ".ds-master-", ".ds-develop-"):
+                                    if exact_domain.startswith(pfx):
+                                        exact_domain = exact_domain[len(pfx):]
+                                        break
+                                if ".gyyx.cn" in exact_domain:
+                                    exact_domain = exact_domain.split(".gyyx.cn")[0] + ".gyyx.cn"
+                                    func_args["domain"] = exact_domain
 
                         tool_result = await self.execute_tool_call(
                             func_name, func_args, session.tenant_id,

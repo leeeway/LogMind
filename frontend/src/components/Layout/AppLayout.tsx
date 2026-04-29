@@ -25,6 +25,9 @@ import {
   FileTextOutlined,
   TableOutlined,
   RadarChartOutlined,
+  WifiOutlined,
+  AppstoreOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
@@ -39,6 +42,7 @@ const menuItems = [
   { key: '/command-center', icon: <RocketOutlined />, label: '指挥中心' },
   { key: '/', icon: <DashboardOutlined />, label: '总览' },
   { key: '/chat', icon: <MessageOutlined />, label: 'AI 诊断' },
+  { key: '/incidents', icon: <WarningOutlined />, label: '故障作战室' },
   {
     key: 'grp-monitor',
     icon: <RadarChartOutlined />,
@@ -58,6 +62,7 @@ const menuItems = [
       { key: '/analysis', icon: <ExperimentOutlined />, label: '分析中心' },
       { key: '/alerts', icon: <AlertOutlined />, label: '告警管理' },
       { key: '/logs', icon: <FileSearchOutlined />, label: '日志搜索' },
+      { key: '/live-tail', icon: <WifiOutlined />, label: '实时日志流' },
       { key: '/time-travel', icon: <HistoryOutlined />, label: '时光回溯' },
       { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
     ],
@@ -70,6 +75,7 @@ const menuItems = [
       { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
       { key: '/weekly-report', icon: <FileTextOutlined />, label: '巡检周报' },
       { key: '/pivot', icon: <TableOutlined />, label: '透视分析' },
+      { key: '/dashboard-builder', icon: <AppstoreOutlined />, label: '看板编辑器' },
       { key: '/ai-insights', icon: <ThunderboltOutlined />, label: 'AI 洞察' },
     ],
   },
@@ -100,7 +106,10 @@ const breadcrumbMap: Record<string, string> = {
   'weekly-report': '巡检周报',
   pivot: '透视分析',
   patrol: '异常巡逻',
+  'live-tail': '实时日志流',
   'ai-insights': 'AI 洞察',
+  incidents: '故障作战室',
+  'dashboard-builder': '看板编辑器',
   knowledge: '知识库',
   settings: '系统设置',
   compare: '对比分析',
@@ -120,8 +129,8 @@ const AppLayout: React.FC = () => {
   const getOpenKeys = (): string[] => {
     const flatMap: Record<string, string> = {
       '/patrol': 'grp-monitor', '/heatmap': 'grp-monitor', '/topology': 'grp-monitor', '/sla': 'grp-monitor',
-      '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis',
-      '/business-lines': 'grp-ops', '/weekly-report': 'grp-ops', '/pivot': 'grp-ops', '/ai-insights': 'grp-ops',
+      '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/live-tail': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis',
+      '/business-lines': 'grp-ops', '/weekly-report': 'grp-ops', '/pivot': 'grp-ops', '/dashboard-builder': 'grp-ops', '/ai-insights': 'grp-ops',
       '/knowledge': 'grp-system', '/settings': 'grp-system',
     };
     const grp = flatMap[selectedKey];
@@ -277,7 +286,7 @@ const AppLayout: React.FC = () => {
             color: 'var(--lm-text-tertiary)',
             flexShrink: 0,
           }}>
-            <div>LogMind v3.0</div>
+            <div>LogMind v5.0</div>
             <div style={{ opacity: 0.5 }}>AI 智能日志分析平台</div>
           </div>
         )}

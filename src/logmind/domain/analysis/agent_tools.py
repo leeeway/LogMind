@@ -291,7 +291,7 @@ async def _exec_search_logs(args: dict, index_pattern: str, default_from, defaul
         logs.append({
             "timestamp": log.timestamp,
             "level": log.level,
-            "message": mask_sensitive(log.message[:500]),
+            "message": mask_sensitive(log.message[:800]),
             "domain": log.domain,
             "filetype": log.filetype,
         })

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Row, Col, Card, Table, Tag, Select, Spin, Typography, Space, Progress, Tooltip, Button } from 'antd';
+import { Row, Col, Card, Table, Tag, Select, Spin, Typography, Space, Progress, Tooltip, Button, Alert } from 'antd';
 import {
   ExperimentOutlined,
   AlertOutlined,
@@ -20,6 +20,7 @@ import { dashboardApi } from '@/api/dashboard';
 import { usePolling } from '@/hooks/usePolling';
 import RefreshIndicator from '@/components/RefreshIndicator';
 import dayjs from 'dayjs';
+import { useTheme } from '@/hooks/useTheme';
 
 const { Title, Text } = Typography;
 
@@ -33,20 +34,41 @@ const severityColors: Record<string, string> = {
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   const [days, setDays] = useState(7);
+  const [autoEscalated, setAutoEscalated] = useState(false);
+  const { isDark } = useTheme();
 
   const fetcher = useCallback(async () => {
-    const [ovRes, trRes, hlRes, coRes] = await Promise.all([
-      dashboardApi.getOverview(days),
-      dashboardApi.getTrends(days),
-      dashboardApi.getBusinessHealth(days),
-      dashboardApi.getCostAnalysis(days),
-    ]);
-    return {
-      overview: ovRes.data,
-      trends: trRes.data,
-      health: hlRes.data,
-      cost: coRes.data,
+    const fetchAll = async (d: number) => {
+      const [ovRes, trRes, hlRes, coRes] = await Promise.all([
+        dashboardApi.getOverview(d),
+        dashboardApi.getTrends(d),
+        dashboardApi.getBusinessHealth(d),
+        dashboardApi.getCostAnalysis(d),
+      ]);
+      return {
+        overview: ovRes.data,
+        trends: trRes.data,
+        health: hlRes.data,
+        cost: coRes.data,
+      };
     };
+
+    let result = await fetchAll(days);
+
+    // Auto-escalate: if 7d returns zero tasks, try broader range
+    if (
+      days <= 7 &&
+      result.overview?.total_tasks === 0 &&
+      result.overview?.recent_tasks?.length > 0
+    ) {
+      // Data exists but outside the time window — auto-widen to 30d
+      result = await fetchAll(30);
+      setAutoEscalated(true);
+    } else {
+      setAutoEscalated(false);
+    }
+
+    return result;
   }, [days]);
 
   const { data, loading, lastUpdated, secondsUntilRefresh, refresh } = usePolling(fetcher, {
@@ -135,6 +157,25 @@ const Dashboard: React.FC = () => {
         </Space>
       </div>
 
+      {/* Auto-escalation hint */}
+      {autoEscalated && (
+        <Alert
+          type="info"
+          showIcon
+          closable
+          banner
+          style={{ marginBottom: 16, borderRadius: 8 }}
+          message={
+            <span>
+              最近 7 天暂无分析数据，已自动展示最近 30 天数据。
+              <Button type="link" size="small" onClick={() => setDays(30)} style={{ padding: '0 4px' }}>
+                切换为 30 天
+              </Button>
+            </span>
+          }
+        />
+      )}
+
       {/* Quick Action Bar */}
       <div style={{
         display: 'flex', gap: 12, marginBottom: 20, padding: '12px 16px',
@@ -195,7 +236,7 @@ const Dashboard: React.FC = () => {
           <div className="lm-stat-card">
             <Space><RiseOutlined className="stat-icon" style={{ color: '#eb2f96' }} /><span className="stat-label">完成率</span></Space>
             <div className="stat-value" style={{ color: '#eb2f96' }}>{completionRate}%</div>
-            <Progress percent={Number(completionRate)} showInfo={false} strokeColor="#eb2f96" railColor="rgba(255,255,255,0.06)" size="small" />
+            <Progress percent={Number(completionRate)} showInfo={false} strokeColor="#eb2f96" railColor={isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'} size="small" />
           </div>
         </Col>
       </Row>
@@ -208,7 +249,7 @@ const Dashboard: React.FC = () => {
             styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
             {trendData.length > 0 ? (
               <Line data={trendData} xField="time" yField="value" seriesField="type" height={260} smooth
-                color={['#1677ff', '#ff4d4f', '#722ed1']} point={{ size: 2 }} theme="classicDark"
+                color={['#1677ff', '#ff4d4f', '#722ed1']} point={{ size: 2 }} theme={isDark ? 'classicDark' : 'classic'}
                 area={{ style: { fillOpacity: 0.08 } }}
                 animation={{ appear: { animation: 'wave-in', duration: 800 } }} />
             ) : (
@@ -223,11 +264,11 @@ const Dashboard: React.FC = () => {
             {severityData.length > 0 ? (
               <Pie data={severityData} angleField="value" colorField="type" height={260} innerRadius={0.65}
                 color={({ type }: any) => severityColors[type] || '#8c8c8c'}
-                label={{ text: 'type', style: { fontSize: 12, fill: 'rgba(255,255,255,0.6)' } }}
-                legend={false} theme="classicDark"
+                label={{ text: 'type', style: { fontSize: 12, fill: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.65)' } }}
+                legend={false} theme={isDark ? 'classicDark' : 'classic'}
                 statistic={{
-                  title: { style: { color: 'rgba(255,255,255,0.45)', fontSize: '12px' }, content: '总计' },
-                  content: { style: { color: 'rgba(255,255,255,0.88)', fontSize: '20px' } },
+                  title: { style: { color: isDark ? 'rgba(255,255,255,0.45)' : 'rgba(0,0,0,0.45)', fontSize: '12px' }, content: '总计' },
+                  content: { style: { color: isDark ? 'rgba(255,255,255,0.88)' : 'rgba(0,0,0,0.88)', fontSize: '20px' } },
                 }} />
             ) : (
               <div style={{ textAlign: 'center', padding: 60, color: 'var(--lm-text-tertiary)' }}>暂无数据</div>
@@ -263,7 +304,7 @@ const Dashboard: React.FC = () => {
                         <Text ellipsis style={{ maxWidth: 120, color: 'var(--lm-text)', fontSize: 13 }}>{biz.business_line_name}</Text>
                         <Tag color={color} style={{ borderRadius: 4, margin: 0, fontSize: 11 }}>{successPct}%</Tag>
                       </div>
-                      <Progress percent={successPct} showInfo={false} strokeColor={color} railColor="rgba(255,255,255,0.06)" size="small" />
+                      <Progress percent={successPct} showInfo={false} strokeColor={color} railColor={isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'} size="small" />
                       <div style={{ marginTop: 3, fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
                         {biz.total_tasks || 0} 任务 · {errorCount} 异常 · {(biz.total_logs || 0).toLocaleString()} 日志
                       </div>
@@ -323,7 +364,7 @@ const Dashboard: React.FC = () => {
                       <Tooltip key={i} title={`${step.label}: ${step.value} 个任务 (${step.pct.toFixed(1)}%)`}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                           <span style={{ width: 100, fontSize: 12, color: 'var(--lm-text-secondary)', textAlign: 'right', flexShrink: 0 }}>{step.label}</span>
-                          <div style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 4, height: 22, overflow: 'hidden' }}>
+                          <div style={{ flex: 1, background: 'var(--lm-bg-elevated)', borderRadius: 4, height: 22, overflow: 'hidden' }}>
                             <div style={{
                               width: `${Math.max(step.pct, 2)}%`,
                               height: '100%',
@@ -353,7 +394,7 @@ const Dashboard: React.FC = () => {
                       return (
                         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <Text ellipsis style={{ width: 80, fontSize: 11, color: 'var(--lm-text-tertiary)' }}>{b.business_line_name}</Text>
-                          <div style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 3, height: 14, overflow: 'hidden' }}>
+                          <div style={{ flex: 1, background: 'var(--lm-bg-elevated)', borderRadius: 3, height: 14, overflow: 'hidden' }}>
                             <div style={{
                               width: `${pct}%`, height: '100%',
                               background: 'linear-gradient(90deg, #722ed1, #1677ff)',

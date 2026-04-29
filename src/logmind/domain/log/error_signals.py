@@ -247,18 +247,37 @@ async def load_learned_signals() -> list[str]:
 
     Quality gate: only signals with confidence >= 0.7 are loaded.
     This prevents one-off false positives from polluting the registry.
+
+    Handles 403 (no permission) gracefully — caches empty result and
+    logs only once to avoid spamming warnings.
     """
     global _learned_cache, _cache_ts
 
     now = time.monotonic()
-    if _learned_cache and (now - _cache_ts) < _CACHE_TTL:
+    if (now - _cache_ts) < _CACHE_TTL:
         return _learned_cache
 
     try:
         from logmind.domain.log.service import log_service
 
         es = log_service.es
-        exists = await es.indices.exists(index=_LEARNED_SIGNALS_INDEX)
+
+        try:
+            exists = await es.indices.exists(index=_LEARNED_SIGNALS_INDEX)
+        except Exception as check_err:
+            # 403 or other auth error — index not accessible
+            err_str = str(check_err)
+            if "403" in err_str or "Authorization" in err_str:
+                logger.info(
+                    "learned_signals_index_not_accessible",
+                    hint="ES user lacks permission for logmind-learned-signals index. Using static signals only.",
+                )
+            else:
+                logger.warning("learned_signals_check_failed", error=err_str[:100])
+            _learned_cache = []
+            _cache_ts = now
+            return []
+
         if not exists:
             _learned_cache = []
             _cache_ts = now
@@ -295,7 +314,9 @@ async def load_learned_signals() -> list[str]:
         return signals
 
     except Exception as e:
-        logger.warning("learned_signals_load_failed", error=str(e))
+        logger.warning("learned_signals_load_failed", error=str(e)[:100])
+        # Cache the failure for TTL to avoid retrying too often
+        _cache_ts = now
         return _learned_cache  # Return stale cache on error
 
 

@@ -10,6 +10,7 @@ import { businessLineApi } from '@/api/services';
 import { analysisApi } from '@/api/analysis';
 import { dashboardApi } from '@/api/dashboard';
 import { knownIssuesApi } from '@/api/knownIssues';
+import { useTheme } from '@/hooks/useTheme';
 import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
@@ -30,6 +31,7 @@ const BusinessLineDetail: React.FC = () => {
   const [tasks, setTasks] = useState<any[]>([]);
   const [trendData, setTrendData] = useState<any[]>([]);
   const [issues, setIssues] = useState<any[]>([]);
+  const { isDark } = useTheme();
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -149,7 +151,7 @@ const BusinessLineDetail: React.FC = () => {
                 data={trendData}
                 xField="time" yField="value"
                 height={180} smooth
-                color="#1677ff" theme="classicDark"
+                color="#1677ff" theme={isDark ? 'classicDark' : 'classic'}
                 area={{ style: { fillOpacity: 0.1 } }}
                 point={{ size: 3 }}
               />

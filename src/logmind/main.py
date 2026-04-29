@@ -213,11 +213,20 @@ def _register_routes(app: FastAPI):
     api_router.include_router(pivot_router)
     api_router.include_router(patrol_router)
 
+    from logmind.domain.incident.router import router as incident_router
+    api_router.include_router(incident_router)
+
+    from logmind.domain.dashboard.builder_router import router as builder_router
+    api_router.include_router(builder_router)
+
     app.include_router(api_router)
 
-    # ── WebSocket Endpoint ───────────────────────────────
+    # ── WebSocket Endpoints ──────────────────────────────
     from logmind.core.websocket import websocket_endpoint
     app.add_api_websocket_route("/ws/events", websocket_endpoint)
+
+    from logmind.domain.log.live_tail import live_tail_endpoint
+    app.add_api_websocket_route("/ws/logs/live", live_tail_endpoint)
 
     # ── Frontend Static Files (SPA) ──────────────────────
     # Only serve frontend in production (Docker).

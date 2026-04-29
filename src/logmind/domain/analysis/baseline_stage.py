@@ -143,7 +143,7 @@ class ErrorBaselineStage(PipelineStage):
             ]
             filetype_values = _SEVERITY_FILETYPE_MAP.get(severity.lower(), [])
             for ft in filetype_values:
-                severity_should.append({"term": {"gy.filetype": ft}})
+                severity_should.append({"term": {"gy.filetype.keyword": ft}})
             # Add message-level error indicators
             severity_should.extend([
                 {"match_phrase": {"message": "[ERROR]"}},
