@@ -231,6 +231,18 @@ def _register_routes(app: FastAPI):
     from logmind.domain.oncall.router import router as oncall_router
     api_router.include_router(oncall_router)
 
+    from logmind.domain.analysis.error_dna_router import router as error_dna_router
+    api_router.include_router(error_dna_router)
+
+    from logmind.domain.dashboard.fatigue_router import router as fatigue_router
+    api_router.include_router(fatigue_router)
+
+    from logmind.domain.dashboard.correlation_router import router as correlation_router
+    api_router.include_router(correlation_router)
+
+    from logmind.domain.dashboard.mttr_router import router as mttr_router
+    api_router.include_router(mttr_router)
+
     app.include_router(api_router)
 
     # ── WebSocket Endpoints ──────────────────────────────

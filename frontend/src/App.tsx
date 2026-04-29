@@ -34,6 +34,10 @@ import RootCauseGraph from '@/pages/Analysis/RootCauseGraph';
 import DailyStandup from '@/pages/Dashboard/DailyStandup';
 import ChangeTimeline from '@/pages/Changes/ChangeTimeline';
 import OnCallSchedule from '@/pages/OnCall/Schedule';
+import ErrorDNA from '@/pages/Analysis/ErrorDNA';
+import AlertFatigue from '@/pages/Dashboard/AlertFatigue';
+import CorrelationMatrix from '@/pages/Dashboard/CorrelationMatrix';
+import MTTRHealth from '@/pages/Dashboard/MTTRHealth';
 import { QuickDiagnoseProvider } from '@/components/QuickDiagnose';
 
 // Hydrate auth synchronously on module load — before any component renders
@@ -132,6 +136,10 @@ const App: React.FC = () => {
               <Route path="daily-standup" element={<DailyStandup />} />
               <Route path="changes" element={<ChangeTimeline />} />
               <Route path="oncall" element={<OnCallSchedule />} />
+              <Route path="error-dna" element={<ErrorDNA />} />
+              <Route path="alert-fatigue" element={<AlertFatigue />} />
+              <Route path="correlation" element={<CorrelationMatrix />} />
+              <Route path="mttr" element={<MTTRHealth />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           </Routes>

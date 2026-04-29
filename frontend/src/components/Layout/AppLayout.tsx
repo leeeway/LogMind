@@ -31,6 +31,8 @@ import {
   DeploymentUnitOutlined,
   CalendarOutlined,
   TeamOutlined,
+  SoundOutlined,
+  MedicineBoxOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
@@ -55,6 +57,9 @@ const menuItems = [
       { key: '/heatmap', icon: <HeatMapOutlined />, label: '错误热力图' },
       { key: '/topology', icon: <ApartmentOutlined />, label: '服务拓扑' },
       { key: '/sla', icon: <SafetyCertificateOutlined />, label: 'SLA 监控' },
+      { key: '/correlation', icon: <ApartmentOutlined />, label: '故障关联' },
+      { key: '/alert-fatigue', icon: <SoundOutlined />, label: '告警疲劳' },
+      { key: '/mttr', icon: <MedicineBoxOutlined />, label: 'MTTR 健康' },
     ],
   },
   {
@@ -68,6 +73,7 @@ const menuItems = [
       { key: '/live-tail', icon: <WifiOutlined />, label: '实时日志流' },
       { key: '/time-travel', icon: <HistoryOutlined />, label: '时光回溯' },
       { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
+      { key: '/error-dna', icon: <ExperimentOutlined />, label: '错误 DNA' },
     ],
   },
   {
@@ -119,6 +125,10 @@ const breadcrumbMap: Record<string, string> = {
   knowledge: '知识库',
   settings: '系统设置',
   compare: '对比分析',
+  'error-dna': '错误 DNA',
+  'alert-fatigue': '告警疲劳',
+  correlation: '故障关联',
+  mttr: 'MTTR 健康',
 };
 
 const AppLayout: React.FC = () => {
@@ -134,8 +144,8 @@ const AppLayout: React.FC = () => {
   // Determine which sub-menu should be open based on current path
   const getOpenKeys = (): string[] => {
     const flatMap: Record<string, string> = {
-      '/patrol': 'grp-monitor', '/heatmap': 'grp-monitor', '/topology': 'grp-monitor', '/sla': 'grp-monitor',
-      '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/live-tail': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis',
+      '/patrol': 'grp-monitor', '/heatmap': 'grp-monitor', '/topology': 'grp-monitor', '/sla': 'grp-monitor', '/correlation': 'grp-monitor', '/alert-fatigue': 'grp-monitor', '/mttr': 'grp-monitor',
+      '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/live-tail': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis', '/error-dna': 'grp-analysis',
       '/business-lines': 'grp-ops', '/weekly-report': 'grp-ops', '/pivot': 'grp-ops', '/dashboard-builder': 'grp-ops', '/ai-insights': 'grp-ops',
       '/knowledge': 'grp-system', '/settings': 'grp-system',
     };
