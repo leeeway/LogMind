@@ -111,6 +111,7 @@ class BusinessLineUpdate(BaseModel):
     ai_enabled: bool | None = None
     webhook_url: str | None = None
     is_active: bool | None = None
+    auto_remediation_config: str | None = None
 
 
 class BusinessLineResponse(BaseSchema):
@@ -124,6 +125,7 @@ class BusinessLineResponse(BaseSchema):
     field_mapping: dict = Field(default_factory=dict)
     ai_enabled: bool = True
     webhook_url: str = ""
+    auto_remediation_config: str = "{}"
     is_active: bool
     created_at: datetime
 

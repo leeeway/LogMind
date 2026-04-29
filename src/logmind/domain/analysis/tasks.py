@@ -612,6 +612,34 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
             except Exception as e:
                 logger.error("auto_incident_create_failed", error=str(e))
 
+        # ── Runbook Auto-Remediation ─────────────────────────
+        if priority in ("P0", "P1"):
+            try:
+                from logmind.domain.alert.runbook_executor import runbook_executor
+                from logmind.core.database import get_db_context as _get_db
+                from logmind.domain.tenant.models import BusinessLine
+
+                async with _get_db() as session:
+                    biz = await session.get(BusinessLine, ctx.business_line_id)
+                    if biz and biz.auto_remediation_config and biz.auto_remediation_config != "{}":
+                        rb_result = await runbook_executor.execute(
+                            config_json=biz.auto_remediation_config,
+                            priority=priority,
+                            alert_message=content[:500],
+                            service_name=ctx.business_line_name,
+                            task_id=task_id,
+                        )
+                        if rb_result.executed:
+                            logger.info(
+                                "runbook_executed",
+                                summary=rb_result.summary,
+                                priority=priority,
+                                service=ctx.business_line_name,
+                                task_id=task_id,
+                            )
+            except Exception as e:
+                logger.warning("runbook_execution_failed", error=str(e))
+
 
 async def _send_error_log_notification(ctx, webhook_url: str):
     """Send direct error log notification (AI disabled mode), with aggregation."""

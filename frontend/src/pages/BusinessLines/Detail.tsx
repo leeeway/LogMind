@@ -3,7 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Card, Typography, Space, Button, Spin, Descriptions, Tag, Table, Row, Col, Switch, Tooltip, message } from 'antd';
 import {
   ArrowLeftOutlined, ClusterOutlined, ExperimentOutlined, EditOutlined,
-  ClockCircleOutlined, BugOutlined, RiseOutlined,
+  ClockCircleOutlined, BugOutlined, RiseOutlined, ToolOutlined,
+  SaveOutlined, UndoOutlined,
 } from '@ant-design/icons';
 import { Line } from '@ant-design/charts';
 import { businessLineApi } from '@/api/services';
@@ -31,6 +32,9 @@ const BusinessLineDetail: React.FC = () => {
   const [tasks, setTasks] = useState<any[]>([]);
   const [trendData, setTrendData] = useState<any[]>([]);
   const [issues, setIssues] = useState<any[]>([]);
+  const [runbookConfig, setRunbookConfig] = useState('');
+  const [runbookEditing, setRunbookEditing] = useState(false);
+  const [runbookSaving, setRunbookSaving] = useState(false);
   const { isDark } = useTheme();
 
   const load = useCallback(async () => {
@@ -135,6 +139,138 @@ const BusinessLineDetail: React.FC = () => {
           <Descriptions.Item label="状态"><Tag color={biz.is_active ? '#52c41a' : '#8c8c8c'}>{biz.is_active ? '启用' : '禁用'}</Tag></Descriptions.Item>
           {biz.description && <Descriptions.Item label="描述" span={2}>{biz.description}</Descriptions.Item>}
         </Descriptions>
+      </Card>
+
+      {/* Runbook Auto-Remediation Config */}
+      <Card
+        size="small"
+        title={<Space><ToolOutlined /> 自动修复 Runbook</Space>}
+        extra={
+          runbookEditing ? (
+            <Space>
+              <Button
+                size="small" icon={<UndoOutlined />}
+                onClick={() => {
+                  setRunbookConfig(biz.auto_remediation_config || '{}');
+                  setRunbookEditing(false);
+                }}
+              >取消</Button>
+              <Button
+                size="small" type="primary" icon={<SaveOutlined />}
+                loading={runbookSaving}
+                onClick={async () => {
+                  try {
+                    JSON.parse(runbookConfig);
+                    setRunbookSaving(true);
+                    await businessLineApi.update(biz.id, { auto_remediation_config: runbookConfig });
+                    message.success('Runbook 配置已保存');
+                    setRunbookEditing(false);
+                    load();
+                  } catch (e: any) {
+                    message.error('JSON 格式错误: ' + e.message);
+                  } finally {
+                    setRunbookSaving(false);
+                  }
+                }}
+              >保存</Button>
+            </Space>
+          ) : (
+            <Button size="small" icon={<EditOutlined />} onClick={() => {
+              setRunbookConfig(biz.auto_remediation_config || '{"actions": []}');
+              setRunbookEditing(true);
+            }}>编辑</Button>
+          )
+        }
+        style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12, marginBottom: 16 }}
+        styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+      >
+        {runbookEditing ? (
+          <div>
+            <textarea
+              value={runbookConfig}
+              onChange={(e) => setRunbookConfig(e.target.value)}
+              style={{
+                width: '100%', minHeight: 160, fontFamily: 'monospace', fontSize: 12,
+                background: 'var(--lm-bg-elevated)', color: 'var(--lm-text)',
+                border: '1px solid var(--lm-border-light)', borderRadius: 8,
+                padding: 12, resize: 'vertical',
+              }}
+            />
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>快速模板：</Text>
+              <Button size="small" type="dashed" onClick={() => setRunbookConfig(JSON.stringify({
+                actions: [{
+                  name: '钉钉升级通知',
+                  type: 'webhook',
+                  url: 'https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN',
+                  trigger_on: ['P0'],
+                  cooldown_minutes: 30,
+                  body: { msgtype: 'text', text: { content: '🔧 [Runbook] {{service_name}}: {{alert_message}}' } },
+                }],
+              }, null, 2))}>钉钉通知</Button>
+              <Button size="small" type="dashed" onClick={() => setRunbookConfig(JSON.stringify({
+                actions: [{
+                  name: '飞书升级通知',
+                  type: 'webhook',
+                  url: 'https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_HOOK',
+                  trigger_on: ['P0', 'P1'],
+                  cooldown_minutes: 15,
+                  body: { msg_type: 'text', content: { text: '🔧 [Runbook] {{service_name}}: {{alert_message}}' } },
+                }],
+              }, null, 2))}>飞书通知</Button>
+              <Button size="small" type="dashed" onClick={() => setRunbookConfig(JSON.stringify({
+                actions: [{
+                  name: 'CI/CD 重启',
+                  type: 'webhook',
+                  method: 'POST',
+                  url: 'https://ci.example.com/api/restart',
+                  headers: { Authorization: 'Bearer YOUR_TOKEN' },
+                  trigger_on: ['P0'],
+                  cooldown_minutes: 60,
+                  body: { service: '{{service_name}}', reason: '{{alert_message}}' },
+                }],
+              }, null, 2))}>CI 重启</Button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            {biz.auto_remediation_config && biz.auto_remediation_config !== '{}' ? (
+              <div>
+                {(() => {
+                  try {
+                    const config = JSON.parse(biz.auto_remediation_config);
+                    const actions = config.actions || [];
+                    return actions.length > 0 ? (
+                      <Space direction="vertical" style={{ width: '100%' }}>
+                        {actions.map((a: any, i: number) => (
+                          <div key={i} style={{
+                            padding: '8px 12px', background: 'var(--lm-bg-elevated)',
+                            borderRadius: 8, border: '1px solid var(--lm-border-light)',
+                          }}>
+                            <Space>
+                              <ToolOutlined style={{ color: '#722ed1' }} />
+                              <Text strong>{a.name}</Text>
+                              {(a.trigger_on || []).map((p: string) => (
+                                <Tag key={p} color={p === 'P0' ? '#ff4d4f' : p === 'P1' ? '#faad14' : '#1677ff'}>{p}</Tag>
+                              ))}
+                              <Text type="secondary" style={{ fontSize: 11 }}>
+                                冷却 {a.cooldown_minutes || 10} 分钟
+                              </Text>
+                            </Space>
+                          </div>
+                        ))}
+                      </Space>
+                    ) : <Text type="secondary">无配置动作</Text>;
+                  } catch { return <Text type="secondary">配置格式异常</Text>; }
+                })()}
+              </div>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                未配置自动修复。点击「编辑」添加 Runbook，P0/P1 告警时将自动执行预设动作。
+              </Text>
+            )}
+          </div>
+        )}
       </Card>
 
       <Row gutter={[16, 16]}>
