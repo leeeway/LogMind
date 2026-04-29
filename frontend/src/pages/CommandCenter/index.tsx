@@ -3,7 +3,8 @@ import { Typography, Space, Tag, Button, Tooltip } from 'antd';
 import {
   FullscreenOutlined, FullscreenExitOutlined, ReloadOutlined,
   AlertOutlined, CheckCircleOutlined, ClockCircleOutlined,
-  ThunderboltOutlined, RocketOutlined,
+  ThunderboltOutlined, RocketOutlined, FireOutlined,
+  RadarChartOutlined, CloudOutlined,
 } from '@ant-design/icons';
 import { dashboardApi } from '@/api/dashboard';
 import dayjs from 'dayjs';
@@ -319,18 +320,21 @@ const CommandCenter: React.FC = () => {
         </Space>
       </div>
 
-      {/* ── KPI Row ─────────────────────────────── */}
+      {/* ── KPI Row ───────────────────────────────── */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(4, 1fr)',
-        gap: 12,
-        padding: '12px 24px',
+        gridTemplateColumns: 'repeat(7, 1fr)',
+        gap: 10,
+        padding: '10px 24px',
       }}>
         {[
           { label: 'CRITICAL', value: criticalCount, icon: <AlertOutlined />, color: COLORS.red, pulse: criticalCount > 0 },
           { label: 'WARNING', value: warningCount, icon: <ThunderboltOutlined />, color: COLORS.orange, pulse: false },
           { label: 'HEALTHY', value: `${healthyCount}/${totalServices}`, icon: <CheckCircleOutlined />, color: COLORS.green, pulse: false },
-          { label: 'TASKS TODAY', value: overview?.total_tasks || 0, icon: <ClockCircleOutlined />, color: COLORS.blue, pulse: false },
+          { label: 'TASKS', value: overview?.total_tasks || 0, icon: <ClockCircleOutlined />, color: COLORS.blue, pulse: false },
+          { label: 'INCIDENTS', value: overview?.active_incidents || 0, icon: <FireOutlined />, color: overview?.active_incidents > 0 ? COLORS.red : COLORS.purple, pulse: (overview?.active_incidents || 0) > 0 },
+          { label: 'ANOMALIES', value: overview?.today_anomalies || 0, icon: <RadarChartOutlined />, color: COLORS.orange, pulse: false },
+          { label: 'STORMS', value: overview?.storm_count || 0, icon: <CloudOutlined />, color: COLORS.blue, pulse: false },
         ].map((kpi, i) => (
           <div
             key={i}
@@ -338,32 +342,69 @@ const CommandCenter: React.FC = () => {
               background: COLORS.card,
               border: `1px solid ${kpi.pulse ? kpi.color + '60' : COLORS.border}`,
               borderRadius: 8,
-              padding: '12px 16px',
+              padding: '10px 12px',
               display: 'flex',
               alignItems: 'center',
-              gap: 12,
+              gap: 10,
               animation: kpi.pulse ? 'lm-pulse 1.5s infinite' : undefined,
             }}
           >
             <div style={{
-              width: 40, height: 40, borderRadius: 8,
+              width: 36, height: 36, borderRadius: 8,
               background: kpi.color + '15',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 18, color: kpi.color,
+              fontSize: 16, color: kpi.color,
             }}>
               {kpi.icon}
             </div>
             <div>
-              <div style={{ fontSize: 24, fontWeight: 700, fontFamily: 'monospace', color: kpi.color, lineHeight: 1 }}>
+              <div style={{ fontSize: 20, fontWeight: 700, fontFamily: 'monospace', color: kpi.color, lineHeight: 1 }}>
                 {kpi.value}
               </div>
-              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', letterSpacing: 1.5, marginTop: 2 }}>
+              <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.4)', letterSpacing: 1.5, marginTop: 2 }}>
                 {kpi.label}
               </div>
             </div>
           </div>
         ))}
       </div>
+
+      {/* ── AI Insight Bar ─────────────────────── */}
+      {overview?.ai_insight && (
+        <div style={{
+          padding: '0 24px 8px',
+        }}>
+          <div style={{
+            background: 'linear-gradient(90deg, rgba(114,46,209,0.12), rgba(22,119,255,0.08))',
+            border: `1px solid rgba(114,46,209,0.25)`,
+            borderRadius: 8,
+            padding: '8px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            overflow: 'hidden',
+          }}>
+            <span style={{ fontSize: 14, flexShrink: 0 }}>🤖</span>
+            <span style={{
+              fontSize: 11, color: 'rgba(255,255,255,0.7)', letterSpacing: 0.5,
+              fontWeight: 500, whiteSpace: 'nowrap',
+            }}>
+              AI INSIGHT
+            </span>
+            <span style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.1)', flexShrink: 0 }} />
+            <div style={{
+              flex: 1, overflow: 'hidden', position: 'relative',
+            }}>
+              <div style={{
+                fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap',
+                animation: overview.ai_insight.length > 80 ? 'lm-scroll-left 20s linear infinite' : undefined,
+              }}>
+                {overview.ai_insight}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Main Grid ───────────────────────────── */}
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 340px', gap: 12, padding: '0 24px 12px', minHeight: 0 }}>
@@ -465,6 +506,14 @@ const CommandCenter: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Scroll animation for AI insight */}
+      <style>{`
+        @keyframes lm-scroll-left {
+          0% { transform: translateX(0); }
+          100% { transform: translateX(-50%); }
+        }
+      `}</style>
     </div>
   );
 };

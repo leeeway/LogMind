@@ -108,11 +108,12 @@ def patrol_single_business_line(business_line_id: str):
 
 
 async def _patrol_single(business_line_id: str):
-    """Execute patrol for one business line: create task → dispatch analysis."""
+    """Execute patrol for one business line: anomaly check → create task if needed."""
     from logmind.core.config import get_settings
     from logmind.core.database import get_db_context
     from logmind.domain.analysis.models import LogAnalysisTask
     from logmind.domain.analysis.tasks import run_analysis_task
+    from logmind.domain.anomaly.detector import anomaly_detector
     from logmind.domain.tenant.models import BusinessLine
 
     settings = get_settings()
@@ -124,7 +125,32 @@ async def _patrol_single(business_line_id: str):
             logger.warning("patrol_biz_not_found_or_inactive", biz_id=business_line_id)
             return
 
-        # Create patrol task
+        # ── Anomaly Detection Pre-filter ─────────────────
+        anomaly = await anomaly_detector.detect(
+            index_pattern=biz.es_index_pattern,
+            window_minutes=settings.analysis_cooldown_minutes,
+        )
+
+        if not anomaly.is_anomaly:
+            logger.info(
+                "patrol_skipped_no_anomaly",
+                business_line=biz.name,
+                z_score=anomaly.z_score,
+                current_errors=anomaly.current_errors,
+                baseline_mean=anomaly.baseline_mean,
+            )
+            return  # No anomaly → skip expensive AI analysis
+
+        logger.info(
+            "patrol_anomaly_triggered",
+            business_line=biz.name,
+            level=anomaly.level,
+            z_score=anomaly.z_score,
+            current_errors=anomaly.current_errors,
+            detail=anomaly.detail,
+        )
+
+        # Create patrol task with anomaly metadata
         task = LogAnalysisTask(
             tenant_id=biz.tenant_id,
             business_line_id=biz.id,
@@ -143,4 +169,6 @@ async def _patrol_single(business_line_id: str):
             "patrol_task_created",
             business_line=biz.name,
             task_id=task.id,
+            anomaly_level=anomaly.level,
+            z_score=anomaly.z_score,
         )

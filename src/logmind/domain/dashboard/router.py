@@ -105,6 +105,11 @@ class DashboardOverview(BaseSchema):
     total_business_lines: int
     recent_tasks: list[RecentTask]
     severity_distribution: list[SeverityCount]
+    # Command center enhanced fields
+    active_incidents: int = 0
+    today_anomalies: int = 0
+    storm_count: int = 0
+    ai_insight: str = ""
 
 
 @router.get("/overview", response_model=DashboardOverview)
@@ -191,6 +196,48 @@ async def get_dashboard_overview(
     )
     sev_rows = (await session.execute(sev_stmt)).all()
 
+    # ── Command Center: active incidents ──────────────
+    from logmind.domain.incident import Incident
+    active_inc_stmt = (
+        select(func.count())
+        .select_from(Incident)
+        .where(
+            Incident.tenant_id == tenant_id,
+            Incident.status.in_(["investigating", "identified", "monitoring"]),
+        )
+    )
+    active_incidents = (await session.execute(active_inc_stmt)).scalar_one()
+
+    # ── Command Center: today's anomalies (scheduled tasks = triggered by anomaly) ──
+    from datetime import datetime as _dt, timezone as _tz
+    today_start = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    anomaly_stmt = (
+        select(func.count())
+        .select_from(LogAnalysisTask)
+        .where(
+            LogAnalysisTask.tenant_id == tenant_id,
+            LogAnalysisTask.task_type == "scheduled",
+            LogAnalysisTask.created_at >= today_start,
+        )
+    )
+    today_anomalies = (await session.execute(anomaly_stmt)).scalar_one()
+
+    # ── Command Center: AI insight (latest critical alert) ──
+    ai_insight = ""
+    latest_critical_stmt = (
+        select(AlertHistory.message)
+        .where(
+            AlertHistory.tenant_id == tenant_id,
+            AlertHistory.severity.in_(["critical", "error"]),
+            AlertHistory.fired_at >= today_start,
+        )
+        .order_by(AlertHistory.fired_at.desc())
+        .limit(1)
+    )
+    latest_msg = (await session.execute(latest_critical_stmt)).scalar_one_or_none()
+    if latest_msg:
+        ai_insight = latest_msg[:200]
+
     return DashboardOverview(
         total_tasks=counts.total,
         completed_tasks=counts.completed,
@@ -203,6 +250,10 @@ async def get_dashboard_overview(
             SeverityCount(severity=r.severity, count=r.count)
             for r in sev_rows
         ],
+        active_incidents=active_incidents,
+        today_anomalies=today_anomalies,
+        storm_count=0,  # Populated from in-memory storm detector (process-local)
+        ai_insight=ai_insight,
     )
 
 

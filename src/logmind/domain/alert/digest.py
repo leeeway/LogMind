@@ -215,6 +215,30 @@ async def _build_tenant_digest(
             "",
         ])
 
+    # ── AI-Powered Insights ──────────────────────────────
+    try:
+        ai_insight = await _generate_digest_ai_insight(
+            tenant_id=tenant_id,
+            session=session,
+            period_label=period_label,
+            total_tasks=total_tasks,
+            completed=completed,
+            failed=failed,
+            total_logs=total_logs,
+            total_tokens=total_tokens,
+            biz_stats=biz_stats,
+            critical_count=len(critical_results),
+        )
+        if ai_insight:
+            lines.extend([
+                "### 🤖 AI 智能洞察",
+                "",
+                ai_insight,
+                "",
+            ])
+    except Exception as e:
+        logger.warning("digest_ai_insight_failed", error=str(e))
+
     lines.append("---")
     lines.append("> 📱 登录 LogMind 平台查看完整分析历史和趋势图表。")
 
@@ -248,3 +272,79 @@ async def _send_digest_webhook(tenant_id: str, report: str, session):
             logger.info("digest_webhook_sent", url=url[:50])
         except Exception as e:
             logger.warning("digest_webhook_failed", url=url[:50], error=str(e))
+
+
+async def _generate_digest_ai_insight(
+    tenant_id: str,
+    session,
+    period_label: str,
+    total_tasks: int,
+    completed: int,
+    failed: int,
+    total_logs: int,
+    total_tokens: int,
+    biz_stats: list[dict],
+    critical_count: int,
+) -> str | None:
+    """
+    Generate AI-powered insights for the digest report.
+
+    Provides: trend interpretation, risk warnings, and actionable advice.
+    Returns None if AI is unavailable (graceful degradation).
+    """
+    from logmind.domain.provider.base import ChatMessage, ChatRequest
+    from logmind.domain.provider.manager import provider_manager
+
+    try:
+        provider = await provider_manager.get_provider(session, tenant_id)
+        if not provider:
+            return None
+    except Exception:
+        return None
+
+    # Build context for AI
+    biz_summary = "\n".join(
+        f"  - {b['name']}: {b['tasks']}次分析, {b['logs']}条日志, {b['failed']}次失败"
+        for b in biz_stats[:8]
+    )
+
+    success_rate = round(completed / max(total_tasks, 1) * 100, 1)
+
+    prompt = f"""你是 LogMind 运维分析专家。基于以下{period_label}统计数据，生成 3-5 条精炼洞察。
+
+## 统计数据
+- 分析任务: {total_tasks}次（成功{completed}, 失败{failed}, 成功率{success_rate}%）
+- 分析日志: {total_logs:,}条
+- Token 消耗: {total_tokens:,}
+- 严重问题: {critical_count}个
+- 业务线概况:
+{biz_summary}
+
+## 输出要求（直接输出，不要标题前缀）
+1. **趋势解读**: 整体运维健康度判断（一句话）
+2. **风险预警**: 哪些业务线需要重点关注（如失败率高、错误量大）
+3. **改进建议**: 1-2 条可操作的建议
+4. 每条洞察用简洁的一行表达，用 emoji 前缀区分类型
+5. 总字数控制在 200 字以内"""
+
+    try:
+        request = ChatRequest(
+            messages=[
+                ChatMessage(role="system", content="你是运维分析专家，擅长从数据中提取可操作洞察。"),
+                ChatMessage(role="user", content=prompt),
+            ],
+            temperature=0.3,
+            max_tokens=500,
+        )
+        response = await provider.chat(request)
+        insight = response.content.strip()
+
+        if len(insight) > 20:  # Sanity check
+            logger.info("digest_ai_insight_generated", tenant_id=tenant_id)
+            return insight
+
+    except Exception as e:
+        logger.warning("digest_ai_insight_call_failed", error=str(e))
+
+    return None
+
