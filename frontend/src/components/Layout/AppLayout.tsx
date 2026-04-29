@@ -33,6 +33,8 @@ import {
   TeamOutlined,
   SoundOutlined,
   MedicineBoxOutlined,
+  DollarOutlined,
+  FileProtectOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/stores/authStore';
 import { alertsApi } from '@/api/alerts';
@@ -60,6 +62,7 @@ const menuItems = [
       { key: '/correlation', icon: <ApartmentOutlined />, label: '故障关联' },
       { key: '/alert-fatigue', icon: <SoundOutlined />, label: '告警疲劳' },
       { key: '/mttr', icon: <MedicineBoxOutlined />, label: 'MTTR 健康' },
+      { key: '/health-scores', icon: <SafetyCertificateOutlined />, label: '健康评分' },
     ],
   },
   {
@@ -74,6 +77,7 @@ const menuItems = [
       { key: '/time-travel', icon: <HistoryOutlined />, label: '时光回溯' },
       { key: '/known-issues', icon: <BugOutlined />, label: '已知问题' },
       { key: '/error-dna', icon: <ExperimentOutlined />, label: '错误 DNA' },
+      { key: '/playbooks', icon: <FileProtectOutlined />, label: '诊断剧本' },
     ],
   },
   {
@@ -89,6 +93,8 @@ const menuItems = [
       { key: '/daily-standup', icon: <CalendarOutlined />, label: '每日站会' },
       { key: '/changes', icon: <DeploymentUnitOutlined />, label: '变更追踪' },
       { key: '/oncall', icon: <TeamOutlined />, label: '值班排班' },
+      { key: '/ai-cost', icon: <DollarOutlined />, label: '成本智能' },
+      { key: '/ops-efficiency', icon: <RadarChartOutlined />, label: '效能雷达' },
     ],
   },
   {
@@ -129,6 +135,10 @@ const breadcrumbMap: Record<string, string> = {
   'alert-fatigue': '告警疲劳',
   correlation: '故障关联',
   mttr: 'MTTR 健康',
+  'health-scores': '健康评分',
+  'ai-cost': '成本智能',
+  playbooks: '诊断剧本',
+  'ops-efficiency': '效能雷达',
 };
 
 const AppLayout: React.FC = () => {
@@ -144,9 +154,9 @@ const AppLayout: React.FC = () => {
   // Determine which sub-menu should be open based on current path
   const getOpenKeys = (): string[] => {
     const flatMap: Record<string, string> = {
-      '/patrol': 'grp-monitor', '/heatmap': 'grp-monitor', '/topology': 'grp-monitor', '/sla': 'grp-monitor', '/correlation': 'grp-monitor', '/alert-fatigue': 'grp-monitor', '/mttr': 'grp-monitor',
-      '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/live-tail': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis', '/error-dna': 'grp-analysis',
-      '/business-lines': 'grp-ops', '/weekly-report': 'grp-ops', '/pivot': 'grp-ops', '/dashboard-builder': 'grp-ops', '/ai-insights': 'grp-ops',
+      '/patrol': 'grp-monitor', '/heatmap': 'grp-monitor', '/topology': 'grp-monitor', '/sla': 'grp-monitor', '/correlation': 'grp-monitor', '/alert-fatigue': 'grp-monitor', '/mttr': 'grp-monitor', '/health-scores': 'grp-monitor',
+      '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/live-tail': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis', '/error-dna': 'grp-analysis', '/playbooks': 'grp-analysis',
+      '/business-lines': 'grp-ops', '/weekly-report': 'grp-ops', '/pivot': 'grp-ops', '/dashboard-builder': 'grp-ops', '/ai-insights': 'grp-ops', '/ai-cost': 'grp-ops', '/ops-efficiency': 'grp-ops',
       '/knowledge': 'grp-system', '/settings': 'grp-system',
     };
     const grp = flatMap[selectedKey];

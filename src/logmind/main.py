@@ -243,6 +243,18 @@ def _register_routes(app: FastAPI):
     from logmind.domain.dashboard.mttr_router import router as mttr_router
     api_router.include_router(mttr_router)
 
+    from logmind.domain.dashboard.health_score_router import router as health_score_router
+    api_router.include_router(health_score_router)
+
+    from logmind.domain.dashboard.cost_router import router as cost_router
+    api_router.include_router(cost_router)
+
+    from logmind.domain.analysis.playbook_router import router as playbook_router
+    api_router.include_router(playbook_router)
+
+    from logmind.domain.dashboard.efficiency_router import router as efficiency_router
+    api_router.include_router(efficiency_router)
+
     app.include_router(api_router)
 
     # ── WebSocket Endpoints ──────────────────────────────

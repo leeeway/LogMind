@@ -38,6 +38,10 @@ import ErrorDNA from '@/pages/Analysis/ErrorDNA';
 import AlertFatigue from '@/pages/Dashboard/AlertFatigue';
 import CorrelationMatrix from '@/pages/Dashboard/CorrelationMatrix';
 import MTTRHealth from '@/pages/Dashboard/MTTRHealth';
+import HealthScorecard from '@/pages/Dashboard/HealthScorecard';
+import CostIntelligence from '@/pages/Dashboard/CostIntelligence';
+import Playbooks from '@/pages/Analysis/Playbooks';
+import OpsEfficiency from '@/pages/Dashboard/OpsEfficiency';
 import { QuickDiagnoseProvider } from '@/components/QuickDiagnose';
 
 // Hydrate auth synchronously on module load — before any component renders
@@ -140,6 +144,10 @@ const App: React.FC = () => {
               <Route path="alert-fatigue" element={<AlertFatigue />} />
               <Route path="correlation" element={<CorrelationMatrix />} />
               <Route path="mttr" element={<MTTRHealth />} />
+              <Route path="health-scores" element={<HealthScorecard />} />
+              <Route path="ai-cost" element={<CostIntelligence />} />
+              <Route path="playbooks" element={<Playbooks />} />
+              <Route path="ops-efficiency" element={<OpsEfficiency />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           </Routes>
