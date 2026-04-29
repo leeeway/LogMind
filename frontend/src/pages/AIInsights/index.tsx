@@ -59,7 +59,7 @@ const AIInsights: React.FC = () => {
         <Col xs={24} sm={12} lg={6}>
           <div className="lm-stat-card">
             <Space><TrophyOutlined className="stat-icon" style={{ color: '#52c41a' }} /><span className="stat-label">AI 准确率</span></Space>
-            <div className="stat-value" style={{ color: '#52c41a' }}>{effectiveness?.accuracy_rate ? `${(effectiveness.accuracy_rate * 100).toFixed(1)}%` : '-'}</div>
+            <div className="stat-value" style={{ color: '#52c41a' }}>{effectiveness?.overall_accuracy ? `${(effectiveness.overall_accuracy * 100).toFixed(1)}%` : '-'}</div>
           </div>
         </Col>
         <Col xs={24} sm={12} lg={6}>
@@ -71,13 +71,13 @@ const AIInsights: React.FC = () => {
         <Col xs={24} sm={12} lg={6}>
           <div className="lm-stat-card">
             <Space><ThunderboltOutlined className="stat-icon" style={{ color: '#722ed1' }} /><span className="stat-label">Token 节省</span></Space>
-            <div className="stat-value" style={{ color: '#722ed1' }}>{dedupStats?.tokens_saved?.toLocaleString() || 0}</div>
+            <div className="stat-value" style={{ color: '#722ed1' }}>{(effectiveness?.total_tokens_saved || 0).toLocaleString()}</div>
           </div>
         </Col>
         <Col xs={24} sm={12} lg={6}>
           <div className="lm-stat-card">
             <Space><RiseOutlined className="stat-icon" style={{ color: '#fa8c16' }} /><span className="stat-label">去重率</span></Space>
-            <div className="stat-value" style={{ color: '#fa8c16' }}>{dedupStats?.dedup_rate ? `${(dedupStats.dedup_rate * 100).toFixed(1)}%` : '-'}</div>
+            <div className="stat-value" style={{ color: '#fa8c16' }}>{dedupStats?.overall_dedup_rate ? `${dedupStats.overall_dedup_rate.toFixed(1)}%` : '-'}</div>
           </div>
         </Col>
       </Row>
@@ -88,7 +88,7 @@ const AIInsights: React.FC = () => {
           <Card title="准确率趋势" size="small" style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}
             styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
             {effectiveness?.accuracy_trend?.length > 0 ? (
-              <Line data={effectiveness.accuracy_trend.map((item: any) => ({ ...item, value: item.accuracy * 100 }))}
+              <Line data={effectiveness.accuracy_trend.map((item: any) => ({ ...item, value: item.accuracy_rate * 100 }))}
                 xField="date" yField="value" height={220} smooth color="#52c41a" theme={isDark ? 'classicDark' : 'classic'}
                 yAxis={{ label: { formatter: (v: string) => `${v}%` } }} />
             ) : <Empty description="暂无数据" />}
@@ -113,7 +113,7 @@ const AIInsights: React.FC = () => {
       <Card title={<Space><ToolOutlined /> Agent 工具分析</Space>} size="small"
         style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}
         styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}>
-        <Table dataSource={agentStats?.tool_stats || []} columns={toolColumns} rowKey="tool_name" size="small" pagination={false} />
+        <Table dataSource={agentStats?.tool_usage || []} columns={toolColumns} rowKey="tool_name" size="small" pagination={false} />
       </Card>
     </div>
   );
