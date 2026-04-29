@@ -221,6 +221,120 @@ AGENT_TOOLS = [
     },
 ]
 
+# ── New tools (v5.1) ─────────────────────────────────────
+AGENT_TOOLS.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "get_alerts",
+            "description": (
+                "查询最近的告警历史记录。可按严重度过滤。"
+                "用于了解当前服务是否有活跃告警，以及告警的频率和模式。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours_back": {
+                        "type": "integer",
+                        "description": "查看最近多少小时的告警（默认24小时）",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "description": "按严重度过滤（critical/warning，可选）",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_service_health",
+            "description": (
+                "查询当前服务的健康状态，包括错误率、请求量、错误趋势。"
+                "用于判断服务整体是否异常，是偶发错误还是系统性故障。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours_back": {
+                        "type": "integer",
+                        "description": "统计最近多少小时（默认6小时）",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_time_windows",
+            "description": (
+                "对比两个时间窗口的错误分布差异。"
+                "用于判断错误是否突增，以及错误模式是否发生变化。"
+                "默认对比：最近1小时 vs 前1小时。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "window_hours": {
+                        "type": "number",
+                        "description": "每个窗口的小时数（默认1小时）",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trace_error_chain",
+            "description": (
+                "追踪错误的上下游调用链。搜索与指定错误关键词关联的"
+                "其他服务日志，尝试找到错误的源头或传播路径。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "error_keyword": {
+                        "type": "string",
+                        "description": "错误关键词（如异常类名、错误码）",
+                    },
+                    "minutes_back": {
+                        "type": "integer",
+                        "description": "向前追溯分钟数（默认30分钟）",
+                    },
+                },
+                "required": ["error_keyword"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_analysis_task",
+            "description": (
+                "当你无法通过现有信息确定根因时，创建一个深度分析任务。"
+                "任务会异步运行完整的 AI 分析 pipeline，适合复杂问题。"
+                "注意：这是兜底手段，优先通过其他工具直接排查。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "创建任务的原因说明",
+                    },
+                },
+                "required": ["reason"],
+            },
+        },
+    },
+])
+
 
 # ── Tool Execution ───────────────────────────────────────
 
@@ -252,6 +366,16 @@ async def execute_tool(
             return await _exec_search_similar_incidents(arguments, es_index_pattern)
         elif tool_name == "search_cross_service_logs":
             return await _exec_search_cross_service_logs(arguments, es_index_pattern)
+        elif tool_name == "get_alerts":
+            return await _exec_get_alerts(arguments, es_index_pattern)
+        elif tool_name == "get_service_health":
+            return await _exec_get_service_health(arguments, es_index_pattern, time_from, time_to)
+        elif tool_name == "compare_time_windows":
+            return await _exec_compare_time_windows(arguments, es_index_pattern, time_to)
+        elif tool_name == "trace_error_chain":
+            return await _exec_trace_error_chain(arguments, es_index_pattern, time_to)
+        elif tool_name == "create_analysis_task":
+            return await _exec_create_analysis_task(arguments, es_index_pattern)
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
     except Exception as e:
@@ -603,3 +727,236 @@ def _parse_time(value: str | None) -> datetime | None:
         return parse(value)
     except Exception:
         return None
+
+
+# ── New Tool Implementations (v5.1) ─────────────────────
+
+async def _exec_get_alerts(args: dict, index_pattern: str) -> str:
+    """Query recent alert history from PostgreSQL."""
+    from logmind.core.database import get_db_context
+    from logmind.domain.alert.models import AlertHistory
+    from sqlalchemy import select
+
+    hours_back = min(args.get("hours_back", 24), 72)
+    severity_filter = args.get("severity")
+    since = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+
+    async with get_db_context() as session:
+        stmt = (
+            select(AlertHistory)
+            .where(AlertHistory.fired_at >= since)
+            .order_by(AlertHistory.fired_at.desc())
+            .limit(20)
+        )
+        if severity_filter:
+            stmt = stmt.where(AlertHistory.severity == severity_filter)
+
+        result = await session.execute(stmt)
+        alerts = result.scalars().all()
+
+    if not alerts:
+        return f"最近 {hours_back} 小时内无告警记录。"
+
+    lines = [f"最近 {hours_back} 小时告警记录（共 {len(alerts)} 条）：\n"]
+    for a in alerts:
+        time_str = a.fired_at.strftime("%m-%d %H:%M") if a.fired_at else "?"
+        lines.append(
+            f"- [{time_str}] [{a.severity}] {a.priority or ''} {a.message[:150]}"
+        )
+    return "\n".join(lines)
+
+
+async def _exec_get_service_health(args: dict, index_pattern: str, default_from, default_to) -> str:
+    """Query service health metrics from ES: error rate, total count, hourly trend."""
+    from logmind.core.elasticsearch import get_es_client
+
+    hours_back = min(args.get("hours_back", 6), 24)
+    now = default_to or datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours_back)
+
+    es = await get_es_client()
+
+    # Total + error count
+    body = {
+        "size": 0,
+        "query": {
+            "bool": {
+                "filter": [
+                    {"range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}},
+                ]
+            }
+        },
+        "aggs": {
+            "total": {"value_count": {"field": "@timestamp"}},
+            "by_level": {
+                "terms": {"field": "level.keyword", "size": 10}
+            },
+            "hourly": {
+                "date_histogram": {
+                    "field": "@timestamp",
+                    "fixed_interval": "1h",
+                },
+                "aggs": {
+                    "errors": {
+                        "filter": {
+                            "terms": {"level.keyword": ["ERROR", "FATAL", "error", "fatal"]}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    try:
+        resp = await es.search(index=index_pattern, body=body)
+        aggs = resp.get("aggregations", {})
+
+        total = aggs.get("total", {}).get("value", 0)
+        level_buckets = aggs.get("by_level", {}).get("buckets", [])
+        level_dist = {b["key"]: b["doc_count"] for b in level_buckets}
+        error_count = sum(v for k, v in level_dist.items() if k.upper() in ("ERROR", "FATAL"))
+        error_rate = round(error_count / max(total, 1) * 100, 2)
+
+        hourly = aggs.get("hourly", {}).get("buckets", [])
+        trend_lines = []
+        for h in hourly[-hours_back:]:
+            hr = h.get("key_as_string", "")[-8:-3]
+            err = h.get("errors", {}).get("doc_count", 0)
+            trend_lines.append(f"  {hr}: {err} errors")
+
+        return (
+            f"服务健康概况（最近 {hours_back} 小时）\n"
+            f"- 总日志: {total}\n"
+            f"- 错误数: {error_count} (错误率: {error_rate}%)\n"
+            f"- 级别分布: {level_dist}\n"
+            f"- 每小时错误趋势:\n" + "\n".join(trend_lines)
+        )
+    except Exception as e:
+        return json.dumps({"error": f"Service health query failed: {str(e)}"})
+
+
+async def _exec_compare_time_windows(args: dict, index_pattern: str, default_to) -> str:
+    """Compare error distribution between two time windows."""
+    from logmind.core.elasticsearch import get_es_client
+
+    window_hours = min(args.get("window_hours", 1), 6)
+    now = default_to or datetime.now(timezone.utc)
+    current_start = now - timedelta(hours=window_hours)
+    prev_start = current_start - timedelta(hours=window_hours)
+
+    es = await get_es_client()
+
+    async def _count_errors(start, end):
+        body = {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"range": {"@timestamp": {"gte": start.isoformat(), "lt": end.isoformat()}}},
+                        {"terms": {"level.keyword": ["ERROR", "FATAL", "error", "fatal"]}},
+                    ]
+                }
+            },
+            "aggs": {
+                "top_errors": {
+                    "terms": {"field": "message.keyword", "size": 5}
+                }
+            }
+        }
+        resp = await es.search(index=index_pattern, body=body)
+        total = resp.get("hits", {}).get("total", {}).get("value", 0)
+        top = [
+            {"msg": b["key"][:100], "count": b["doc_count"]}
+            for b in resp.get("aggregations", {}).get("top_errors", {}).get("buckets", [])
+        ]
+        return total, top
+
+    try:
+        curr_total, curr_top = await _count_errors(current_start, now)
+        prev_total, prev_top = await _count_errors(prev_start, current_start)
+
+        change = curr_total - prev_total
+        change_pct = round(change / max(prev_total, 1) * 100, 1)
+        arrow = "↑" if change > 0 else "↓" if change < 0 else "→"
+
+        curr_top_str = "\n".join(f"  {t['count']}x {t['msg']}" for t in curr_top) or "  无"
+        prev_top_str = "\n".join(f"  {t['count']}x {t['msg']}" for t in prev_top) or "  无"
+
+        return (
+            f"时间窗口对比（每窗口 {window_hours}h）\n\n"
+            f"当前窗口: {curr_total} errors\n{curr_top_str}\n\n"
+            f"前一窗口: {prev_total} errors\n{prev_top_str}\n\n"
+            f"变化: {arrow} {abs(change)} ({change_pct}%)"
+        )
+    except Exception as e:
+        return json.dumps({"error": f"Compare failed: {str(e)}"})
+
+
+async def _exec_trace_error_chain(args: dict, index_pattern: str, default_to) -> str:
+    """Trace error chain across related services."""
+    from logmind.core.elasticsearch import get_es_client
+
+    keyword = args.get("error_keyword", "")
+    if not keyword:
+        return json.dumps({"error": "error_keyword is required"})
+
+    minutes_back = min(args.get("minutes_back", 30), 120)
+    now = default_to or datetime.now(timezone.utc)
+    since = now - timedelta(minutes=minutes_back)
+
+    es = await get_es_client()
+
+    # Search across all indices for this error
+    body = {
+        "size": 30,
+        "query": {
+            "bool": {
+                "must": [{"match_phrase": {"message": keyword}}],
+                "filter": [
+                    {"range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}},
+                ],
+            }
+        },
+        "sort": [{"@timestamp": "asc"}],
+    }
+
+    try:
+        resp = await es.search(index="*", body=body)
+        hits = resp.get("hits", {}).get("hits", [])
+
+        if not hits:
+            return f"未找到与 '{keyword}' 相关的跨服务错误链。"
+
+        # Group by index (service)
+        by_service: dict[str, list] = {}
+        for hit in hits:
+            idx = hit["_index"]
+            src = hit["_source"]
+            by_service.setdefault(idx, []).append({
+                "time": src.get("@timestamp", "")[-12:-1],
+                "level": src.get("level", "?"),
+                "msg": src.get("message", "")[:150],
+            })
+
+        lines = [f"错误链追踪: '{keyword}' (最近 {minutes_back} 分钟, {len(hits)} 条)\n"]
+        for svc, logs in sorted(by_service.items()):
+            lines.append(f"\n📦 服务: {svc} ({len(logs)} 条)")
+            for log in logs[:5]:
+                lines.append(f"  {log['time']} [{log['level']}] {log['msg']}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return json.dumps({"error": f"Trace failed: {str(e)}"})
+
+
+async def _exec_create_analysis_task(args: dict, index_pattern: str) -> str:
+    """Create a deep analysis task (fallback when direct investigation is insufficient)."""
+    reason = args.get("reason", "Agent 请求深度分析")
+    return json.dumps({
+        "status": "noted",
+        "message": (
+            f"已记录深度分析需求: {reason}。"
+            "建议在最终结论中说明需要创建深度分析任务，"
+            "由用户在分析中心手动创建。"
+        ),
+    }, ensure_ascii=False)

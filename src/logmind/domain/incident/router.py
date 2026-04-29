@@ -202,3 +202,140 @@ async def add_event(incident_id: str, req: AddEventRequest, db: DBSession, user:
     db.add(evt)
     await db.commit()
     return {"id": evt.id, "ok": True}
+
+
+@router.post("/{incident_id}/generate-postmortem")
+async def generate_postmortem(incident_id: str, db: DBSession, user: CurrentUser):
+    """
+    AI-powered postmortem generation.
+
+    Collects all related analysis results, alert history, and timeline events,
+    then calls LLM to generate a structured RCA (Root Cause Analysis) report.
+    """
+    inc = await incident_repo.get_by_id(db, incident_id)
+    if not inc or inc.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    # 1. Collect related analysis results
+    from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
+    from sqlalchemy import select
+
+    analysis_summaries = []
+    for tid in (inc.related_task_ids or []):
+        task = await db.get(LogAnalysisTask, tid)
+        if not task:
+            continue
+        results = (await db.execute(
+            select(AnalysisResult).where(AnalysisResult.task_id == tid)
+        )).scalars().all()
+        for r in results:
+            analysis_summaries.append(
+                f"[{r.severity.upper()}] {r.content[:500]}"
+            )
+
+    # 2. Collect timeline events
+    events = await event_repo.get_all(db, incident_id=incident_id, limit=200)
+    timeline_text = "\n".join([
+        f"- {e.created_at.strftime('%H:%M:%S') if e.created_at else '??:??'} "
+        f"[{e.event_type}] {e.content[:200]}"
+        for e in sorted(events, key=lambda x: x.created_at or datetime.min)
+    ])
+
+    # 3. Collect alert messages
+    from logmind.domain.alert.models import AlertHistory
+    alert_messages = []
+    for aid in (inc.related_alert_ids or []):
+        alert = await db.get(AlertHistory, aid)
+        if alert:
+            alert_messages.append(f"[{alert.severity}] {alert.message[:300]}")
+
+    # 4. Build AI prompt
+    duration = inc.duration_seconds or 0
+    duration_text = f"{duration // 3600}h {(duration % 3600) // 60}m" if duration > 0 else "进行中"
+
+    prompt = f"""请基于以下故障信息生成一份专业的故障复盘报告（RCA）。
+
+## 故障基本信息
+- 标题: {inc.title}
+- 严重度: {inc.severity}
+- 状态: {inc.status}
+- 持续时间: {duration_text}
+- 创建时间: {inc.created_at}
+- 描述: {inc.description or '无'}
+
+## AI 分析结论
+{chr(10).join(analysis_summaries) or '无分析数据'}
+
+## 告警记录
+{chr(10).join(alert_messages) or '无告警记录'}
+
+## 故障时间线
+{timeline_text or '无时间线事件'}
+
+## 输出要求
+请用 Markdown 格式输出结构化复盘报告，包含：
+
+### 1. 故障概述
+一句话总结故障现象和影响
+
+### 2. 时间线
+关键节点的时间轴（发现 → 定位 → 修复 → 恢复）
+
+### 3. 根因分析
+基于 AI 分析结论，推导故障根因（技术层面）
+
+### 4. 影响范围
+受影响的服务、用户、业务
+
+### 5. 改进措施
+给出 3-5 条可操作的改进建议，每条包含：
+- 措施描述
+- 负责人建议（角色）
+- 优先级（P0/P1/P2）
+
+### 6. 经验教训
+从本次故障中学到的关键教训
+
+请直接输出报告，不要加前缀。"""
+
+    # 5. Call AI
+    try:
+        from logmind.domain.provider.base import ChatMessage, ChatRequest
+        from logmind.domain.provider.manager import provider_manager
+
+        provider = await provider_manager.get_provider(db, user.tenant_id)
+        if not provider:
+            raise HTTPException(status_code=400, detail="No AI provider configured")
+
+        request = ChatRequest(
+            messages=[
+                ChatMessage(role="system", content="你是 LogMind 故障复盘专家，擅长撰写结构化的 RCA（根因分析）报告。"),
+                ChatMessage(role="user", content=prompt),
+            ],
+            temperature=0.3,
+            max_tokens=3000,
+        )
+        response = await provider.chat(request)
+        postmortem_text = response.content
+
+        # 6. Save to incident
+        inc.postmortem = postmortem_text
+        evt = IncidentEvent(
+            id=str(uuid.uuid4()),
+            incident_id=incident_id,
+            event_type="ai",
+            content="🤖 AI 自动生成复盘报告",
+            user="LogMind AI",
+        )
+        db.add(evt)
+        await db.commit()
+
+        logger.info("ai_postmortem_generated", incident_id=incident_id)
+        return {"ok": True, "postmortem": postmortem_text}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("ai_postmortem_failed", incident_id=incident_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"AI 复盘生成失败: {str(e)[:200]}")
+

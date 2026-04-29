@@ -491,6 +491,7 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
     """Send AI analysis alert notifications and persist AlertHistory records."""
     from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_ai_alert
+    from logmind.domain.alert.storm_detector import alert_storm_detector
 
     for alert in ctx.alerts_fired:
         severity = alert.get("severity", "warning")
@@ -514,6 +515,23 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
             issue_label = f"📋 [已知问题|第{hit_count}次] "
 
         content = f"{priority_label} {issue_label}{content}"
+
+        # ── Storm Detection ──────────────────────────────────
+        storm = alert_storm_detector.check_storm(
+            business_line_id=ctx.business_line_id,
+            severity=severity,
+            alert_message=content[:200],
+        )
+        if storm.should_suppress:
+            logger.info(
+                "alert_storm_suppressed",
+                storm_count=storm.storm_count,
+                biz=ctx.business_line_name,
+                task_id=ctx.task_id,
+            )
+            continue  # Skip — already sent storm summary
+        if storm.storm_summary:
+            content = storm.storm_summary  # Replace with aggregated summary
 
         # Check aggregation window
         should_send, agg_count = await alert_aggregator.should_send(
@@ -555,6 +573,7 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
             notify_result_data = {"success": False, "error": str(e)[:200]}
 
         # Persist AlertHistory record
+        alert_record_id = None
         try:
             from logmind.core.database import get_db_context
             from logmind.domain.alert.models import AlertHistory
@@ -575,8 +594,23 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
                 )
                 session.add(alert_record)
                 await session.flush()
+                alert_record_id = alert_record.id
         except Exception as e:
             logger.error("alert_history_persist_failed", error=str(e))
+
+        # ── Auto-create Incident for P0 alerts ──────────────────
+        if priority == "P0" and alert_record_id:
+            try:
+                await _auto_create_incident(
+                    tenant_id=ctx.tenant_id,
+                    title=f"[自动] {ctx.business_line_name} — {severity.upper()} 告警",
+                    description=content[:500],
+                    severity="P0",
+                    alert_id=alert_record_id,
+                    task_id=task_id,
+                )
+            except Exception as e:
+                logger.error("auto_incident_create_failed", error=str(e))
 
 
 async def _send_error_log_notification(ctx, webhook_url: str):
@@ -706,3 +740,54 @@ async def _mark_task_timeout(task_id: str):
     except Exception as e:
         logger.error("mark_timeout_failed", task_id=task_id, error=str(e))
 
+
+async def _auto_create_incident(
+    tenant_id: str,
+    title: str,
+    description: str,
+    severity: str,
+    alert_id: str,
+    task_id: str,
+):
+    """
+    Auto-create an Incident when a P0 alert fires.
+
+    Links the alert and analysis task to the incident for full traceability.
+    """
+    import uuid
+    from logmind.core.database import get_db_context
+    from logmind.domain.incident import Incident, IncidentEvent
+
+    async with get_db_context() as session:
+        incident = Incident(
+            id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            title=title,
+            description=description,
+            severity=severity,
+            status="investigating",
+            assignee="system",
+            related_alert_ids=[alert_id],
+            related_task_ids=[task_id],
+            tags=["auto-created"],
+        )
+        session.add(incident)
+
+        # Initial timeline event
+        event = IncidentEvent(
+            id=str(uuid.uuid4()),
+            incident_id=incident.id,
+            event_type="alert",
+            content=f"🤖 AI 自动创建故障 — P0 告警触发\n\n{description[:300]}",
+            user="LogMind AI",
+        )
+        session.add(event)
+        await session.flush()
+
+    logger.info(
+        "auto_incident_created",
+        incident_id=incident.id,
+        severity=severity,
+        alert_id=alert_id,
+        task_id=task_id,
+    )

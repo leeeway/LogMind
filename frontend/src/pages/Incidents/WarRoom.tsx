@@ -9,7 +9,7 @@ import {
   SendOutlined, AlertOutlined, ThunderboltOutlined,
   UserOutlined, RobotOutlined, FireOutlined,
   ExclamationCircleOutlined, EyeOutlined, EditOutlined,
-  CopyOutlined, FieldTimeOutlined,
+  CopyOutlined, FieldTimeOutlined, StarOutlined, LoadingOutlined,
 } from '@ant-design/icons';
 import { incidentApi } from '@/api/incidents';
 import { useQuickDiagnose } from '@/components/QuickDiagnose';
@@ -57,6 +57,7 @@ const WarRoom: React.FC = () => {
   const [msgInput, setMsgInput] = useState('');
   const [editing, setEditing] = useState(false);
   const [postmortem, setPostmortem] = useState('');
+  const [generatingPM, setGeneratingPM] = useState(false);
   const timelineEndRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -111,6 +112,20 @@ const WarRoom: React.FC = () => {
     message.success('复盘报告已保存');
     setEditing(false);
     load();
+  };
+
+  const generateAIPostmortem = async () => {
+    if (!id) return;
+    setGeneratingPM(true);
+    try {
+      const { data } = await incidentApi.generatePostmortem(id);
+      setPostmortem(data.postmortem);
+      message.success('AI 复盘报告生成完成 ✨');
+      load();
+    } catch {
+      message.error('AI 复盘生成失败');
+    }
+    setGeneratingPM(false);
   };
 
   const exportReport = () => {
@@ -277,7 +292,27 @@ const WarRoom: React.FC = () => {
 
           {/* Postmortem */}
           <Card size="small"
-            title={<Space><span>复盘报告</span>{incident?.status === 'resolved' && !editing && <Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} />}</Space>}
+            title={
+              <Space>
+                <span>复盘报告</span>
+                {incident?.status === 'resolved' && !editing && (
+                  <Button size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing(true)} />
+                )}
+                {incident?.status === 'resolved' && !postmortem && !editing && (
+                  <Button
+                    size="small"
+                    type="primary"
+                    ghost
+                    icon={generatingPM ? <LoadingOutlined spin /> : <StarOutlined />}
+                    onClick={generateAIPostmortem}
+                    loading={generatingPM}
+                    style={{ borderColor: '#722ed1', color: '#722ed1' }}
+                  >
+                    AI 生成
+                  </Button>
+                )}
+              </Space>
+            }
             style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10 }}
             styles={{ header: { borderBottom: '1px solid var(--lm-border-light)', fontSize: 13 }, body: { fontSize: 12 } }}
           >
