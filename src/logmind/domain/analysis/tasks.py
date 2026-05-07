@@ -382,13 +382,11 @@ async def _execute_analysis(task_id: str):
             task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
             await session.flush()
 
-        # If AI was enabled but failed, send pipeline error notification
-        # and also send raw error log summary as fallback
+        # If AI was enabled but pipeline failed, send ONE pipeline error notification
+        # (rate-limited via aggregator). Do NOT also send the raw log fallback —
+        # that would cause duplicate/interleaved notifications every patrol cycle.
         if ai_enabled:
             await _send_pipeline_error_notification(ctx, str(e), webhook_url)
-            # Fallback: if we have preprocessed logs, send them directly
-            if ctx.processed_logs and ctx.log_count > 0:
-                await _send_error_log_notification(ctx, webhook_url)
     finally:
         await close_celery_es_client()
 
@@ -687,8 +685,42 @@ async def _send_error_log_notification(ctx, webhook_url: str):
 
 
 async def _send_pipeline_error_notification(ctx, error_message: str, webhook_url: str):
-    """Send pipeline/model error notification."""
+    """
+    Send pipeline/model error notification, rate-limited via aggregator.
+
+    Uses a dedicated 'pipeline_error' severity key so it doesn't interfere
+    with the normal AI alert aggregation window. The window is aligned to
+    analysis_cooldown_minutes (default 30 min) to avoid notification flooding
+    when all providers are repeatedly unavailable.
+    """
+    from logmind.core.config import get_settings
+    from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_pipeline_error
+
+    settings = get_settings()
+    # Use a longer aggregation window (cooldown * 2) for infrastructure errors
+    # to avoid spamming when providers are intermittently unavailable.
+    pipeline_error_window = settings.analysis_cooldown_minutes * 60 * 2
+
+    # Create a temporary aggregator with the pipeline-error-specific window
+    from logmind.domain.alert.aggregator import AlertAggregator
+    pipeline_agg = AlertAggregator(window_seconds=pipeline_error_window)
+
+    should_send, agg_count = await pipeline_agg.should_send(
+        business_line_id=ctx.business_line_id,
+        severity="pipeline_error",
+        error_signature=None,
+        alert_summary=error_message[:200],
+    )
+
+    if not should_send:
+        logger.info(
+            "pipeline_error_notification_aggregated",
+            count=agg_count,
+            biz=ctx.business_line_name,
+            task_id=ctx.task_id,
+        )
+        return
 
     try:
         await notify_pipeline_error(
