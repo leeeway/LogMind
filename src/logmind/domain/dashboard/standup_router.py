@@ -79,7 +79,7 @@ async def share_standup(
     """
     from logmind.domain.dashboard.standup_generator import generate_standup_report
     from logmind.domain.alert.channels.webhook import send_webhook
-    from logmind.core.database import get_session
+    from logmind.core.database import get_db_context
     from logmind.domain.tenant.models import BusinessLine
     from sqlalchemy import select
 
@@ -93,7 +93,7 @@ async def share_standup(
     result = await generate_standup_report(user.tenant_id, target)
 
     # Collect webhook URLs from business lines
-    async with get_session() as session:
+    async with get_db_context() as session:
         stmt = select(BusinessLine.webhook_url).where(
             BusinessLine.tenant_id == user.tenant_id,
             BusinessLine.is_active == True,  # noqa: E712

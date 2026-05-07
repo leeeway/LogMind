@@ -25,7 +25,7 @@ async def generate_standup_report(tenant_id: str, target_date: datetime | None =
 
     Then calls LLM to produce structured markdown report.
     """
-    from logmind.core.database import get_session
+    from logmind.core.database import get_db_context
     from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
     from logmind.domain.alert.models import AlertHistory
     from logmind.domain.tenant.models import BusinessLine
@@ -39,7 +39,7 @@ async def generate_standup_report(tenant_id: str, target_date: datetime | None =
     prev_day_start = day_start - timedelta(days=1)
     prev_week_start = day_start - timedelta(days=7)
 
-    async with get_session() as session:
+    async with get_db_context() as session:
         # 1. Alert statistics
         alert_stmt = (
             select(
@@ -173,11 +173,11 @@ async def generate_standup_report(tenant_id: str, target_date: datetime | None =
 async def _generate_ai_summary(tenant_id: str, data: dict) -> str:
     """Call LLM to generate standup summary from collected data."""
     try:
-        from logmind.core.database import get_session
+        from logmind.core.database import get_db_context
         from logmind.domain.provider.base import ChatMessage, ChatRequest
         from logmind.domain.provider.manager import provider_manager
 
-        async with get_session() as session:
+        async with get_db_context() as session:
             provider = await provider_manager.get_provider(session, tenant_id)
 
         if not provider:
