@@ -59,7 +59,7 @@ class SaveDashboardRequest(BaseModel):
 async def list_dashboards(db: DBSession, user: CurrentUser):
     """List user's custom dashboards."""
     dashboards = await dashboard_repo.get_all(
-        db, tenant_id=user.tenant_id, user_id=user.sub, limit=50
+        db, tenant_id=user.tenant_id, filters={"user_id": user.sub}, limit=50
     )
     return {
         "dashboards": [
