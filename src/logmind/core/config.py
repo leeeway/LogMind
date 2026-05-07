@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     analysis_max_logs_per_task: int = 500
     analysis_daily_task_limit: int = 100
     analysis_cooldown_minutes: int = 30
+    pipeline_error_cooldown_minutes: int = 240
     analysis_fingerprint_enabled: bool = True
     analysis_fingerprint_ttl_hours: int = 6
     analysis_agent_max_steps: int = 5

@@ -116,7 +116,7 @@ class ProviderManager:
                     _provider_cache.pop(k, None)
                 continue
 
-        raise AllProvidersFailedError(tenant_id)
+        raise AllProvidersFailedError(tenant_id, errors=errors)
 
     async def health_check_all(
         self, session: AsyncSession, tenant_id: str

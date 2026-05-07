@@ -57,10 +57,13 @@ class ProviderError(LogMindError):
 class AllProvidersFailedError(LogMindError):
     """All configured providers failed."""
 
-    def __init__(self, tenant_id: str):
+    def __init__(self, tenant_id: str, errors: list[str] | None = None):
+        msg = f"All providers failed for tenant {tenant_id}"
+        if errors:
+            msg += f". Details: {'; '.join(errors)}"
         super().__init__(
-            message=f"All providers failed for tenant {tenant_id}",
-            detail={"tenant_id": tenant_id},
+            message=msg,
+            detail={"tenant_id": tenant_id, "errors": errors or []},
         )
 
 

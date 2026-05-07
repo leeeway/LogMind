@@ -698,9 +698,9 @@ async def _send_pipeline_error_notification(ctx, error_message: str, webhook_url
     from logmind.domain.alert.channels.webhook import notify_pipeline_error
 
     settings = get_settings()
-    # Use a longer aggregation window (cooldown * 2) for infrastructure errors
+    # Use a longer aggregation window for infrastructure errors
     # to avoid spamming when providers are intermittently unavailable.
-    pipeline_error_window = settings.analysis_cooldown_minutes * 60 * 2
+    pipeline_error_window = getattr(settings, "pipeline_error_cooldown_minutes", 240) * 60
 
     # Create a temporary aggregator with the pipeline-error-specific window
     from logmind.domain.alert.aggregator import AlertAggregator
