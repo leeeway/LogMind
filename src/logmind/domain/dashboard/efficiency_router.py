@@ -236,11 +236,11 @@ async def get_ops_efficiency(
         if w_end > now:
             w_end = now
         w_metrics = await _calc_period_metrics(session, user.tenant_id, w_start, w_end)
-        w_score = sum(
-            min(100, max(0, 100 - w_metrics["avg_mttr_min"] * 1.5)) * 0.25,
-        ) + sum(
-            max(0, 100 - w_metrics["noise_ratio"]) * 0.20,
-        ) + (w_metrics["ack_rate"] * 0.5 + w_metrics["resolve_rate"] * 0.5) * 0.20
+        w_score = (
+            min(100, max(0, 100 - w_metrics["avg_mttr_min"] * 1.5)) * 0.25
+            + max(0, 100 - w_metrics["noise_ratio"]) * 0.20
+            + (w_metrics["ack_rate"] * 0.5 + w_metrics["resolve_rate"] * 0.5) * 0.20
+        )
         # Simplified for performance
         weekly_trend.append(WeeklyEfficiency(
             week_label=f"W{w+1}",
