@@ -666,8 +666,6 @@ async def _send_error_log_notification(ctx, webhook_url: str):
     if len(error_summary) > 1500:
         error_summary = error_summary[:1500] + "\n... (更多日志请登录平台查看)"
 
-    time_range = f"{ctx.time_from} ~ {ctx.time_to}" if ctx.time_from else "未知"
-
     try:
         await notify_error_logs(
             business_line=ctx.business_line_name,
@@ -677,7 +675,8 @@ async def _send_error_log_notification(ctx, webhook_url: str):
             language=ctx.language,
             log_count=ctx.log_count,
             error_summary=error_summary,
-            time_range=time_range,
+            time_from=ctx.time_from,
+            time_to=ctx.time_to,
             webhook_url=webhook_url or None,
         )
     except Exception as e:

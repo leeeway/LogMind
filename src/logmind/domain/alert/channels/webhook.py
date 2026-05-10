@@ -10,7 +10,9 @@ Notification types:
   3. Pipeline Error — AI model or pipeline failure notification
 """
 
+import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -18,6 +20,57 @@ from logmind.core.config import get_settings
 from logmind.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
+_INLINE_TS_RE = re.compile(
+    r"(?P<prefix>\[?)"
+    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))"
+    r"(?P<suffix>\]?)"
+)
+
+
+def _to_display_timezone(dt: datetime | None) -> datetime | None:
+    """Convert UTC/naive datetimes to the notification display timezone."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_DISPLAY_TZ)
+
+
+def _format_display_time(dt: datetime | None) -> str:
+    """Format a datetime in Asia/Shanghai for operator-facing notifications."""
+    local_dt = _to_display_timezone(dt)
+    if local_dt is None:
+        return "未知"
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_time_range(time_from: datetime | None, time_to: datetime | None) -> str:
+    """Format a user-facing time range in Asia/Shanghai."""
+    if time_from is None or time_to is None:
+        return "未知"
+    return f"{_format_display_time(time_from)} ~ {_format_display_time(time_to)} (北京时间)"
+
+
+def _localize_inline_timestamps(text: str) -> str:
+    """Convert inline ISO-8601 UTC timestamps in summaries to Asia/Shanghai."""
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        ts = match.group("ts")
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return match.group(0)
+        local_ts = _to_display_timezone(dt)
+        if local_ts is None:
+            return match.group(0)
+        rendered = local_ts.strftime("%Y-%m-%d %H:%M:%S")
+        return f"{match.group('prefix')}{rendered}{match.group('suffix')}"
+
+    return _INLINE_TS_RE.sub(_replace, text)
 
 
 # ── Notification Templates ───────────────────────────────
@@ -30,7 +83,8 @@ def _build_error_log_alert(
     language: str,
     log_count: int,
     error_summary: str,
-    time_range: str,
+    time_from: datetime | None,
+    time_to: datetime | None,
 ) -> str:
     """
     Template: Error Log Alert — direct error notification (AI disabled).
@@ -46,6 +100,8 @@ def _build_error_log_alert(
     lang_display = lang_names.get(language, language)
 
     source = domain or host_name or "未知"
+    time_range = _format_time_range(time_from, time_to)
+    localized_summary = _localize_inline_timestamps(error_summary)
 
     lines = [
         f"## ⚠️ 日志异常告警",
@@ -63,7 +119,7 @@ def _build_error_log_alert(
         f"---",
         f"",
         f"**异常摘要**:",
-        f"{error_summary[:1500]}",
+        f"{localized_summary[:1500]}",
         f"",
         f"---",
         f"> 请及时排查处理。登录 LogMind 平台查看完整日志。",
@@ -244,7 +300,8 @@ async def notify_error_logs(
     language: str,
     log_count: int,
     error_summary: str,
-    time_range: str,
+    time_from: datetime | None,
+    time_to: datetime | None,
     webhook_url: str | None = None,
 ) -> bool:
     """Send an error log alert notification (AI disabled mode)."""
@@ -256,7 +313,8 @@ async def notify_error_logs(
         language=language,
         log_count=log_count,
         error_summary=error_summary,
-        time_range=time_range,
+        time_from=time_from,
+        time_to=time_to,
     )
     return await send_webhook_notification(content, webhook_url=webhook_url)
 
