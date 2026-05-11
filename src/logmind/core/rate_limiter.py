@@ -16,9 +16,10 @@ Usage:
 
 import time
 
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from fastapi import Request
+from starlette.datastructures import MutableHeaders
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from logmind.core.logging import get_logger
 
@@ -45,7 +46,7 @@ def _get_rate_limit(path: str) -> tuple[int, int] | None:
     return None
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
+class RateLimitMiddleware:
     """
     Redis-based sliding window rate limiter.
 
@@ -56,14 +57,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     Falls through gracefully if Redis is unavailable (open policy).
     """
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
         path = request.url.path
         limit_config = _get_rate_limit(path)
 
         if limit_config is None:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         max_requests, window_seconds = limit_config
 
@@ -87,7 +95,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             # Redis failure → open policy (allow request)
             logger.warning("rate_limit_check_failed", error=str(e))
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
         if not is_allowed:
             logger.warning(
@@ -98,7 +107,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 limit=max_requests,
                 window=window_seconds,
             )
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=429,
                 content={
                     "error": "Rate limit exceeded",
@@ -111,11 +120,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "X-RateLimit-Remaining": "0",
                 },
             )
+            await response(scope, receive, send)
+            return
 
-        response = await call_next(request)
-        response.headers["X-RateLimit-Limit"] = str(max_requests)
-        response.headers["X-RateLimit-Remaining"] = str(remaining)
-        return response
+        async def send_wrapper(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-RateLimit-Limit"] = str(max_requests)
+                headers["X-RateLimit-Remaining"] = str(remaining)
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
     @staticmethod
     async def _check_rate_limit(
