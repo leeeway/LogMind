@@ -129,6 +129,7 @@ async def _patrol_single(business_line_id: str):
         anomaly = await anomaly_detector.detect(
             index_pattern=biz.es_index_pattern,
             window_minutes=settings.analysis_cooldown_minutes,
+            severity_threshold=biz.severity_threshold,
         )
 
         if not anomaly.is_anomaly:

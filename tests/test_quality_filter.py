@@ -6,6 +6,7 @@ and business noise filtering.
 """
 
 import pytest
+from logmind.domain.analysis.pipeline import PipelineContext
 from logmind.domain.analysis.stages.quality_filter import (
     LogQualityFilterStage,
     _extract_message_level,
@@ -85,6 +86,17 @@ class TestBusinessNoise:
         stage = LogQualityFilterStage()
         assert stage._is_business_noise("[ERROR] Database connection failed") is False
 
+    def test_qrcode_success_response_is_noise(self):
+        stage = LogQualityFilterStage()
+        line = (
+            '[2026-05-11T13:50:21Z] [INFO] [domain:stage-securityv5-qrcode.gyyx.cn] '
+            '2026-05-11 21:03:00.529 [http-nio-8081-exec-37] INFO '
+            'cn.gyyx.securityv5.service.InterfaceQrCodeService '
+            '- 通知游戏二维码验证结果结束：{"description":"QrCode login runtime successfully set.",'
+            '"errorCode":0,"requestIndex":0}'
+        )
+        assert stage._is_business_noise(line) is True
+
 
 class TestShallowError:
     """Tests for detecting misused log.error() calls."""
@@ -106,3 +118,28 @@ class TestShallowError:
     def test_info_level_not_shallow(self):
         stage = LogQualityFilterStage()
         assert stage._is_shallow_error("[INFO] Service started") is False
+
+
+@pytest.mark.asyncio
+async def test_quality_filter_removes_success_info_and_updates_count():
+    stage = LogQualityFilterStage()
+    line = (
+        '[2026-05-11T13:50:21Z] [INFO] [domain:stage-securityv5-qrcode.gyyx.cn] '
+        '2026-05-11 21:03:00.529 [http-nio-8081-exec-37] INFO '
+        'cn.gyyx.game.service.GameService - 取消账号：foo 解除元宝锁交易锁定结果为：'
+        '<?xml version="1.0" ?><return ErrorCode="0" Description="QrCode login runtime successfully set."/>'
+    )
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        severity_threshold="info",
+        raw_logs=[{"message": "raw"}],
+        processed_logs=line,
+        log_count=1,
+    )
+
+    result = await stage.execute(ctx)
+
+    assert result.processed_logs == ""
+    assert result.log_count == 0

@@ -32,8 +32,15 @@ _MSG_LEVEL_PATTERNS = [
 _NOISE_INDICATORS = [
     re.compile(r'"status"\s*:\s*true', re.IGNORECASE),
     re.compile(r'"success"\s*:\s*true', re.IGNORECASE),
+    re.compile(r'"errorcode"\s*:\s*0\b', re.IGNORECASE),
+    re.compile(r'ErrorCode="\s*0"', re.IGNORECASE),
+    re.compile(r'QrCode login runtime successfully set', re.IGNORECASE),
+    re.compile(r'notify\w*result.*(?:end|success)', re.IGNORECASE),
     re.compile(r'"errorMessage"\s*:\s*"[^"]*成功', re.IGNORECASE),
     re.compile(r'"message"\s*:\s*"[^"]*成功', re.IGNORECASE),
+    re.compile(r'结果(?:为|结束)[：:]', re.IGNORECASE),
+    re.compile(r'通知.*结果结束', re.IGNORECASE),
+    re.compile(r'处理成功|操作成功|调用成功|通知成功|返回成功', re.IGNORECASE),
     re.compile(r'获取成功', re.IGNORECASE),
 ]
 
@@ -121,6 +128,7 @@ class LogQualityFilterStage(PipelineStage):
                         original_lines=total_original, filtered_out=filtered_out,
                         shallow_errors=shallow_error_count, remaining=len(filtered_lines))
             ctx.processed_logs = "\n".join(filtered_lines)
+            ctx.log_count = len(filtered_lines)
             ctx.log_metadata["quality_filtered"] = filtered_out
             ctx.log_metadata["quality_remaining"] = len(filtered_lines)
             ctx.log_metadata["quality_shallow_errors"] = shallow_error_count

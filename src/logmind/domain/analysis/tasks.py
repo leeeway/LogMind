@@ -690,6 +690,10 @@ async def _send_error_log_notification(ctx, webhook_url: str):
     from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_error_logs
 
+    if not ctx.processed_logs or not ctx.processed_logs.strip() or ctx.log_count <= 0:
+        logger.info("error_log_notification_skipped_empty", biz=ctx.business_line_name, task_id=ctx.task_id)
+        return
+
     # Check aggregation window
     should_send, agg_count = await alert_aggregator.should_send(
         business_line_id=ctx.business_line_id,

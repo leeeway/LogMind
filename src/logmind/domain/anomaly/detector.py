@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from logmind.core.logging import get_logger
+from logmind.domain.log.service import _SEVERITY_FILETYPE_MAP
 
 logger = get_logger(__name__)
 
@@ -51,6 +52,7 @@ class AnomalyDetector:
         self,
         index_pattern: str,
         window_minutes: int = CURRENT_WINDOW_MINUTES,
+        severity_threshold: str = "error",
     ) -> AnomalyResult:
         """
         Detect anomaly for a single service/index pattern.
@@ -66,7 +68,7 @@ class AnomalyDetector:
         from logmind.core.elasticsearch import get_es_client
 
         try:
-            es = await get_es_client()
+            es = get_es_client()
             now = datetime.now(timezone.utc)
 
             # 1. Current window error count
@@ -74,6 +76,7 @@ class AnomalyDetector:
                 es, index_pattern,
                 since=now - timedelta(minutes=window_minutes),
                 until=now,
+                severity_threshold=severity_threshold,
             )
 
             # 2. Historical baseline (24h hourly buckets)
@@ -82,6 +85,7 @@ class AnomalyDetector:
                 since=now - timedelta(hours=BASELINE_HOURS),
                 until=now - timedelta(minutes=window_minutes),
                 bucket_minutes=window_minutes,
+                severity_threshold=severity_threshold,
             )
 
             # 3. Z-Score
@@ -147,9 +151,14 @@ class AnomalyDetector:
             )
 
     async def _count_errors(
-        self, es, index_pattern: str, since: datetime, until: datetime,
+        self,
+        es,
+        index_pattern: str,
+        since: datetime,
+        until: datetime,
+        severity_threshold: str = "error",
     ) -> int:
-        """Count ERROR/FATAL level logs in a time window."""
+        """Count logs at or above the configured severity in a time window."""
         body = {
             "size": 0,
             "query": {
@@ -159,9 +168,7 @@ class AnomalyDetector:
                             "gte": since.isoformat(),
                             "lt": until.isoformat(),
                         }}},
-                        {"terms": {"level.keyword": [
-                            "ERROR", "FATAL", "error", "fatal",
-                        ]}},
+                        self._build_severity_filter(severity_threshold),
                     ]
                 }
             },
@@ -176,6 +183,7 @@ class AnomalyDetector:
         self, es, index_pattern: str,
         since: datetime, until: datetime,
         bucket_minutes: int = 5,
+        severity_threshold: str = "error",
     ) -> tuple[float, float]:
         """
         Compute mean and stddev of error counts over historical window.
@@ -192,9 +200,7 @@ class AnomalyDetector:
                             "gte": since.isoformat(),
                             "lt": until.isoformat(),
                         }}},
-                        {"terms": {"level.keyword": [
-                            "ERROR", "FATAL", "error", "fatal",
-                        ]}},
+                        self._build_severity_filter(severity_threshold),
                     ]
                 }
             },
@@ -225,6 +231,37 @@ class AnomalyDetector:
 
         except Exception:
             return 0.0, 0.0
+
+    @staticmethod
+    def _build_severity_filter(severity_threshold: str) -> dict:
+        """Build an ES filter aligned with LogService severity matching."""
+        threshold = (severity_threshold or "error").lower()
+        should_clauses = [
+            {"term": {"level.keyword": threshold}},
+            {"term": {"level": threshold}},
+            {"term": {"log.level.keyword": threshold}},
+            {"term": {"log.level": threshold}},
+            {"term": {"severity.keyword": threshold}},
+            {"term": {"severity": threshold}},
+        ]
+
+        if threshold == "critical":
+            should_clauses.extend([
+                {"term": {"level.keyword": "fatal"}},
+                {"term": {"level": "fatal"}},
+                {"term": {"log.level.keyword": "fatal"}},
+                {"term": {"log.level": "fatal"}},
+            ])
+
+        for filetype in _SEVERITY_FILETYPE_MAP.get(threshold, []):
+            should_clauses.append({"term": {"gy.filetype.keyword": filetype}})
+
+        return {
+            "bool": {
+                "should": should_clauses,
+                "minimum_should_match": 1,
+            }
+        }
 
 
 # Singleton
