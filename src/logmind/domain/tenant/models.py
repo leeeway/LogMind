@@ -144,6 +144,11 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # for correlated failures in the same time window.
     related_services: Mapped[str] = mapped_column(Text, default="{}")
 
+    # Per-business-line custom noise patterns (JSON text)
+    # Format: [{"pattern": "暂无发送渠道", "category": "sms_flow", "reason": "..."}]
+    # Logs matching these patterns are classified as business noise and skipped.
+    noise_patterns: Mapped[str] = mapped_column(Text, default="[]")
+
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Relationships

@@ -132,6 +132,7 @@ async def _execute_analysis(task_id: str):
         PipelineContext,
     )
     from logmind.domain.analysis.stages import (
+        BusinessNoiseFilterStage,
         ChangePointDetectionStage,
         CrossServiceCorrelationStage,
         LogFetchStage,
@@ -188,6 +189,7 @@ async def _execute_analysis(task_id: str):
             LogFetchStage(log_service),
             LogPreprocessStage(),
             LogQualityFilterStage(),            # Layer 0: Smart quality filter
+            BusinessNoiseFilterStage(),          # Layer 0.5: Business noise recognition
             ErrorBaselineStage(log_service),     # Historical baseline for frequency scoring
             ChangePointDetectionStage(log_service), # Error rate spike detection
             ErrorFingerprintStage(),             # Layer 1: Fast MD5 dedup
@@ -205,6 +207,7 @@ async def _execute_analysis(task_id: str):
             LogFetchStage(log_service),
             LogPreprocessStage(),
             LogQualityFilterStage(),            # Smart quality filter for AI-off mode too
+            BusinessNoiseFilterStage(),          # Business noise recognition for AI-off mode too
         ]
 
     pipeline = AnalysisPipeline(stages=stages)
@@ -268,23 +271,40 @@ async def _execute_analysis(task_id: str):
                 await session.flush()
             return  # No notification needed
 
-        # Check if log quality filter removed ALL logs (all were INFO/noise)
+        # Check if log quality filter + business noise filter removed ALL logs
         if ctx.log_count == 0 or not ctx.processed_logs.strip():
+            quality_filtered = ctx.log_metadata.get("quality_filtered", 0)
+            noise_filtered = ctx.log_metadata.get("business_noise_filtered", 0)
+            noise_categories = ctx.log_metadata.get("business_noise_categories", {})
             logger.info(
-                "task_skipped_quality_filtered",
+                "task_skipped_all_filtered",
                 task_id=task_id,
-                quality_filtered=ctx.log_metadata.get("quality_filtered", 0),
+                quality_filtered=quality_filtered,
+                noise_filtered=noise_filtered,
+                noise_categories=noise_categories,
             )
+
+            # Build descriptive skip message
+            skip_parts = []
+            if quality_filtered > 0:
+                skip_parts.append(f"{quality_filtered} 条 INFO/DEBUG 噪声")
+            if noise_filtered > 0:
+                cat_desc = ", ".join(
+                    f"{cat}({cnt}条)" for cat, cnt in noise_categories.items()
+                ) if noise_categories else ""
+                skip_parts.append(
+                    f"{noise_filtered} 条业务流程日志"
+                    + (f"（{cat_desc}）" if cat_desc else "")
+                )
+            skip_reason = "、".join(skip_parts) if skip_parts else "全部日志"
+
             async with get_db_context() as session:
                 task = await session.get(LogAnalysisTask, task_id)
                 task.status = "completed"
                 task.log_count = 0
                 task.token_usage = 0
                 task.completed_at = datetime.now(timezone.utc)
-                task.error_message = (
-                    f"跳过分析: {ctx.log_metadata.get('quality_filtered', 0)} 条日志"
-                    f"经质量过滤后为 INFO/业务噪声日志"
-                )
+                task.error_message = f"跳过分析: {skip_reason}经过滤后无需处理"
                 task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
                 await session.flush()
             return  # No real errors, no notification
@@ -483,6 +503,32 @@ async def _run_learning_hooks(ctx, task_id: str):
         invalidate_profile_cache(ctx.business_line_id)
     except Exception:
         pass
+
+    # Hook 5: AI classified logs as business noise → auto-learn noise rule
+    if ctx.log_metadata.get("noise_classification") == "business_noise":
+        try:
+            from logmind.domain.log.business_noise import store_learned_noise_rule
+            noise_pattern = ctx.error_signature[:100] if ctx.error_signature else ""
+            if not noise_pattern:
+                # Fallback: use first 100 chars of processed logs as pattern
+                noise_pattern = ctx.processed_logs.strip()[:100]
+            if noise_pattern and len(noise_pattern) >= 5:
+                await store_learned_noise_rule(
+                    pattern=noise_pattern,
+                    business_line_id=ctx.business_line_id,
+                    category=ctx.log_metadata.get("noise_category", "ai_learned"),
+                    reason=ctx.log_metadata.get("noise_reason", "AI判定为业务噪声"),
+                    source_task_id=task_id,
+                    confidence=0.7,
+                )
+                logger.info(
+                    "noise_rule_learned",
+                    pattern=noise_pattern[:60],
+                    category=ctx.log_metadata.get("noise_category"),
+                    task_id=task_id,
+                )
+        except Exception as e:
+            logger.warning("noise_rule_learn_failed", error=str(e))
 
 
 async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):

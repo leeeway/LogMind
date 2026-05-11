@@ -158,12 +158,30 @@ def _fallback_system_prompt(ctx: PipelineContext) -> str:
 - error_signals: (可选) 从日志中识别出的关键错误信号短语列表。
 - experience_rule: (可选) 一条可复用的分析经验规则。
 
+## 重要: 业务噪声识别
+分析日志时，请先判断是否为以下类型的「业务流程日志」（非真实系统/基础设施故障）:
+1. **用户侧错误**: 账号密码错误、验证码过期/错误、参数校验失败、登录连续失败限制
+2. **业务流控**: 短信渠道不可用、频率限制、限流降级、服务维护中
+3. **业务校验失败**: 余额不足、库存不足、权限不足、数据不存在
+4. **幂等/重复操作**: 重复提交、重复请求、订单已存在
+5. **业务结果日志**: 接口返回 success=false 但原因是业务逻辑（非系统异常）
+
+如果判定日志主要为业务噪声（非系统故障），请：
+- 将 severity 设为 "info"
+- 添加字段 noise_classification: "business_noise"
+- 添加字段 noise_category: "<类别>" (如 auth_flow / sms_flow / biz_validation / rate_limit)
+- 添加字段 noise_reason: "<一句话说明为什么这不是故障>"
+
+⚠️ 注意区分: 如果日志中包含 Exception 堆栈、连接超时、OOM、5xx 状态码等基础设施信号，
+即使同时包含"密码错误"等关键词，也应视为真实故障（如数据库连接密码配置错误）。
+
 ## 重要规则
 1. 只输出 JSON 数组，不要输出其他内容。
 2. 数组中必须至少包含一个元素。
 3. 即使日志中没有严重问题，也请输出至少一条 info 级别的总结。
 4. 对相同类型的错误请合并分析，说明出现频率和影响范围。
-5. 对于 severity 为 critical 或 warning 的结果，务必提供 error_signals 和 experience_rule 字段。"""
+5. 对于 severity 为 critical 或 warning 的结果，务必提供 error_signals 和 experience_rule 字段。
+6. 对于业务噪声日志，务必提供 noise_classification、noise_category、noise_reason 字段。"""
 
     if ctx.has_stack_traces:
         if ctx.language == "csharp":

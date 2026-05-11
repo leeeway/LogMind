@@ -91,6 +91,10 @@ class BusinessLineCreate(BaseModel):
         True,
         description="Enable AI model analysis. When False, only sends error log notifications via webhook.",
     )
+    noise_patterns: list[dict] = Field(
+        default_factory=list,
+        description='Custom noise patterns. e.g. [{"pattern": "暂无发送渠道", "category": "sms_flow", "reason": "..."}]',
+    )
     webhook_url: str = Field(
         "",
         max_length=500,
@@ -110,6 +114,7 @@ class BusinessLineUpdate(BaseModel):
     field_mapping: dict | None = None
     ai_enabled: bool | None = None
     webhook_url: str | None = None
+    noise_patterns: list[dict] | None = None
     is_active: bool | None = None
     auto_remediation_config: str | None = None
 
@@ -125,17 +130,20 @@ class BusinessLineResponse(BaseSchema):
     field_mapping: dict = Field(default_factory=dict)
     ai_enabled: bool = True
     webhook_url: str = ""
+    noise_patterns: list[dict] = Field(default_factory=list)
     auto_remediation_config: str = "{}"
     is_active: bool
     created_at: datetime
 
-    @field_validator("field_mapping", mode="before")
+    @field_validator("field_mapping", "noise_patterns", mode="before")
     @classmethod
     def parse_json_field(cls, v):
-        """Auto-deserialize JSON string from DB into dict."""
+        """Auto-deserialize JSON string from DB into dict/list."""
         if isinstance(v, str):
             try:
                 return json.loads(v)
             except (json.JSONDecodeError, TypeError):
+                if v.startswith("["):
+                    return []
                 return {}
         return v

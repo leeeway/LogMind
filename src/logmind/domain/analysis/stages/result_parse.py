@@ -34,6 +34,7 @@ class ResultParseStage(PipelineStage):
             ctx.analysis_results = []
             all_learned_signals = []
             all_learned_rules = []
+            all_noise_classifications = []
             for item in parsed:
                 # Extract source log references if the AI provided them
                 raw_refs = item.get("source_log_refs", item.get("log_refs", []))
@@ -61,8 +62,33 @@ class ResultParseStage(PipelineStage):
                 if isinstance(rule, str) and 10 <= len(rule) <= 200:
                     all_learned_rules.append(rule)
 
+                # Extract AI noise classification
+                noise_class = item.get("noise_classification", "")
+                if noise_class == "business_noise":
+                    noise_category = item.get("noise_category", "unknown")
+                    noise_reason = item.get("noise_reason", "")
+                    all_noise_classifications.append({
+                        "category": noise_category,
+                        "reason": noise_reason,
+                    })
+
             ctx.learned_signals = list(dict.fromkeys(all_learned_signals))
             ctx.learned_rules = list(dict.fromkeys(all_learned_rules))
+
+            # Propagate AI noise classification to metadata
+            if all_noise_classifications:
+                # If majority of results are classified as noise, mark the whole task
+                noise_ratio = len(all_noise_classifications) / max(len(ctx.analysis_results), 1)
+                if noise_ratio >= 0.5:
+                    ctx.log_metadata["noise_classification"] = "business_noise"
+                    ctx.log_metadata["noise_category"] = all_noise_classifications[0]["category"]
+                    ctx.log_metadata["noise_reason"] = all_noise_classifications[0]["reason"]
+                    logger.info(
+                        "ai_noise_classification",
+                        task_id=ctx.task_id,
+                        noise_ratio=round(noise_ratio, 2),
+                        categories=[n["category"] for n in all_noise_classifications],
+                    )
 
             if not ctx.analysis_results:
                 logger.warning("result_parse_empty_fallback", task_id=ctx.task_id)
