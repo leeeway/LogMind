@@ -10,6 +10,7 @@ Handles:
 """
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from logmind.core.async_task import run_async
@@ -39,6 +40,7 @@ _EMPTY_LOG_SUMMARY_MARKERS = (
     "... (truncated)",
     "... (更多日志请登录平台查看)",
 )
+_SUMMARY_WORD_RE = re.compile(r"[A-Za-z\u4e00-\u9fff]{3,}")
 
 
 @celery_app.task(
@@ -129,6 +131,18 @@ def _normalize_error_summary(summary: str) -> str:
     for marker in _EMPTY_LOG_SUMMARY_MARKERS:
         normalized = normalized.replace(marker, "")
     return normalized.strip()
+
+
+def _is_meaningful_error_summary(summary: str) -> bool:
+    """Reject empty or obviously truncated summary fragments."""
+    normalized = _normalize_error_summary(summary)
+    if not normalized:
+        return False
+    if len(normalized) < 24:
+        return False
+    if normalized.endswith(":") and len(normalized) < 80:
+        return False
+    return bool(_SUMMARY_WORD_RE.search(normalized))
 
 
 async def _execute_analysis(task_id: str):
@@ -705,7 +719,7 @@ async def _send_error_log_notification(ctx, webhook_url: str):
     from logmind.domain.alert.channels.webhook import notify_error_logs
 
     normalized_summary = _normalize_error_summary(ctx.processed_logs)
-    if not normalized_summary or ctx.log_count <= 0:
+    if not _is_meaningful_error_summary(normalized_summary) or ctx.log_count <= 0:
         logger.info(
             "error_log_notification_skipped_empty",
             biz=ctx.business_line_name,
