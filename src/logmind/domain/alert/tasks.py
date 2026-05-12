@@ -92,19 +92,31 @@ async def _dispatch_patrols():
 
 
 @celery_app.task(
+    bind=True,
     name="logmind.domain.alert.tasks.patrol_single_business_line",
-    max_retries=1,
-    default_retry_delay=30,
+    max_retries=3,
+    default_retry_delay=60,
 )
-def patrol_single_business_line(business_line_id: str):
+def patrol_single_business_line(self, business_line_id: str):
     """
     Independent patrol task for a single business line.
 
     Creates an analysis task and dispatches it. Runs in its own
     Celery worker slot, so failures are isolated.
     """
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
     logger.info("patrol_single_started", biz_id=business_line_id)
-    run_async(_patrol_single(business_line_id))
+    try:
+        run_async(_patrol_single(business_line_id))
+    except (ConnectionResetError, ConnectionError, OSError, DBAPIError, OperationalError) as exc:
+        logger.warning(
+            "patrol_single_retrying",
+            biz_id=business_line_id,
+            retry=self.request.retries + 1,
+            error=str(exc),
+        )
+        raise self.retry(exc=exc)
 
 
 async def _patrol_single(business_line_id: str):

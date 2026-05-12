@@ -34,6 +34,12 @@ import logmind.domain.analysis.analysis_indexer  # noqa: F401 — registers inde
 
 logger = get_logger(__name__)
 
+_EMPTY_LOG_SUMMARY_MARKERS = (
+    "(No logs found matching the query)",
+    "... (truncated)",
+    "... (更多日志请登录平台查看)",
+)
+
 
 @celery_app.task(
     bind=True,
@@ -115,6 +121,14 @@ def _estimate_cost_usd(token_usage, provider_config_id: str = "") -> float:
         return round(cost, 6)
     except Exception:
         return 0.0
+
+
+def _normalize_error_summary(summary: str) -> str:
+    """Strip placeholder markers and whitespace from direct-log alert summaries."""
+    normalized = (summary or "").strip()
+    for marker in _EMPTY_LOG_SUMMARY_MARKERS:
+        normalized = normalized.replace(marker, "")
+    return normalized.strip()
 
 
 async def _execute_analysis(task_id: str):
@@ -690,8 +704,13 @@ async def _send_error_log_notification(ctx, webhook_url: str):
     from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_error_logs
 
-    if not ctx.processed_logs or not ctx.processed_logs.strip() or ctx.log_count <= 0:
-        logger.info("error_log_notification_skipped_empty", biz=ctx.business_line_name, task_id=ctx.task_id)
+    normalized_summary = _normalize_error_summary(ctx.processed_logs)
+    if not normalized_summary or ctx.log_count <= 0:
+        logger.info(
+            "error_log_notification_skipped_empty",
+            biz=ctx.business_line_name,
+            task_id=ctx.task_id,
+        )
         return
 
     # Check aggregation window
@@ -699,7 +718,7 @@ async def _send_error_log_notification(ctx, webhook_url: str):
         business_line_id=ctx.business_line_id,
         severity="error",
         error_signature=None,  # No AI signature in AI-off mode
-        alert_summary=ctx.processed_logs[:200] if ctx.processed_logs else "",
+        alert_summary=normalized_summary[:200],
     )
 
     if not should_send:
@@ -712,7 +731,7 @@ async def _send_error_log_notification(ctx, webhook_url: str):
         return
 
     # Build a concise error summary from preprocessed logs
-    error_summary = ctx.processed_logs
+    error_summary = normalized_summary
     if len(error_summary) > 1500:
         error_summary = error_summary[:1500] + "\n... (更多日志请登录平台查看)"
 

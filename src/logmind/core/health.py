@@ -50,9 +50,10 @@ async def check_database() -> ComponentHealth:
     """Probe database connectivity with SELECT 1."""
     try:
         from sqlalchemy import text
-        from logmind.core.database import async_session_factory
+        from logmind.core.database import get_session_factory
 
         t0 = time.monotonic()
+        async_session_factory = get_session_factory()
         async with async_session_factory() as session:
             await session.execute(text("SELECT 1"))
         latency = (time.monotonic() - t0) * 1000
