@@ -108,6 +108,13 @@ class Settings(BaseSettings):
     analysis_semantic_dedup_ttl_hours: int = 168  # 7 days (was 24h)
     analysis_embedding_cache_ttl_seconds: int = 3600
 
+    # ── Embedding API Retry Configuration ─────────────────
+    embedding_retry_enabled: bool = True
+    embedding_retry_max_attempts: int = 3
+    embedding_retry_initial_wait: float = 1.0
+    embedding_retry_max_wait: float = 10.0
+    embedding_retry_multiplier: float = 2.0
+
     @field_validator("analysis_severity_threshold")
     @classmethod
     def validate_severity(cls, v: str) -> str:

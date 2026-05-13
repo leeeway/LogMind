@@ -6,6 +6,7 @@ with multi-round ReAct reasoning for autonomous log diagnosis.
 """
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import AsyncIterator
@@ -19,6 +20,28 @@ logger = get_logger(__name__)
 # ── Configuration ────────────────────────────────────────
 MAX_CONTEXT_TURNS = 10
 MAX_TOOL_ROUNDS = 5  # Maximum ReAct reasoning loops
+ACCOUNT_FIELD_CANDIDATES = [
+    "userId.keyword",
+    "userId",
+    "userid.keyword",
+    "userid",
+    "user_id.keyword",
+    "user_id",
+    "username.keyword",
+    "username",
+    "account.keyword",
+    "account",
+    "account_no.keyword",
+    "account_no",
+    "accountno.keyword",
+    "accountno",
+    "member_id.keyword",
+    "member_id",
+    "memberid.keyword",
+    "memberid",
+    "operator.keyword",
+    "operator",
+]
 
 # ── System Prompt (ReAct Reasoning Template) ─────────────
 CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级别的自主排查 Agent。
@@ -44,6 +67,7 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - `get_service_health` — 查询服务健康状态（错误率/QPS/趋势）
 - `compare_time_windows` — 对比两个时间窗口的日志差异
 - `trace_error_chain` — 追踪错误的上下游调用链
+- `query_account_activity` — 查询账号在一段时间内的操作轨迹
 - `create_analysis_task` — 创建深度分析任务
 
 ## ReAct 推理规范
@@ -69,6 +93,7 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - 搜索 Java 异常时可用异常类名，如 "SQLServerException"、"NullPointerException"
 - 使用 search_logs 时建议传入 domain 参数来指定站点精确过滤
 - 如果第一次搜索无结果，尝试换关键词或去掉 severity 过滤
+- 如果用户提到“账号/用户/手机号/会员号最近做了什么”，优先调用 `query_account_activity`
 
 ## 回答规范
 - 用中文回复
@@ -76,7 +101,7 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - 然后给出分析结论（根因、影响范围、严重程度）
 - 最后提供可操作的修复建议
 - 使用 Markdown 格式（标题、列表、代码块、表格）
-- 在回复末尾用 `---` 分隔后列出 2-3 个跟进建议
+- 在回复末尾用 `---` 分隔后列出 2-3 个跟进建议，每条单独一行
 - 如果查到具体日志，用代码块展示关键条目
 - 所有时间显示为北京时间
 
@@ -163,6 +188,28 @@ CHAT_TOOLS = AGENT_TOOLS + [
     {
         "type": "function",
         "function": {
+            "name": "query_account_activity",
+            "description": (
+                "查询某个账号/用户在指定时间范围内的操作轨迹。"
+                "用于回答“某个账号最近1小时做了哪些操作”这类动态问题。"
+                "会尽量从 userId、userid、username、account、member_id、operator 和 message 中匹配。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "账号、用户ID、手机号或会员号"},
+                    "hours": {"type": "integer", "description": "查看最近多少小时，默认 1", "default": 1},
+                    "service_name": {"type": "string", "description": "可选，指定服务名称缩小范围"},
+                    "action_keyword": {"type": "string", "description": "可选，按动作关键词过滤，如 登录 / 下单 / 支付"},
+                    "size": {"type": "integer", "description": "最多返回多少条记录，默认 20，最大 50", "default": 20},
+                },
+                "required": ["account"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_analysis_task",
             "description": (
                 "创建一个深度分析任务，由 LogMind 分析引擎进行全面的日志诊断。"
@@ -192,7 +239,13 @@ class ChatSession:
     created_at: str = ""
     updated_at: str = ""
 
-    def add_message(self, role: str, content: str, tool_calls: list | None = None):
+    def add_message(
+        self,
+        role: str,
+        content: str,
+        tool_calls: list | None = None,
+        metadata: dict | None = None,
+    ):
         msg = {
             "role": role,
             "content": content,
@@ -200,6 +253,8 @@ class ChatSession:
         }
         if tool_calls:
             msg["tool_calls"] = tool_calls
+        if metadata:
+            msg["metadata"] = metadata
         self.messages.append(msg)
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
@@ -283,6 +338,143 @@ def _extract_error_core(msg: str, max_len: int = 500) -> str:
 class ChatService:
     """Manages chat sessions and AI inference with multi-round ReAct reasoning."""
 
+    @staticmethod
+    def _extract_domain_from_index_pattern(index_pattern: str) -> str | None:
+        if ".gyyx.cn" not in index_pattern:
+            return None
+        domain = index_pattern.rstrip("*").rstrip("-")
+        for prefix in ("master-", "develop-", ".ds-master-", ".ds-develop-"):
+            if domain.startswith(prefix):
+                domain = domain[len(prefix):]
+                break
+        if ".gyyx.cn" not in domain:
+            return None
+        return domain.split(".gyyx.cn")[0] + ".gyyx.cn"
+
+    async def _load_business_lines(self, tenant_id: str, db_session) -> list:
+        from logmind.domain.tenant.models import BusinessLine
+        from logmind.shared.base_repository import BaseRepository
+
+        biz_repo = BaseRepository(BusinessLine)
+        return await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
+
+    def _resolve_business_line(self, biz_lines: list, service_name: str):
+        if not service_name:
+            return None
+
+        query = service_name.strip().lower()
+        if not query:
+            return None
+
+        for biz in biz_lines:
+            if query in (biz.name or "").lower():
+                return biz
+
+        for biz in biz_lines:
+            domain = self._extract_domain_from_index_pattern(biz.es_index_pattern or "") or ""
+            if query in domain.lower():
+                return biz
+
+        return None
+
+    @staticmethod
+    def _to_beijing_time(value: str) -> str:
+        if not value:
+            return ""
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            beijing_tz = timezone(timedelta(hours=8))
+            return dt.astimezone(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return value
+
+    @staticmethod
+    def _summarize_action_message(message: str) -> str:
+        if not message:
+            return ""
+        condensed = " ".join(message.split())
+        return condensed[:180] + ("..." if len(condensed) > 180 else "")
+
+    def _extract_context_entities(self, text: str, biz_lines: list) -> dict[str, str]:
+        context: dict[str, str] = {}
+        normalized = text or ""
+
+        account_match = re.search(
+            r"(?:账号|账户|用户|userId|userid|memberId|memberid|手机号|手机号码)[：:\s]*([A-Za-z0-9_\-@.]{3,})",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if not account_match:
+            account_match = re.search(r"\b([1-9]\d{7,18})\b", normalized)
+        if account_match:
+            context["account"] = account_match.group(1)
+
+        hours_match = re.search(r"最近\s*(\d+)\s*(小时|h)", normalized)
+        if hours_match:
+            context["hours"] = hours_match.group(1)
+
+        for biz in biz_lines:
+            if biz.name and biz.name in normalized:
+                context["service_name"] = biz.name
+                break
+            domain = self._extract_domain_from_index_pattern(biz.es_index_pattern or "")
+            if domain and domain in normalized:
+                context["service_name"] = biz.name
+                break
+
+        return context
+
+    def _build_suggested_actions(self, user_message: str, final_content: str, biz_lines: list) -> list[dict]:
+        context = self._extract_context_entities(f"{user_message}\n{final_content}", biz_lines)
+        actions: list[dict] = []
+
+        def add_action(label: str, prompt: str, kind: str = "follow_up"):
+            if not prompt.strip():
+                return
+            if any(existing["prompt"] == prompt for existing in actions):
+                return
+            actions.append({"label": label, "prompt": prompt, "kind": kind})
+
+        account = context.get("account")
+        service_name = context.get("service_name")
+        hours = context.get("hours", "1")
+
+        if account:
+            add_action(
+                "继续查账号轨迹",
+                f"请继续查询账号 {account} 最近 {hours} 小时的完整操作轨迹，并按时间线列出关键动作。",
+            )
+            add_action(
+                "查账号异常",
+                f"请检查账号 {account} 最近 {hours} 小时是否伴随异常、失败或告警，并指出影响服务。",
+            )
+
+        if service_name:
+            add_action(
+                "查看服务健康",
+                f"请检查 {service_name} 最近 6 小时的服务健康状态，并总结错误趋势。",
+                kind="diagnose",
+            )
+            add_action(
+                "创建深度分析",
+                f"请为 {service_name} 当前问题创建一个深度分析任务，并说明分析目标。",
+                kind="task",
+            )
+
+        add_action("查询最近告警", "请查询最近 1 小时的重要告警，并按严重程度排序。", kind="diagnose")
+
+        follow_ups = []
+        divider_idx = final_content.rfind("---")
+        if divider_idx > -1:
+            for line in final_content[divider_idx + 3:].splitlines():
+                cleaned = re.sub(r"^[\s\-\d.*]+", "", line).strip()
+                if 4 <= len(cleaned) <= 80 and not cleaned.startswith("#"):
+                    follow_ups.append(cleaned)
+        for item in follow_ups[:3]:
+            add_action(item[:16], item)
+
+        return actions[:4]
+
     def get_or_create_session(
         self, session_id: str, tenant_id: str, user_id: str
     ) -> ChatSession:
@@ -360,6 +552,10 @@ class ChatService:
                 return await self._tool_compare_time_windows(args, tenant_id, db_session)
             elif tool_name == "trace_error_chain":
                 return await self._tool_trace_error_chain(args, tenant_id, db_session)
+            elif tool_name == "query_account_activity":
+                return await self._tool_query_account_activity(
+                    args, tenant_id, db_session, es_index_pattern
+                )
             elif tool_name == "create_analysis_task":
                 return await self._tool_create_analysis_task(args, tenant_id, db_session)
             else:
@@ -392,21 +588,12 @@ class ChatService:
 
     async def _tool_get_service_health(self, args: dict, tenant_id: str, db_session) -> str:
         """Get service health status — queries ES directly for real-time metrics."""
-        from logmind.domain.tenant.models import BusinessLine
-        from logmind.shared.base_repository import BaseRepository
-
         service_name = args.get("service_name", "")
         hours = min(args.get("hours", 6), 24)
-
-        biz_repo = BaseRepository(BusinessLine)
-        biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
 
         # Find matching service (fuzzy)
-        target = None
-        for b in biz_lines:
-            if service_name.lower() in b.name.lower():
-                target = b
-                break
+        target = self._resolve_business_line(biz_lines, service_name)
 
         if not target:
             return json.dumps({
@@ -427,16 +614,8 @@ class ChatService:
         except (json.JSONDecodeError, TypeError):
             pass
 
-        if not domain_filter and ".gyyx.cn" in index_pattern:
-            # Extract domain from index pattern: strip leading "master-"/"develop-" and trailing "*"
-            idx_clean = index_pattern.rstrip("*").rstrip("-")
-            for prefix in ("master-", "develop-", ".ds-master-", ".ds-develop-"):
-                if idx_clean.startswith(prefix):
-                    idx_clean = idx_clean[len(prefix):]
-                    break
-            if ".gyyx.cn" in idx_clean:
-                # Truncate at ".gyyx.cn" to avoid date suffixes like "-2026.04"
-                domain_filter = idx_clean.split(".gyyx.cn")[0] + ".gyyx.cn"
+        if not domain_filter:
+            domain_filter = self._extract_domain_from_index_pattern(index_pattern)
 
         now = datetime.now(timezone.utc)
         since = now - timedelta(hours=hours)
@@ -560,18 +739,9 @@ class ChatService:
 
     async def _tool_compare_time_windows(self, args: dict, tenant_id: str, db_session) -> str:
         """Compare error distributions between two time windows."""
-        from logmind.domain.tenant.models import BusinessLine
-        from logmind.shared.base_repository import BaseRepository
-
         service_name = args.get("service_name", "")
-        biz_repo = BaseRepository(BusinessLine)
-        biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
-
-        target = None
-        for b in biz_lines:
-            if service_name.lower() in b.name.lower():
-                target = b
-                break
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
+        target = self._resolve_business_line(biz_lines, service_name)
 
         if not target:
             return json.dumps({"error": f"未找到服务 '{service_name}'"}, ensure_ascii=False)
@@ -612,22 +782,114 @@ class ChatService:
         )
         return result
 
+    async def _tool_query_account_activity(
+        self, args: dict, tenant_id: str, db_session, es_index_pattern: str
+    ) -> str:
+        """Query recent activity for a specific account across likely identity fields."""
+        from logmind.domain.log.service import log_service
+
+        account = str(args.get("account", "")).strip()
+        if not account:
+            return json.dumps({"error": "缺少 account 参数"}, ensure_ascii=False)
+
+        hours = args.get("hours", 1)
+        try:
+            hours = int(hours)
+        except (TypeError, ValueError):
+            hours = 1
+        hours = min(max(hours, 1), 24)
+
+        size = args.get("size", 20)
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 20
+        size = min(max(size, 5), 50)
+
+        service_name = str(args.get("service_name", "")).strip()
+        action_keyword = str(args.get("action_keyword", "")).strip()
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
+        target = self._resolve_business_line(biz_lines, service_name)
+
+        index_pattern = target.es_index_pattern if target else es_index_pattern or "*"
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=hours)
+
+        should_clauses = [{"match_phrase": {"message": account}}]
+        for field in ACCOUNT_FIELD_CANDIDATES:
+            should_clauses.append({"term": {field: account}})
+
+        filter_clauses = [{
+            "range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}
+        }]
+        if target:
+            domain = self._extract_domain_from_index_pattern(target.es_index_pattern or "")
+            if domain:
+                filter_clauses.append({"term": {"gy.domain.keyword": domain}})
+
+        must_clauses = [{
+            "bool": {
+                "should": should_clauses,
+                "minimum_should_match": 1,
+            }
+        }]
+        if action_keyword:
+            must_clauses.append({"match_phrase": {"message": action_keyword}})
+
+        body = {
+            "query": {
+                "bool": {
+                    "must": must_clauses,
+                    "filter": filter_clauses,
+                }
+            },
+            "sort": [{"@timestamp": {"order": "desc"}}],
+            "size": size,
+            "_source": [
+                "@timestamp",
+                "message",
+                "gy.domain",
+                "gy.filetype",
+                "gy.hostname",
+                "host.name",
+                "userId",
+                "userid",
+                "user_id",
+                "username",
+                "account",
+                "member_id",
+                "operator",
+            ],
+        }
+
+        result = await log_service.es.search(index=index_pattern, body=body)
+        hits = result.get("hits", {}).get("hits", [])
+        activities = []
+        for hit in hits:
+            source = hit.get("_source", {})
+            gy_info = source.get("gy", {}) or {}
+            activities.append({
+                "time": self._to_beijing_time(source.get("@timestamp", "")),
+                "domain": gy_info.get("domain", ""),
+                "filetype": gy_info.get("filetype", ""),
+                "host": gy_info.get("hostname") or source.get("host", {}).get("name", ""),
+                "action": self._summarize_action_message(source.get("message", "")),
+            })
+
+        return json.dumps({
+            "account": account,
+            "service": target.name if target else "",
+            "time_range": f"最近 {hours} 小时",
+            "count": len(activities),
+            "activities": activities,
+        }, ensure_ascii=False)
+
     async def _tool_create_analysis_task(self, args: dict, tenant_id: str, db_session) -> str:
         """Create a deep analysis task."""
-        from logmind.domain.tenant.models import BusinessLine
-        from logmind.shared.base_repository import BaseRepository
-
         service_name = args.get("service_name", "")
         description = args.get("description", "")
-
-        biz_repo = BaseRepository(BusinessLine)
-        biz_lines = await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
-
-        target = None
-        for b in biz_lines:
-            if service_name.lower() in b.name.lower():
-                target = b
-                break
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
+        target = self._resolve_business_line(biz_lines, service_name)
 
         if not target:
             return json.dumps({"error": f"未找到服务 '{service_name}'"}, ensure_ascii=False)
@@ -673,10 +935,7 @@ class ChatService:
         )
 
         # Resolve ES index pattern for the tenant
-        from logmind.domain.tenant.models import BusinessLine
-        from logmind.shared.base_repository import BaseRepository
-        biz_repo = BaseRepository(BusinessLine)
-        biz_lines = await biz_repo.get_all(db_session, tenant_id=session.tenant_id, limit=100)
+        biz_lines = await self._load_business_lines(session.tenant_id, db_session)
         default_index = biz_lines[0].es_index_pattern if biz_lines else "*"
 
         # Build messages with context
@@ -726,27 +985,18 @@ class ChatService:
                         # Resolve index pattern from service_name or domain arg
                         tool_index = default_index
                         svc_name = func_args.get("service_name", "") or func_args.get("domain", "")
-                        matched_biz = None
-                        if svc_name:
-                            for b in biz_lines:
-                                if svc_name.lower() in b.name.lower():
-                                    tool_index = b.es_index_pattern
-                                    matched_biz = b
-                                    break
+                        matched_biz = self._resolve_business_line(biz_lines, svc_name)
+                        if matched_biz:
+                            tool_index = matched_biz.es_index_pattern
 
                         # For search_logs: inject exact gy.domain if we matched a biz line
                         # AI often passes imprecise domain like "login" — resolve to exact value
                         if matched_biz and func_name == "search_logs":
-                            idx_pat = matched_biz.es_index_pattern or ""
-                            if ".gyyx.cn" in idx_pat:
-                                exact_domain = idx_pat.rstrip("*").rstrip("-")
-                                for pfx in ("master-", "develop-", ".ds-master-", ".ds-develop-"):
-                                    if exact_domain.startswith(pfx):
-                                        exact_domain = exact_domain[len(pfx):]
-                                        break
-                                if ".gyyx.cn" in exact_domain:
-                                    exact_domain = exact_domain.split(".gyyx.cn")[0] + ".gyyx.cn"
-                                    func_args["domain"] = exact_domain
+                            exact_domain = self._extract_domain_from_index_pattern(
+                                matched_biz.es_index_pattern or ""
+                            )
+                            if exact_domain:
+                                func_args["domain"] = exact_domain
 
                         tool_result = await self.execute_tool_call(
                             func_name, func_args, session.tenant_id,
@@ -786,6 +1036,9 @@ class ChatService:
                 else:
                     # No tool calls — LLM is ready to answer
                     final_content = response.content
+                    suggested_actions = self._build_suggested_actions(
+                        user_message, final_content, biz_lines
+                    )
 
                     # Stream the response token by token
                     chunk_size = 4
@@ -793,7 +1046,14 @@ class ChatService:
                         chunk = final_content[i:i + chunk_size]
                         yield self._sse({"type": "token", "content": chunk})
 
-                    session.add_message("assistant", final_content)
+                    if suggested_actions:
+                        yield self._sse({"type": "suggested_actions", "actions": suggested_actions})
+
+                    session.add_message(
+                        "assistant",
+                        final_content,
+                        metadata={"suggested_actions": suggested_actions},
+                    )
                     yield self._sse({"type": "done", "total_rounds": total_rounds})
                     return
 
@@ -814,13 +1074,21 @@ class ChatService:
                 request=final_request,
             )
             final_content = final_response.content
+            suggested_actions = self._build_suggested_actions(user_message, final_content, biz_lines)
 
             chunk_size = 4
             for i in range(0, len(final_content), chunk_size):
                 chunk = final_content[i:i + chunk_size]
                 yield self._sse({"type": "token", "content": chunk})
 
-            session.add_message("assistant", final_content)
+            if suggested_actions:
+                yield self._sse({"type": "suggested_actions", "actions": suggested_actions})
+
+            session.add_message(
+                "assistant",
+                final_content,
+                metadata={"suggested_actions": suggested_actions},
+            )
             yield self._sse({"type": "done", "total_rounds": total_rounds})
 
         except Exception as e:

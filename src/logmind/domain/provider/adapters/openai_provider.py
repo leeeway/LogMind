@@ -6,9 +6,17 @@ Used as base class for SubAPI and DeepSeek providers.
 """
 
 import json
+import logging
 from typing import AsyncIterator
 
 import httpx
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+    before_sleep_log,
+)
 
 from logmind.domain.provider.base import (
     BaseProvider,
@@ -20,6 +28,30 @@ from logmind.domain.provider.base import (
     TokenUsage,
 )
 from logmind.domain.provider.factory import register_provider
+from logmind.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+def _is_retryable_error(exception: BaseException) -> bool:
+    """Determine if an error should trigger a retry."""
+    # Network errors are always retryable
+    if isinstance(exception, (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.PoolTimeout,
+        httpx.NetworkError,
+    )):
+        return True
+
+    # HTTP status errors
+    if isinstance(exception, httpx.HTTPStatusError):
+        status = exception.response.status_code
+        # Retry: 404 (proxy issue), 429 (rate limit), 5xx (server errors), 408 (timeout)
+        return status in (404, 408, 429) or (500 <= status < 600)
+
+    return False
 
 
 @register_provider("openai")
@@ -130,7 +162,29 @@ class OpenAIProvider(BaseProvider):
                     continue
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
-        """OpenAI text embedding."""
+        """OpenAI text embedding with retry logic."""
+        settings = get_settings()
+
+        if not settings.embedding_retry_enabled:
+            return await self._embed_impl(request)
+
+        # Create retry decorator dynamically based on settings
+        retry_decorator = retry(
+            stop=stop_after_attempt(settings.embedding_retry_max_attempts),
+            wait=wait_exponential(
+                multiplier=settings.embedding_retry_multiplier,
+                min=settings.embedding_retry_initial_wait,
+                max=settings.embedding_retry_max_wait,
+            ),
+            retry=retry_if_exception(_is_retryable_error),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
+
+        return await retry_decorator(self._embed_impl)(request)
+
+    async def _embed_impl(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        """Internal embedding implementation."""
         payload = {
             "model": request.model or "text-embedding-3-small",
             "input": request.texts,

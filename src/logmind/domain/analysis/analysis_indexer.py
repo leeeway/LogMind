@@ -14,6 +14,8 @@ to skip LLM calls and reuse historical conclusions.
 import asyncio
 import json
 
+import httpx
+
 from logmind.core.celery_app import celery_app
 from logmind.core.logging import get_logger
 
@@ -82,8 +84,18 @@ async def _async_index_analysis(
         else:
             logger.warning("analysis_index_insert_failed", task_id=task_id)
 
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            "analysis_index_http_error",
+            task_id=task_id,
+            status_code=e.response.status_code,
+        )
     except Exception as e:
-        logger.error("analysis_index_error", task_id=task_id, error=str(e))
+        logger.warning(
+            "analysis_index_embed_failed",
+            task_id=task_id,
+            error_type=type(e).__name__,
+        )
     finally:
         from logmind.core.elasticsearch import close_celery_es_client
         await close_celery_es_client()

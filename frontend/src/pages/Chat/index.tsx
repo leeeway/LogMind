@@ -1,15 +1,18 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
-import { Button, Input, Typography, Space, Spin, Tag, message, Tooltip } from 'antd';
+import { Button, Input, Typography, Space, Tag, message, Tooltip, Select } from 'antd';
 import {
   SendOutlined, PlusOutlined, DeleteOutlined, RobotOutlined,
   UserOutlined, ThunderboltOutlined, CopyOutlined,
   LoadingOutlined, BranchesOutlined, ExportOutlined,
-  HistoryOutlined, QuestionCircleOutlined,
+  QuestionCircleOutlined, ClockCircleOutlined, RadarChartOutlined,
+  AlertOutlined, SearchOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { chatApi } from '@/api/chat';
+import { businessLineApi } from '@/api/services';
 import { useAuthStore } from '@/stores/authStore';
 import AgentStepCard, { ToolStep } from '@/components/AgentStepCard';
 
@@ -20,6 +23,50 @@ interface ChatMessage {
   content: string;
   timestamp?: string;
   isStreaming?: boolean;
+  metadata?: {
+    suggested_actions?: SuggestedAction[];
+  };
+}
+
+interface SessionSummary {
+  id: string;
+  title: string;
+  message_count: number;
+}
+
+interface BusinessLineOption {
+  id: string;
+  name: string;
+}
+
+interface SuggestedAction {
+  label: string;
+  prompt: string;
+  kind?: 'follow_up' | 'diagnose' | 'task';
+}
+
+interface DynamicQuestionTemplate {
+  id: string;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  accent: string;
+  defaults: Record<string, string>;
+  buildPrompt: (values: Record<string, string>) => string;
+}
+
+interface ChatRouteState {
+  prefill?: string;
+  source?: string;
+}
+
+interface RawChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp?: string;
+  metadata?: {
+    suggested_actions?: SuggestedAction[];
+  };
 }
 
 const WELCOME_SUGGESTIONS = [
@@ -32,7 +79,8 @@ const WELCOME_SUGGESTIONS = [
 ];
 
 const ChatPage: React.FC = () => {
-  const [sessions, setSessions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [businessLines, setBusinessLines] = useState<BusinessLineOption[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -41,24 +89,60 @@ const ChatPage: React.FC = () => {
   const [thinkingRound, setThinkingRound] = useState(0);
   const [thinkingText, setThinkingText] = useState('');
   const [followUps, setFollowUps] = useState<string[]>([]);
+  const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
+  const [activeTemplateId, setActiveTemplateId] = useState('account-activity');
+  const [templateValues, setTemplateValues] = useState<Record<string, string>>({
+    account: '',
+    hours: '1',
+    serviceName: '',
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<any>(null);
+  const inputRef = useRef<TextAreaRef>(null);
   const token = useAuthStore((s) => s.token);
   const location = useLocation();
 
-  // Handle prefill from QuickDiagnose
-  useEffect(() => {
-    const state = location.state as any;
-    if (state?.prefill) {
-      setInput(state.prefill);
-      // Clear the state
-      window.history.replaceState({}, document.title);
-      // Auto-send after a short delay
-      setTimeout(() => {
-        sendMessage(state.prefill);
-      }, 300);
-    }
-  }, [location.state]);
+  const dynamicTemplates = useMemo<DynamicQuestionTemplate[]>(() => ([
+    {
+      id: 'account-activity',
+      title: '账号操作追踪',
+      description: '输入账号，查询最近一段时间的关键操作轨迹',
+      icon: <ClockCircleOutlined />,
+      accent: '#1677ff',
+      defaults: { account: '', hours: '1', serviceName: '' },
+      buildPrompt: (values) => (
+        `请帮我查询账号 ${values.account} 在最近 ${values.hours || '1'} 小时做了哪些操作，` +
+        `${values.serviceName ? `重点查看 ${values.serviceName}，` : ''}` +
+        '按时间线列出关键动作、异常和影响服务。'
+      ),
+    },
+    {
+      id: 'service-errors',
+      title: '服务错误诊断',
+      description: '按服务和时间范围快速定位关键错误与异常趋势',
+      icon: <RadarChartOutlined />,
+      accent: '#52c41a',
+      defaults: { account: '', hours: '1', serviceName: '' },
+      buildPrompt: (values) => (
+        `请分析 ${values.serviceName || '目标服务'} 最近 ${values.hours || '1'} 小时的关键错误、异常趋势和影响范围，` +
+        '并给出下一步排查建议。'
+      ),
+    },
+    {
+      id: 'alert-check',
+      title: '告警与关联排查',
+      description: '检查同时间段的重要告警，并关联服务健康情况',
+      icon: <AlertOutlined />,
+      accent: '#fa8c16',
+      defaults: { account: '', hours: '1', serviceName: '' },
+      buildPrompt: (values) => (
+        `请查询最近 ${values.hours || '1'} 小时的重要告警，` +
+        `${values.serviceName ? `重点关注 ${values.serviceName}，` : ''}` +
+        `${values.account ? `并判断是否与账号 ${values.account} 的操作有关。` : '并总结对应服务的影响范围。'}`
+      ),
+    },
+  ]), []);
+
+  const activeTemplate = dynamicTemplates.find((item) => item.id === activeTemplateId) || dynamicTemplates[0];
 
   // Load sessions
   const loadSessions = useCallback(async () => {
@@ -68,7 +152,21 @@ const ChatPage: React.FC = () => {
     } catch { /* ignore */ }
   }, []);
 
+  const loadBusinessLines = useCallback(async () => {
+    try {
+      const { data } = await businessLineApi.list({ page_size: 100 });
+      const items = Array.isArray(data?.items) ? data.items as BusinessLineOption[] : [];
+      setBusinessLines(items.map((item) => ({
+        id: item.id,
+        name: item.name,
+      })));
+    } catch { /* ignore */ }
+  }, []);
+
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadSessions(); }, [loadSessions]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { loadBusinessLines(); }, [loadBusinessLines]);
 
   // Scroll to bottom
   useEffect(() => {
@@ -83,6 +181,9 @@ const ChatPage: React.FC = () => {
       setMessages([]);
       setToolSteps([]);
       setThinkingRound(0);
+      setThinkingText('');
+      setFollowUps([]);
+      setSuggestedActions([]);
       loadSessions();
     } catch { message.error('创建会话失败'); }
   };
@@ -94,11 +195,16 @@ const ChatPage: React.FC = () => {
     setThinkingRound(0);
     try {
       const { data } = await chatApi.getSession(sessionId);
-      setMessages((data?.messages || []).map((m: any) => ({
+      const rawMessages = Array.isArray(data?.messages) ? data.messages as RawChatMessage[] : [];
+      setMessages(rawMessages.map((m) => ({
         role: m.role,
         content: m.content,
         timestamp: m.timestamp,
+        metadata: m.metadata,
       })));
+      const assistantMessages = rawMessages.filter((m) => m.role === 'assistant');
+      const lastAssistant = assistantMessages[assistantMessages.length - 1];
+      setSuggestedActions(lastAssistant?.metadata?.suggested_actions || []);
     } catch { setMessages([]); }
   };
 
@@ -109,13 +215,39 @@ const ChatPage: React.FC = () => {
       if (activeSessionId === sessionId) {
         setActiveSessionId(null);
         setMessages([]);
+        setSuggestedActions([]);
+        setFollowUps([]);
       }
       loadSessions();
     } catch { /* ignore */ }
   };
 
+  const updateTemplateValue = (key: string, value: string) => {
+    setTemplateValues((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const applyTemplate = (templateId: string) => {
+    const template = dynamicTemplates.find((item) => item.id === templateId);
+    if (!template) return;
+    setActiveTemplateId(templateId);
+    setTemplateValues((prev) => ({ ...template.defaults, ...prev }));
+  };
+
+  const sendTemplatePrompt = () => {
+    if (activeTemplateId === 'account-activity' && !templateValues.account.trim()) {
+      message.warning('请输入账号后再发起查询');
+      return;
+    }
+    if ((activeTemplateId === 'service-errors' || activeTemplateId === 'alert-check') && !templateValues.serviceName.trim()) {
+      message.warning('请选择服务后再发起查询');
+      return;
+    }
+    const builtPrompt = activeTemplate.buildPrompt(templateValues).trim();
+    sendMessage(builtPrompt);
+  };
+
   // Send message with SSE streaming + multi-round ReAct
-  const sendMessage = async (content?: string) => {
+  const sendMessage = useCallback(async (content?: string) => {
     const text = content || input.trim();
     if (!text || sending) return;
     setInput('');
@@ -137,6 +269,7 @@ const ChatPage: React.FC = () => {
     setThinkingRound(0);
     setThinkingText('');
     setFollowUps([]);
+    setSuggestedActions([]);
 
     // Add placeholder for assistant
     setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
@@ -158,6 +291,7 @@ const ChatPage: React.FC = () => {
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let assistantContent = '';
+      let latestSuggestedActions: SuggestedAction[] = [];
 
       if (reader) {
         while (true) {
@@ -208,12 +342,20 @@ const ChatPage: React.FC = () => {
                   return updated;
                 });
 
+              } else if (event.type === 'suggested_actions') {
+                latestSuggestedActions = event.actions || [];
+                setSuggestedActions(latestSuggestedActions);
+
               } else if (event.type === 'done') {
                 setMessages(prev => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
                   if (last?.role === 'assistant') {
-                    updated[updated.length - 1] = { ...last, isStreaming: false };
+                    updated[updated.length - 1] = {
+                      ...last,
+                      isStreaming: false,
+                      metadata: { suggested_actions: latestSuggestedActions },
+                    };
                   }
                   return updated;
                 });
@@ -236,8 +378,9 @@ const ChatPage: React.FC = () => {
           }
         }
       }
-    } catch (err: any) {
-      message.error('发送失败: ' + (err.message || '网络错误'));
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : '网络错误';
+      message.error('发送失败: ' + errorMessage);
       setMessages(prev => {
         const updated = [...prev];
         if (updated[updated.length - 1]?.role === 'assistant') {
@@ -252,7 +395,20 @@ const ChatPage: React.FC = () => {
       loadSessions();
       inputRef.current?.focus();
     }
-  };
+  }, [activeSessionId, input, loadSessions, sending, token]);
+
+  useEffect(() => {
+    const state = (location.state || {}) as ChatRouteState;
+    if (!state.prefill) return;
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setInput(state.prefill);
+    window.history.replaceState({}, document.title);
+    const timer = window.setTimeout(() => {
+      sendMessage(state.prefill);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [location.state, sendMessage]);
 
   const copyContent = (text: string) => {
     navigator.clipboard.writeText(text).then(() => message.success('已复制'));
@@ -285,7 +441,7 @@ const ChatPage: React.FC = () => {
           )}
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
-          {sessions.map((s: any) => (
+          {sessions.map((s) => (
             <div
               key={s.id}
               onClick={() => loadSession(s.id)}
@@ -354,6 +510,104 @@ const ChatPage: React.FC = () => {
                       <ThunderboltOutlined style={{ marginRight: 6, color: '#1677ff' }} />{s}
                     </div>
                   ))}
+                </div>
+                <div style={{
+                  marginTop: 28,
+                  textAlign: 'left',
+                  background: 'var(--lm-bg-card)',
+                  border: '1px solid var(--lm-border-light)',
+                  borderRadius: 16,
+                  padding: 18,
+                }}>
+                  <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 14 }}>
+                    <div>
+                      <Text style={{ display: 'block', color: 'var(--lm-text)', fontSize: 14, fontWeight: 600 }}>
+                        动态问题发起
+                      </Text>
+                      <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 12 }}>
+                        先选场景，再补参数，直接发起严谨诊断
+                      </Text>
+                    </div>
+                    <Button type="primary" icon={<SendOutlined />} onClick={sendTemplatePrompt} disabled={sending}>
+                      发起查询
+                    </Button>
+                  </Space>
+
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
+                    {dynamicTemplates.map((template) => {
+                      const active = template.id === activeTemplateId;
+                      return (
+                        <div
+                          key={template.id}
+                          onClick={() => applyTemplate(template.id)}
+                          style={{
+                            width: 'calc(33.333% - 7px)',
+                            minWidth: 180,
+                            padding: '12px 14px',
+                            borderRadius: 12,
+                            cursor: 'pointer',
+                            border: `1px solid ${active ? `${template.accent}55` : 'var(--lm-border-light)'}`,
+                            background: active ? `${template.accent}10` : 'var(--lm-bg-elevated)',
+                            transition: 'all 0.2s',
+                          }}
+                        >
+                          <Space align="start">
+                            <span style={{ color: template.accent, fontSize: 16 }}>{template.icon}</span>
+                            <div>
+                              <Text style={{ display: 'block', color: 'var(--lm-text)', fontWeight: 600, fontSize: 13 }}>
+                                {template.title}
+                              </Text>
+                              <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 11 }}>
+                                {template.description}
+                              </Text>
+                            </div>
+                          </Space>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <Input
+                      value={templateValues.account}
+                      onChange={(e) => updateTemplateValue('account', e.target.value)}
+                      placeholder="账号 / userId / 手机号"
+                      style={{ flex: 1, minWidth: 180, borderRadius: 10 }}
+                    />
+                    <Select
+                      value={templateValues.hours}
+                      onChange={(value) => updateTemplateValue('hours', value)}
+                      style={{ width: 120 }}
+                      options={[
+                        { value: '1', label: '最近1小时' },
+                        { value: '3', label: '最近3小时' },
+                        { value: '6', label: '最近6小时' },
+                        { value: '24', label: '最近24小时' },
+                      ]}
+                    />
+                    <Select
+                      allowClear
+                      placeholder="选择服务（可选）"
+                      value={templateValues.serviceName || undefined}
+                      onChange={(value) => updateTemplateValue('serviceName', value || '')}
+                      style={{ flex: 1, minWidth: 180 }}
+                      options={businessLines.map((biz) => ({ value: biz.name, label: biz.name }))}
+                    />
+                  </div>
+
+                  <div style={{
+                    marginTop: 12,
+                    padding: '10px 12px',
+                    borderRadius: 10,
+                    background: 'var(--lm-bg-elevated)',
+                    border: '1px dashed var(--lm-border-light)',
+                    color: 'var(--lm-text-secondary)',
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                  }}>
+                    <SearchOutlined style={{ marginRight: 6, color: '#1677ff' }} />
+                    {activeTemplate.buildPrompt(templateValues)}
+                  </div>
                 </div>
               </div>
             )}
@@ -511,6 +765,38 @@ const ChatPage: React.FC = () => {
               </div>
             )}
 
+            {suggestedActions.length > 0 && !sending && (
+              <div style={{
+                marginBottom: 16, marginLeft: 46,
+                padding: '14px 16px',
+                borderRadius: 14,
+                background: 'var(--lm-bg-card)',
+                border: '1px solid var(--lm-border-light)',
+                animation: 'lm-fadeSlideIn 0.3s ease-out',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <ThunderboltOutlined style={{ color: '#1677ff', fontSize: 14 }} />
+                  <Text style={{ fontSize: 12, fontWeight: 600, color: 'var(--lm-text)' }}>
+                    相关操作
+                  </Text>
+                  <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
+                    继续深挖当前上下文
+                  </Text>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {suggestedActions.map((action, index) => (
+                    <Button
+                      key={`${action.label}-${index}`}
+                      onClick={() => sendMessage(action.prompt)}
+                      style={{ borderRadius: 10 }}
+                    >
+                      {action.label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -521,6 +807,67 @@ const ChatPage: React.FC = () => {
           background: 'var(--lm-bg-container)',
         }}>
           <div style={{ maxWidth: 800, margin: '0 auto' }}>
+            <div style={{
+              display: 'flex',
+              gap: 8,
+              flexWrap: 'wrap',
+              marginBottom: 10,
+            }}>
+              {dynamicTemplates.map((template) => {
+                const active = template.id === activeTemplateId;
+                return (
+                  <div
+                    key={template.id}
+                    onClick={() => applyTemplate(template.id)}
+                    style={{
+                      padding: '6px 10px',
+                      borderRadius: 999,
+                      cursor: 'pointer',
+                      border: `1px solid ${active ? `${template.accent}55` : 'var(--lm-border-light)'}`,
+                      background: active ? `${template.accent}10` : 'var(--lm-bg-elevated)',
+                      color: active ? 'var(--lm-text)' : 'var(--lm-text-secondary)',
+                      fontSize: 12,
+                    }}
+                  >
+                    <span style={{ color: template.accent, marginRight: 6 }}>{template.icon}</span>
+                    {template.title}
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+              <Input
+                value={templateValues.account}
+                onChange={(e) => updateTemplateValue('account', e.target.value)}
+                placeholder="账号 / userId"
+                style={{ width: 180, borderRadius: 10 }}
+                disabled={sending}
+              />
+              <Select
+                value={templateValues.hours}
+                onChange={(value) => updateTemplateValue('hours', value)}
+                style={{ width: 130 }}
+                disabled={sending}
+                options={[
+                  { value: '1', label: '最近1小时' },
+                  { value: '3', label: '最近3小时' },
+                  { value: '6', label: '最近6小时' },
+                  { value: '24', label: '最近24小时' },
+                ]}
+              />
+              <Select
+                allowClear
+                placeholder="服务（可选）"
+                value={templateValues.serviceName || undefined}
+                onChange={(value) => updateTemplateValue('serviceName', value || '')}
+                style={{ minWidth: 200, flex: 1 }}
+                disabled={sending}
+                options={businessLines.map((biz) => ({ value: biz.name, label: biz.name }))}
+              />
+              <Button onClick={sendTemplatePrompt} disabled={sending} icon={<ThunderboltOutlined />}>
+                套用模板提问
+              </Button>
+            </div>
             <div style={{
               display: 'flex', gap: 12, alignItems: 'flex-end',
               background: 'var(--lm-bg-elevated)', borderRadius: 14,

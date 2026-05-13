@@ -19,6 +19,8 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 
+import httpx
+
 from logmind.core.config import get_settings
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
@@ -160,8 +162,27 @@ async def cached_embed(
 
         return vector
 
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            "embedding_http_error",
+            status_code=e.response.status_code,
+            url=str(e.request.url),
+            response_text=e.response.text[:200] if e.response.text else "",
+        )
+        return None
+    except httpx.NetworkError as e:
+        logger.error(
+            "embedding_network_error",
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+        return None
     except Exception as e:
-        logger.error("embedding_failed", error=str(e))
+        logger.error(
+            "embedding_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         return None
 
 
