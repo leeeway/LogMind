@@ -51,8 +51,8 @@ interface DynamicQuestionTemplate {
   description: string;
   icon: React.ReactNode;
   accent: string;
-  defaults: Record<string, string>;
-  buildPrompt: (values: Record<string, string>) => string;
+  defaults: TemplateValues;
+  buildPrompt: (values: TemplateValues) => string;
 }
 
 interface LiveRecommendation {
@@ -78,6 +78,25 @@ interface RawChatMessage {
   metadata?: {
     suggested_actions?: SuggestedAction[];
   };
+}
+
+interface TimelineEntry {
+  time: string;
+  service: string;
+  domain: string;
+  filetype: string;
+  host: string;
+  identity: string;
+  action: string;
+}
+
+interface TemplateValues {
+  account: string;
+  hours: string;
+  serviceName: string;
+  serviceNames: string[];
+  serviceScope: 'single' | 'selected' | 'core' | 'all';
+  keyword: string;
 }
 
 const WELCOME_SUGGESTIONS = [
@@ -108,11 +127,16 @@ const ChatPage: React.FC = () => {
   const [followUps, setFollowUps] = useState<string[]>([]);
   const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
   const [liveRecommendations, setLiveRecommendations] = useState<LiveRecommendation[]>([]);
+  const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([]);
+  const [timelineSummary, setTimelineSummary] = useState('');
   const [activeTemplateId, setActiveTemplateId] = useState('account-activity');
-  const [templateValues, setTemplateValues] = useState<Record<string, string>>({
+  const [templateValues, setTemplateValues] = useState<TemplateValues>({
     account: '',
     hours: '1',
     serviceName: '',
+    serviceNames: [],
+    serviceScope: 'core',
+    keyword: '',
   });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<TextAreaRef>(null);
@@ -126,10 +150,11 @@ const ChatPage: React.FC = () => {
       description: '输入账号，查询最近一段时间的关键操作轨迹',
       icon: <ClockCircleOutlined />,
       accent: '#1677ff',
-      defaults: { account: '', hours: '1', serviceName: '' },
+      defaults: { account: '', hours: '1', serviceName: '', serviceNames: [], serviceScope: 'core', keyword: '' },
       buildPrompt: (values) => (
         `请帮我查询账号 ${values.account} 在最近 ${values.hours || '1'} 小时做了哪些操作，` +
-        `${values.serviceName ? `重点查看 ${values.serviceName}，` : ''}` +
+        `${values.keyword ? `同时关注关键词 ${values.keyword}，` : ''}` +
+        `${values.serviceScope === 'all' ? '覆盖全部业务线，' : values.serviceScope === 'core' ? '覆盖核心业务线，' : values.serviceScope === 'selected' && values.serviceNames.length ? `重点查看 ${values.serviceNames.join('、')}，` : values.serviceName ? `重点查看 ${values.serviceName}，` : ''}` +
         '按时间线列出关键动作、异常和影响服务。'
       ),
     },
@@ -139,7 +164,7 @@ const ChatPage: React.FC = () => {
       description: '按服务和时间范围快速定位关键错误与异常趋势',
       icon: <RadarChartOutlined />,
       accent: '#52c41a',
-      defaults: { account: '', hours: '1', serviceName: '' },
+      defaults: { account: '', hours: '1', serviceName: '', serviceNames: [], serviceScope: 'single', keyword: '' },
       buildPrompt: (values) => (
         `请分析 ${values.serviceName || '目标服务'} 最近 ${values.hours || '1'} 小时的关键错误、异常趋势和影响范围，` +
         '并给出下一步排查建议。'
@@ -151,7 +176,7 @@ const ChatPage: React.FC = () => {
       description: '检查同时间段的重要告警，并关联服务健康情况',
       icon: <AlertOutlined />,
       accent: '#fa8c16',
-      defaults: { account: '', hours: '1', serviceName: '' },
+      defaults: { account: '', hours: '1', serviceName: '', serviceNames: [], serviceScope: 'single', keyword: '' },
       buildPrompt: (values) => (
         `请查询最近 ${values.hours || '1'} 小时的重要告警，` +
         `${values.serviceName ? `重点关注 ${values.serviceName}，` : ''}` +
@@ -219,6 +244,8 @@ const ChatPage: React.FC = () => {
       setThinkingText('');
       setFollowUps([]);
       setSuggestedActions([]);
+      setTimelineEntries([]);
+      setTimelineSummary('');
       loadSessions();
     } catch { message.error('创建会话失败'); }
   };
@@ -252,12 +279,14 @@ const ChatPage: React.FC = () => {
         setMessages([]);
         setSuggestedActions([]);
         setFollowUps([]);
+        setTimelineEntries([]);
+        setTimelineSummary('');
       }
       loadSessions();
     } catch { /* ignore */ }
   };
 
-  const updateTemplateValue = (key: string, value: string) => {
+  const updateTemplateValue = <K extends keyof TemplateValues>(key: K, value: TemplateValues[K]) => {
     setTemplateValues((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -265,7 +294,7 @@ const ChatPage: React.FC = () => {
     const template = dynamicTemplates.find((item) => item.id === templateId);
     if (!template) return;
     setActiveTemplateId(templateId);
-    setTemplateValues((prev) => ({ ...template.defaults, ...prev }));
+    setTemplateValues((prev) => ({ ...template.defaults, ...prev } as TemplateValues));
   };
 
   const sendTemplatePrompt = () => {
@@ -273,7 +302,14 @@ const ChatPage: React.FC = () => {
       message.warning('请输入账号后再发起查询');
       return;
     }
-    if ((activeTemplateId === 'service-errors' || activeTemplateId === 'alert-check') && !templateValues.serviceName.trim()) {
+    if (templateValues.serviceScope === 'selected' && templateValues.serviceNames.length === 0) {
+      message.warning('多业务线模式下请至少选择一个业务线');
+      return;
+    }
+    if (
+      (activeTemplateId === 'service-errors' || activeTemplateId === 'alert-check') &&
+      !templateValues.serviceName.trim()
+    ) {
       message.warning('请选择服务后再发起查询');
       return;
     }
@@ -305,6 +341,8 @@ const ChatPage: React.FC = () => {
     setThinkingText('');
     setFollowUps([]);
     setSuggestedActions([]);
+    setTimelineEntries([]);
+    setTimelineSummary('');
 
     // Add placeholder for assistant
     setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
@@ -360,6 +398,18 @@ const ChatPage: React.FC = () => {
                     ? { ...s, result: event.result, summary: event.summary, status: 'done' as const, endTime: Date.now() }
                     : s
                 ));
+                if (event.name === 'query_operation_timeline' || event.name === 'query_account_activity') {
+                  try {
+                    const parsed = JSON.parse(event.result || '{}');
+                    const nextTimeline = parsed.timeline || parsed.activities || [];
+                    if (Array.isArray(nextTimeline) && nextTimeline.length > 0) {
+                      setTimelineEntries(nextTimeline.slice(0, 30));
+                      setTimelineSummary(parsed.summary || '');
+                    }
+                  } catch {
+                    // ignore malformed preview
+                  }
+                }
 
               } else if (event.type === 'step_done') {
                 // Round complete, waiting for next
@@ -684,6 +734,12 @@ const ChatPage: React.FC = () => {
                       placeholder="账号 / userId / 手机号"
                       style={{ flex: 1, minWidth: 180, borderRadius: 10 }}
                     />
+                    <Input
+                      value={templateValues.keyword}
+                      onChange={(e) => updateTemplateValue('keyword', e.target.value)}
+                      placeholder="关键词（可选，如 登录 / 激活 / 异常）"
+                      style={{ flex: 1, minWidth: 180, borderRadius: 10 }}
+                    />
                     <Select
                       value={templateValues.hours}
                       onChange={(value) => updateTemplateValue('hours', value)}
@@ -696,11 +752,29 @@ const ChatPage: React.FC = () => {
                       ]}
                     />
                     <Select
+                      value={templateValues.serviceScope}
+                      onChange={(value) => updateTemplateValue('serviceScope', value)}
+                      style={{ width: 150 }}
+                      options={[
+                        { value: 'single', label: '单服务' },
+                        { value: 'selected', label: '多业务线' },
+                        { value: 'core', label: '核心业务线' },
+                        { value: 'all', label: '全部业务线' },
+                      ]}
+                    />
+                    <Select
+                      mode={templateValues.serviceScope === 'selected' ? 'multiple' : undefined}
                       allowClear
-                      placeholder="选择服务（可选）"
-                      value={templateValues.serviceName || undefined}
-                      onChange={(value) => updateTemplateValue('serviceName', value || '')}
-                      style={{ flex: 1, minWidth: 180 }}
+                      placeholder={templateValues.serviceScope === 'selected' ? '选择多个业务线' : '选择服务（可选）'}
+                      value={templateValues.serviceScope === 'selected' ? templateValues.serviceNames : (templateValues.serviceName || undefined)}
+                      onChange={(value) => {
+                        if (templateValues.serviceScope === 'selected') {
+                          updateTemplateValue('serviceNames', (value || []) as string[]);
+                        } else {
+                          updateTemplateValue('serviceName', (value || '') as string);
+                        }
+                      }}
+                      style={{ flex: 1, minWidth: 220 }}
                       options={businessLines.map((biz) => ({ value: biz.name, label: biz.name }))}
                     />
                   </div>
@@ -907,6 +981,67 @@ const ChatPage: React.FC = () => {
               </div>
             )}
 
+            {timelineEntries.length > 0 && !sending && (
+              <div style={{
+                marginBottom: 16, marginLeft: 46,
+                padding: '14px 16px',
+                borderRadius: 14,
+                background: 'var(--lm-bg-card)',
+                border: '1px solid var(--lm-border-light)',
+                animation: 'lm-fadeSlideIn 0.3s ease-out',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <ClockCircleOutlined style={{ color: '#1677ff', fontSize: 14 }} />
+                  <Text style={{ fontSize: 12, fontWeight: 600, color: 'var(--lm-text)' }}>
+                    操作时间线
+                  </Text>
+                  {timelineSummary && (
+                    <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
+                      {timelineSummary}
+                    </Text>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {timelineEntries.map((entry, index) => (
+                    <div
+                      key={`${entry.time}-${entry.service}-${index}`}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '120px 120px 1fr',
+                        gap: 10,
+                        alignItems: 'start',
+                        padding: '10px 12px',
+                        borderRadius: 10,
+                        background: 'var(--lm-bg-elevated)',
+                        border: '1px solid var(--lm-border-light)',
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)', fontFamily: 'monospace' }}>
+                        {entry.time}
+                      </Text>
+                      <div>
+                        <Text style={{ display: 'block', fontSize: 12, color: 'var(--lm-text)', fontWeight: 600 }}>
+                          {entry.service}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
+                          {entry.filetype || entry.domain}
+                        </Text>
+                      </div>
+                      <div>
+                        <Text style={{ display: 'block', fontSize: 12, color: 'var(--lm-text-secondary)', lineHeight: 1.6 }}>
+                          {entry.action}
+                        </Text>
+                        <div style={{ marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          {entry.identity && <Tag style={{ margin: 0, borderRadius: 999 }}>{entry.identity}</Tag>}
+                          {entry.host && <Tag style={{ margin: 0, borderRadius: 999 }}>{entry.host}</Tag>}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -953,6 +1088,13 @@ const ChatPage: React.FC = () => {
                 style={{ width: 180, borderRadius: 10 }}
                 disabled={sending}
               />
+              <Input
+                value={templateValues.keyword}
+                onChange={(e) => updateTemplateValue('keyword', e.target.value)}
+                placeholder="关键词"
+                style={{ width: 180, borderRadius: 10 }}
+                disabled={sending}
+              />
               <Select
                 value={templateValues.hours}
                 onChange={(value) => updateTemplateValue('hours', value)}
@@ -966,11 +1108,30 @@ const ChatPage: React.FC = () => {
                 ]}
               />
               <Select
+                value={templateValues.serviceScope}
+                onChange={(value) => updateTemplateValue('serviceScope', value)}
+                style={{ width: 140 }}
+                disabled={sending}
+                options={[
+                  { value: 'single', label: '单服务' },
+                  { value: 'selected', label: '多业务线' },
+                  { value: 'core', label: '核心业务线' },
+                  { value: 'all', label: '全部业务线' },
+                ]}
+              />
+              <Select
+                mode={templateValues.serviceScope === 'selected' ? 'multiple' : undefined}
                 allowClear
-                placeholder="服务（可选）"
-                value={templateValues.serviceName || undefined}
-                onChange={(value) => updateTemplateValue('serviceName', value || '')}
-                style={{ minWidth: 200, flex: 1 }}
+                placeholder={templateValues.serviceScope === 'selected' ? '业务线（多选）' : '服务（可选）'}
+                value={templateValues.serviceScope === 'selected' ? templateValues.serviceNames : (templateValues.serviceName || undefined)}
+                onChange={(value) => {
+                  if (templateValues.serviceScope === 'selected') {
+                    updateTemplateValue('serviceNames', (value || []) as string[]);
+                  } else {
+                    updateTemplateValue('serviceName', (value || '') as string);
+                  }
+                }}
+                style={{ minWidth: 220, flex: 1 }}
                 disabled={sending}
                 options={businessLines.map((biz) => ({ value: biz.name, label: biz.name }))}
               />

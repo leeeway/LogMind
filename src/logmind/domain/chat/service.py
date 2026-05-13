@@ -74,6 +74,7 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - `compare_time_windows` — 对比两个时间窗口的日志差异
 - `trace_error_chain` — 追踪错误的上下游调用链
 - `query_account_activity` — 查询账号在一段时间内的操作轨迹
+- `query_operation_timeline` — 跨多个业务线按时间梳理账号/关键词相关操作链路
 - `create_analysis_task` — 创建深度分析任务
 
 ## ReAct 推理规范
@@ -99,7 +100,8 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - 搜索 Java 异常时可用异常类名，如 "SQLServerException"、"NullPointerException"
 - 使用 search_logs 时建议传入 domain 参数来指定站点精确过滤
 - 如果第一次搜索无结果，尝试换关键词或去掉 severity 过滤
-- 如果用户提到“账号/用户/手机号/会员号最近做了什么”，优先调用 `query_account_activity`
+- 如果用户提到“账号/用户/手机号/会员号最近做了什么”，优先调用 `query_operation_timeline`
+- 如果用户要求“整个业务线/多个业务线/相关链路按时间点梳理”，优先调用 `query_operation_timeline`
 
 ## 回答规范
 - 用中文回复
@@ -210,6 +212,41 @@ CHAT_TOOLS = AGENT_TOOLS + [
                     "size": {"type": "integer", "description": "最多返回多少条记录，默认 20，最大 50", "default": 20},
                 },
                 "required": ["account"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_operation_timeline",
+            "description": (
+                "跨多个业务线按时间线梳理账号、关键词、异常相关的操作链路。"
+                "适合回答“整个业务线里这个账号做了什么”“按时间点梳理相关链路操作”这类问题。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "可选，账号、用户ID、手机号或会员号"},
+                    "keyword": {"type": "string", "description": "可选，动作关键词或异常关键词"},
+                    "hours": {"type": "integer", "description": "查看最近多少小时，默认 1", "default": 1},
+                    "service_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，指定多个业务线名称；不传则按 scope 自动选择",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["single", "selected", "core", "all"],
+                        "description": "查询范围：单服务/多选服务/核心业务线/全部业务线，默认 core",
+                    },
+                    "include_related": {
+                        "type": "boolean",
+                        "description": "是否自动扩展所选业务线的上下游 related_services，默认 true",
+                        "default": True,
+                    },
+                    "size": {"type": "integer", "description": "最多返回多少条记录，默认 40，最大 100", "default": 40},
+                },
+                "required": [],
             },
         },
     },
@@ -383,6 +420,49 @@ class ChatService:
 
         return None
 
+    def _resolve_business_lines(self, biz_lines: list, service_names: list[str] | None, scope: str) -> list:
+        if service_names:
+            resolved = []
+            seen_ids: set[str] = set()
+            for service_name in service_names:
+                biz = self._resolve_business_line(biz_lines, service_name)
+                if biz and biz.id not in seen_ids:
+                    resolved.append(biz)
+                    seen_ids.add(biz.id)
+            if resolved:
+                return resolved
+
+        active_lines = [biz for biz in biz_lines if getattr(biz, "is_active", True)]
+        if scope == "all":
+            return active_lines or biz_lines
+        if scope == "core":
+            core_lines = [biz for biz in active_lines if getattr(biz, "is_core_path", False)]
+            return core_lines or active_lines[:8] or biz_lines[:8]
+        return active_lines[:8] or biz_lines[:8]
+
+    def _expand_related_business_lines(self, base_lines: list, all_lines: list) -> list:
+        if not base_lines:
+            return []
+        by_id = {biz.id: biz for biz in all_lines}
+        resolved = []
+        seen_ids: set[str] = set()
+
+        def add_biz(biz):
+            if biz and biz.id not in seen_ids:
+                resolved.append(biz)
+                seen_ids.add(biz.id)
+
+        for biz in base_lines:
+            add_biz(biz)
+            try:
+                related = json.loads(biz.related_services) if biz.related_services else {}
+            except (json.JSONDecodeError, TypeError):
+                related = {}
+            for related_id in (related.get("upstream", []) + related.get("downstream", [])):
+                add_biz(by_id.get(related_id))
+
+        return resolved
+
     @staticmethod
     def _to_beijing_time(value: str) -> str:
         if not value:
@@ -400,6 +480,14 @@ class ChatService:
             return ""
         condensed = " ".join(message.split())
         return condensed[:180] + ("..." if len(condensed) > 180 else "")
+
+    @staticmethod
+    def _extract_identity_value(source: dict) -> str:
+        for key in ("userId", "userid", "user_id", "userName", "username", "account", "accountNo", "memberId", "member_id", "operator"):
+            value = source.get(key)
+            if value:
+                return str(value)
+        return ""
 
     def _extract_context_entities(self, text: str, biz_lines: list) -> dict[str, str]:
         context: dict[str, str] = {}
@@ -419,6 +507,10 @@ class ChatService:
         if hours_match:
             context["hours"] = hours_match.group(1)
 
+        keyword_match = re.search(r"(?:关键词|关键字|异常|操作|行为|查)\s*[：:]\s*([^\s，。；,;]{2,30})", normalized)
+        if keyword_match:
+            context["keyword"] = keyword_match.group(1)
+
         for biz in biz_lines:
             if biz.name and biz.name in normalized:
                 context["service_name"] = biz.name
@@ -427,6 +519,9 @@ class ChatService:
             if domain and domain in normalized:
                 context["service_name"] = biz.name
                 break
+
+        if re.search(r"(整个业务线|多个业务线|全链路|相关链路|全部业务线)", normalized):
+            context["scope"] = "all"
 
         return context
 
@@ -464,6 +559,11 @@ class ChatService:
             add_action(
                 "继续查账号轨迹",
                 f"请继续查询账号 {account} 最近 {hours} 小时的完整操作轨迹，并按时间线列出关键动作。",
+            )
+            add_action(
+                "跨业务线查链路",
+                f"请在整个业务线范围内按时间线梳理账号 {account} 最近 {hours} 小时的相关操作链路，并标记涉及服务。",
+                kind="diagnose",
             )
             add_action(
                 "查账号异常",
@@ -581,6 +681,10 @@ class ChatService:
             elif tool_name == "query_account_activity":
                 return await self._tool_query_account_activity(
                     args, tenant_id, db_session, es_index_pattern
+                )
+            elif tool_name == "query_operation_timeline":
+                return await self._tool_query_operation_timeline(
+                    args, tenant_id, db_session
                 )
             elif tool_name == "create_analysis_task":
                 return await self._tool_create_analysis_task(args, tenant_id, db_session)
@@ -808,12 +912,161 @@ class ChatService:
         )
         return result
 
+    async def _collect_operation_timeline(
+        self,
+        tenant_id: str,
+        db_session,
+        *,
+        account: str = "",
+        keyword: str = "",
+        hours: int = 1,
+        service_names: list[str] | None = None,
+        scope: str = "core",
+        include_related: bool = True,
+        size: int = 40,
+    ) -> dict:
+        from logmind.domain.log.service import log_service
+
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
+        targets = self._resolve_business_lines(biz_lines, service_names, scope)
+        if include_related and scope in {"single", "selected", "core"}:
+            targets = self._expand_related_business_lines(targets, biz_lines)
+        if not targets:
+            return {
+                "time_range": f"最近 {hours} 小时",
+                "services_scanned": [],
+                "count": 0,
+                "timeline": [],
+                "summary": "没有可查询的业务线。",
+            }
+
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=hours)
+        size_per_service = max(10, min(30, size // max(len(targets), 1) + 8))
+
+        timeline: list[dict] = []
+        scanned_services: list[str] = []
+        related_expanded: list[str] = []
+
+        if include_related and len(targets) > len(service_names or []):
+            related_expanded = [
+                biz.name for biz in targets
+                if not service_names or biz.name not in service_names
+            ]
+
+        for target in targets:
+            should_clauses = []
+            if account:
+                should_clauses.extend([
+                    {"match_phrase": {"message": account}},
+                    {
+                        "query_string": {
+                            "query": f"*{account}*",
+                            "fields": ["message"],
+                            "analyze_wildcard": True,
+                        }
+                    },
+                ])
+                for field in ACCOUNT_FIELD_CANDIDATES:
+                    should_clauses.append({"term": {field: account}})
+            if keyword:
+                should_clauses.extend([
+                    {"match_phrase": {"message": keyword}},
+                    {
+                        "query_string": {
+                            "query": f"*{keyword}*",
+                            "fields": ["message"],
+                            "analyze_wildcard": True,
+                        }
+                    },
+                ])
+
+            if not should_clauses:
+                continue
+
+            body = {
+                "query": {
+                    "bool": {
+                        "must": [{
+                            "bool": {
+                                "should": should_clauses,
+                                "minimum_should_match": 1,
+                            }
+                        }],
+                        "filter": [{
+                            "range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}
+                        }],
+                    }
+                },
+                "sort": [{"@timestamp": {"order": "asc"}}],
+                "size": size_per_service,
+                "_source": [
+                    "@timestamp",
+                    "message",
+                    "gy.domain",
+                    "gy.filetype",
+                    "gy.hostname",
+                    "host.name",
+                    "userId",
+                    "userid",
+                    "user_id",
+                    "userName",
+                    "username",
+                    "account",
+                    "accountNo",
+                    "memberId",
+                    "member_id",
+                    "operator",
+                ],
+            }
+
+            result = await log_service.es.search(index=target.es_index_pattern, body=body)
+            hits = result.get("hits", {}).get("hits", [])
+            if hits:
+                scanned_services.append(target.name)
+            for hit in hits:
+                source = hit.get("_source", {})
+                gy_info = source.get("gy", {}) or {}
+                timeline.append({
+                    "time": self._to_beijing_time(source.get("@timestamp", "")),
+                    "service": target.name,
+                    "domain": gy_info.get("domain", "") or self._extract_domain_from_index_pattern(target.es_index_pattern or "") or "",
+                    "filetype": gy_info.get("filetype", ""),
+                    "host": gy_info.get("hostname") or source.get("host", {}).get("name", ""),
+                    "identity": self._extract_identity_value(source),
+                    "action": self._summarize_action_message(source.get("message", "")),
+                })
+
+        timeline.sort(key=lambda item: item["time"])
+        timeline = timeline[:size]
+
+        summary_parts = []
+        if account:
+            summary_parts.append(f"账号 {account}")
+        if keyword:
+            summary_parts.append(f"关键词 {keyword}")
+        scope_label = "全部业务线" if scope == "all" else "核心业务线" if scope == "core" else "指定业务线"
+
+        return {
+            "account": account,
+            "keyword": keyword,
+            "time_range": f"最近 {hours} 小时",
+            "scope": scope,
+            "scope_label": scope_label,
+            "services_scanned": scanned_services or [service.name for service in targets],
+            "related_expanded": related_expanded,
+            "count": len(timeline),
+            "timeline": timeline,
+            "summary": (
+                f"{' / '.join(summary_parts) or '条件'} 在 {scope_label} 中命中 {len(timeline)} 条记录，"
+                f"涉及 {len(scanned_services or targets)} 个业务线。"
+            ),
+        }
+
     async def _tool_query_account_activity(
         self, args: dict, tenant_id: str, db_session, es_index_pattern: str
     ) -> str:
         """Query recent activity for a specific account across likely identity fields."""
-        from logmind.domain.log.service import log_service
-
         account = str(args.get("account", "")).strip()
         if not account:
             return json.dumps({"error": "缺少 account 参数"}, ensure_ascii=False)
@@ -834,93 +1087,63 @@ class ChatService:
 
         service_name = str(args.get("service_name", "")).strip()
         action_keyword = str(args.get("action_keyword", "")).strip()
-        biz_lines = await self._load_business_lines(tenant_id, db_session)
-        target = self._resolve_business_line(biz_lines, service_name)
-
-        index_pattern = target.es_index_pattern if target else es_index_pattern or "*"
-        now = datetime.now(timezone.utc)
-        since = now - timedelta(hours=hours)
-
-        should_clauses = [
-            {"match_phrase": {"message": account}},
-            {
-                "query_string": {
-                    "query": f"*{account}*",
-                    "fields": ["message"],
-                    "analyze_wildcard": True,
-                }
-            },
-        ]
-        for field in ACCOUNT_FIELD_CANDIDATES:
-            should_clauses.append({"term": {field: account}})
-
-        filter_clauses = [{
-            "range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}
-        }]
-        if target:
-            domain = self._extract_domain_from_index_pattern(target.es_index_pattern or "")
-            if domain:
-                filter_clauses.append({"term": {"gy.domain.keyword": domain}})
-
-        must_clauses = [{
-            "bool": {
-                "should": should_clauses,
-                "minimum_should_match": 1,
-            }
-        }]
-        if action_keyword:
-            must_clauses.append({"match_phrase": {"message": action_keyword}})
-
-        body = {
-            "query": {
-                "bool": {
-                    "must": must_clauses,
-                    "filter": filter_clauses,
-                }
-            },
-            "sort": [{"@timestamp": {"order": "desc"}}],
-            "size": size,
-            "_source": [
-                "@timestamp",
-                "message",
-                "gy.domain",
-                "gy.filetype",
-                "gy.hostname",
-                "host.name",
-                "userId",
-                "userid",
-                "user_id",
-                "userName",
-                "username",
-                "account",
-                "accountNo",
-                "memberId",
-                "member_id",
-                "operator",
-            ],
-        }
-
-        result = await log_service.es.search(index=index_pattern, body=body)
-        hits = result.get("hits", {}).get("hits", [])
-        activities = []
-        for hit in hits:
-            source = hit.get("_source", {})
-            gy_info = source.get("gy", {}) or {}
-            activities.append({
-                "time": self._to_beijing_time(source.get("@timestamp", "")),
-                "domain": gy_info.get("domain", ""),
-                "filetype": gy_info.get("filetype", ""),
-                "host": gy_info.get("hostname") or source.get("host", {}).get("name", ""),
-                "action": self._summarize_action_message(source.get("message", "")),
-            })
-
+        timeline_data = await self._collect_operation_timeline(
+            tenant_id,
+            db_session,
+            account=account,
+            keyword=action_keyword,
+            hours=hours,
+            service_names=[service_name] if service_name else None,
+            scope="single" if service_name else "core",
+            include_related=True,
+            size=size,
+        )
         return json.dumps({
             "account": account,
-            "service": target.name if target else "",
-            "time_range": f"最近 {hours} 小时",
-            "count": len(activities),
-            "activities": activities,
+            "service": service_name,
+            "time_range": timeline_data["time_range"],
+            "count": timeline_data["count"],
+            "activities": timeline_data["timeline"],
+            "services_scanned": timeline_data["services_scanned"],
+            "summary": timeline_data["summary"],
         }, ensure_ascii=False)
+
+    async def _tool_query_operation_timeline(self, args: dict, tenant_id: str, db_session) -> str:
+        account = str(args.get("account", "")).strip()
+        keyword = str(args.get("keyword", "")).strip()
+        if not account and not keyword:
+            return json.dumps({"error": "至少提供 account 或 keyword 之一"}, ensure_ascii=False)
+
+        hours = args.get("hours", 1)
+        try:
+            hours = int(hours)
+        except (TypeError, ValueError):
+            hours = 1
+        hours = min(max(hours, 1), 24)
+
+        size = args.get("size", 40)
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 40
+        size = min(max(size, 10), 100)
+
+        service_names = args.get("service_names") or []
+        if isinstance(service_names, str):
+            service_names = [name.strip() for name in service_names.split(",") if name.strip()]
+
+        timeline_data = await self._collect_operation_timeline(
+            tenant_id,
+            db_session,
+            account=account,
+            keyword=keyword,
+            hours=hours,
+            service_names=service_names,
+            scope=str(args.get("scope", "core")),
+            include_related=bool(args.get("include_related", True)),
+            size=size,
+        )
+        return json.dumps(timeline_data, ensure_ascii=False)
 
     async def _tool_create_analysis_task(self, args: dict, tenant_id: str, db_session) -> str:
         """Create a deep analysis task."""
@@ -984,15 +1207,20 @@ class ChatService:
             extracted = self._extract_context_entities(user_message, biz_lines)
             account = extracted.get("account")
             if account:
+                scope = extracted.get("scope", "core")
                 preflight_args: dict[str, str | int] = {
                     "account": account,
                     "hours": int(extracted.get("hours", "1")),
                     "size": 20,
+                    "scope": scope,
                 }
                 if extracted.get("service_name"):
-                    preflight_args["service_name"] = extracted["service_name"]
+                    preflight_args["service_names"] = [extracted["service_name"]]
+                    preflight_args["scope"] = "selected"
+                if extracted.get("keyword"):
+                    preflight_args["keyword"] = extracted["keyword"]
                 preflight_result = await self.execute_tool_call(
-                    "query_account_activity",
+                    "query_operation_timeline",
                     preflight_args,
                     session.tenant_id,
                     db_session,
@@ -1000,7 +1228,7 @@ class ChatService:
                 )
                 messages.append(ChatMessage(
                     role="assistant",
-                    content=f"[预查询工具 query_account_activity({json.dumps(preflight_args, ensure_ascii=False)})]",
+                    content=f"[预查询工具 query_operation_timeline({json.dumps(preflight_args, ensure_ascii=False)})]",
                 ))
                 messages.append(ChatMessage(
                     role="user",
