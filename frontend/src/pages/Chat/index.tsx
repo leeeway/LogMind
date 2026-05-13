@@ -15,6 +15,8 @@ import { chatApi } from '@/api/chat';
 import { businessLineApi } from '@/api/services';
 import { useAuthStore } from '@/stores/authStore';
 import AgentStepCard, { ToolStep } from '@/components/AgentStepCard';
+import TraceTimeline, { TraceSegment, TraceNode } from '@/components/TraceTimeline';
+import ServiceFlowDiagram, { ServiceTopology } from '@/components/ServiceFlowDiagram';
 
 const { Text, Title } = Typography;
 
@@ -129,6 +131,11 @@ const ChatPage: React.FC = () => {
   const [liveRecommendations, setLiveRecommendations] = useState<LiveRecommendation[]>([]);
   const [timelineEntries, setTimelineEntries] = useState<TimelineEntry[]>([]);
   const [timelineSummary, setTimelineSummary] = useState('');
+  const [traceSegments, setTraceSegments] = useState<TraceSegment[]>([]);
+  const [traceUncorrelated, setTraceUncorrelated] = useState<TraceNode[]>([]);
+  const [traceTopology, setTraceTopology] = useState<ServiceTopology>({});
+  const [traceSummary, setTraceSummary] = useState('');
+  const [traceErrorServices, setTraceErrorServices] = useState<string[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState('account-activity');
   const [templateValues, setTemplateValues] = useState<TemplateValues>({
     account: '',
@@ -246,6 +253,11 @@ const ChatPage: React.FC = () => {
       setSuggestedActions([]);
       setTimelineEntries([]);
       setTimelineSummary('');
+      setTraceSegments([]);
+      setTraceUncorrelated([]);
+      setTraceTopology({});
+      setTraceSummary('');
+      setTraceErrorServices([]);
       loadSessions();
     } catch { message.error('创建会话失败'); }
   };
@@ -281,6 +293,11 @@ const ChatPage: React.FC = () => {
         setFollowUps([]);
         setTimelineEntries([]);
         setTimelineSummary('');
+        setTraceSegments([]);
+        setTraceUncorrelated([]);
+        setTraceTopology({});
+        setTraceSummary('');
+        setTraceErrorServices([]);
       }
       loadSessions();
     } catch { /* ignore */ }
@@ -343,6 +360,11 @@ const ChatPage: React.FC = () => {
     setSuggestedActions([]);
     setTimelineEntries([]);
     setTimelineSummary('');
+    setTraceSegments([]);
+    setTraceUncorrelated([]);
+    setTraceTopology({});
+    setTraceSummary('');
+    setTraceErrorServices([]);
 
     // Add placeholder for assistant
     setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
@@ -398,7 +420,22 @@ const ChatPage: React.FC = () => {
                     ? { ...s, result: event.result, summary: event.summary, status: 'done' as const, endTime: Date.now() }
                     : s
                 ));
-                if (event.name === 'query_operation_timeline' || event.name === 'query_account_activity') {
+                if (event.name === 'trace_linked_operations') {
+                  try {
+                    const parsed = JSON.parse(event.result || '{}');
+                    const segs = parsed.trace_segments || [];
+                    if (Array.isArray(segs) && segs.length > 0) {
+                      setTraceSegments(segs);
+                      setTraceUncorrelated(parsed.uncorrelated_entries || []);
+                      setTraceTopology(parsed.service_topology || {});
+                      setTraceSummary(parsed.summary || '');
+                      const errSvcs = segs
+                        .filter((s: TraceSegment) => s.has_error)
+                        .flatMap((s: TraceSegment) => s.nodes.filter((n: TraceNode) => n.level === 'error').map((n: TraceNode) => n.service));
+                      setTraceErrorServices([...new Set(errSvcs)]);
+                    }
+                  } catch { /* ignore */ }
+                } else if (event.name === 'query_operation_timeline' || event.name === 'query_account_activity') {
                   try {
                     const parsed = JSON.parse(event.result || '{}');
                     const nextTimeline = parsed.timeline || parsed.activities || [];
@@ -406,9 +443,7 @@ const ChatPage: React.FC = () => {
                       setTimelineEntries(nextTimeline.slice(0, 30));
                       setTimelineSummary(parsed.summary || '');
                     }
-                  } catch {
-                    // ignore malformed preview
-                  }
+                  } catch { /* ignore */ }
                 }
 
               } else if (event.type === 'step_done') {
@@ -978,6 +1013,20 @@ const ChatPage: React.FC = () => {
                     </Button>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Trace Linked Operations Visualization */}
+            {traceSegments.length > 0 && !sending && (
+              <div style={{ marginBottom: 16, marginLeft: 46, animation: 'lm-fadeSlideIn 0.3s ease-out' }}>
+                {Object.keys(traceTopology).length > 0 && (
+                  <ServiceFlowDiagram topology={traceTopology} errorServices={traceErrorServices} />
+                )}
+                <TraceTimeline
+                  segments={traceSegments}
+                  uncorrelatedEntries={traceUncorrelated}
+                  summary={traceSummary}
+                />
               </div>
             )}
 

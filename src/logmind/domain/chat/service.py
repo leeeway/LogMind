@@ -49,6 +49,29 @@ ACCOUNT_FIELD_CANDIDATES = [
     "operator",
 ]
 
+# ── Correlation ID extraction patterns ─────────────────
+CORRELATION_ID_PATTERNS = [
+    # traceId / requestId / correlationId
+    re.compile(r'(?:traceId|TraceId|trace_id|trace-id)[=:\s]+([A-Za-z0-9\-_]{8,64})', re.IGNORECASE),
+    re.compile(r'(?:requestId|RequestId|request_id|request-id|reqId|req_id)[=:\s]+([A-Za-z0-9\-_]{8,64})', re.IGNORECASE),
+    re.compile(r'(?:correlationId|CorrelationId|correlation_id)[=:\s]+([A-Za-z0-9\-_]{8,64})', re.IGNORECASE),
+    re.compile(r'(?:spanId|SpanId|span_id)[=:\s]+([A-Za-z0-9\-_]{8,64})', re.IGNORECASE),
+    # Business IDs
+    re.compile(r'(?:orderNo|orderId|order_no|order_id|订单号)[=:\s：]+([A-Za-z0-9\-_]{6,32})', re.IGNORECASE),
+    re.compile(r'(?:transactionId|transId|trans_id|交易号|流水号)[=:\s：]+([A-Za-z0-9\-_]{6,32})', re.IGNORECASE),
+    re.compile(r'(?:paymentId|payment_id|支付单号)[=:\s：]+([A-Za-z0-9\-_]{6,32})', re.IGNORECASE),
+]
+
+# Patterns to detect service call relationships in log messages
+SERVICE_CALL_PATTERNS = [
+    re.compile(r'(?:调用|请求|call|invoke|request)\s*[：:]\s*(\S+)', re.IGNORECASE),
+    re.compile(r'(?:HTTP|http)\s+(?:GET|POST|PUT|DELETE)\s+(\S+)', re.IGNORECASE),
+    re.compile(r'(?:Feign|feign|RestTemplate|HttpClient)\s*[：:→>]\s*(\S+)', re.IGNORECASE),
+]
+
+# Time proximity threshold for inferring causal links (seconds)
+TRACE_TIME_PROXIMITY_SECONDS = 5
+
 # ── System Prompt (ReAct Reasoning Template) ─────────────
 CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级别的自主排查 Agent。
 
@@ -75,6 +98,7 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - `trace_error_chain` — 追踪错误的上下游调用链
 - `query_account_activity` — 查询账号在一段时间内的操作轨迹
 - `query_operation_timeline` — 跨多个业务线按时间梳理账号/关键词相关操作链路
+- `trace_linked_operations` — 智能链路追踪：自动提取 traceId/requestId/订单号等关联标识，跨服务追踪完整调用链路并按链路分组
 - `create_analysis_task` — 创建深度分析任务
 
 ## ReAct 推理规范
@@ -96,12 +120,15 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - "最近几小时" 指从当前北京时间往前推算
 
 ## 搜索技巧
-- 搜索中文关键词时，直接用原始中文词即可，如 "截断"、"异常"、"超时"
-- 搜索 Java 异常时可用异常类名，如 "SQLServerException"、"NullPointerException"
+- 搜索中文关键词时，直接用原始中文词即可，如 “截断”、”异常”、”超时”
+- 搜索 Java 异常时可用异常类名，如 “SQLServerException”、”NullPointerException”
 - 使用 search_logs 时建议传入 domain 参数来指定站点精确过滤
 - 如果第一次搜索无结果，尝试换关键词或去掉 severity 过滤
-- 如果用户提到“账号/用户/手机号/会员号最近做了什么”，优先调用 `query_operation_timeline`
-- 如果用户要求“整个业务线/多个业务线/相关链路按时间点梳理”，优先调用 `query_operation_timeline`
+- 如果用户提到”账号/用户/手机号/会员号最近做了什么”，优先调用 `query_operation_timeline`
+- 如果用户要求”整个业务线/多个业务线/相关链路按时间点梳理”，优先调用 `query_operation_timeline`
+- 如果用户要求”查链路/追踪调用链/完整流程/trace/看请求经过了哪些服务”，优先调用 `trace_linked_operations`
+- 如果用户提供了 traceId/requestId/订单号 等具体关联标识，优先调用 `trace_linked_operations`
+- `trace_linked_operations` 会自动从日志中提取关联ID并跨服务追踪，返回按链路分组的结果
 
 ## 回答规范
 - 用中文回复
@@ -245,6 +272,37 @@ CHAT_TOOLS = AGENT_TOOLS + [
                         "default": True,
                     },
                     "size": {"type": "integer", "description": "最多返回多少条记录，默认 40，最大 100", "default": 40},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trace_linked_operations",
+            "description": (
+                "智能链路追踪：输入账号或关键词，自动从日志中提取 traceId/requestId/订单号等关联标识，"
+                "跨多个服务追踪同一操作流的完整调用链路。返回按链路分组的时间线，标注因果关系和错误节点。"
+                "适合回答「查这个账号的完整链路」「追踪这个请求的调用链」「看看这个订单经过了哪些服务」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": "账号、用户ID、手机号或会员号"},
+                    "keyword": {"type": "string", "description": "可选，关键词（如订单号、traceId、异常关键词）"},
+                    "hours": {"type": "integer", "description": "查看最近多少小时，默认 1", "default": 1},
+                    "service_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，指定业务线范围；不传则自动选择核心+关联业务线",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["single", "selected", "core", "all"],
+                        "description": "查询范围，默认 core",
+                    },
+                    "size": {"type": "integer", "description": "最多返回多少条原始记录，默认 60", "default": 60},
                 },
                 "required": [],
             },
@@ -511,6 +569,21 @@ class ChatService:
         if keyword_match:
             context["keyword"] = keyword_match.group(1)
 
+        # Extract correlation IDs (traceId, orderId, etc.)
+        trace_id_match = re.search(
+            r"(?:traceId|trace_id|requestId|request_id|reqId)[=:\s：]+([A-Za-z0-9\-_]{8,64})",
+            normalized, flags=re.IGNORECASE,
+        )
+        if trace_id_match:
+            context["keyword"] = trace_id_match.group(1)
+
+        order_id_match = re.search(
+            r"(?:订单号|orderNo|orderId|order_no|交易号|transactionId|流水号)[=:\s：]+([A-Za-z0-9\-_]{6,32})",
+            normalized, flags=re.IGNORECASE,
+        )
+        if order_id_match:
+            context["keyword"] = order_id_match.group(1)
+
         for biz in biz_lines:
             if biz.name and biz.name in normalized:
                 context["service_name"] = biz.name
@@ -539,6 +612,18 @@ class ChatService:
             flags=re.IGNORECASE,
         )
         return bool(account_hint and action_hint)
+
+    @staticmethod
+    def _looks_like_trace_request(text: str) -> bool:
+        """Detect if user is asking for trace/linked operations analysis."""
+        normalized = text or ""
+        trace_hint = re.search(
+            r"(链路|调用链|完整流程|追踪|trace|traceId|requestId|"
+            r"经过了哪些服务|跨服务追踪|关联链路|请求链|调用路径|全链路)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        return bool(trace_hint)
 
     def _build_suggested_actions(self, user_message: str, final_content: str, biz_lines: list) -> list[dict]:
         context = self._extract_context_entities(f"{user_message}\n{final_content}", biz_lines)
@@ -684,6 +769,10 @@ class ChatService:
                 )
             elif tool_name == "query_operation_timeline":
                 return await self._tool_query_operation_timeline(
+                    args, tenant_id, db_session
+                )
+            elif tool_name == "trace_linked_operations":
+                return await self._tool_trace_linked_operations(
                     args, tenant_id, db_session
                 )
             elif tool_name == "create_analysis_task":
@@ -1063,6 +1152,333 @@ class ChatService:
             ),
         }
 
+    # ── Trace Correlation Engine ─────────────────────────
+
+    @staticmethod
+    def _extract_correlation_ids(message: str) -> list[str]:
+        """Extract traceId, requestId, orderId etc. from a log message."""
+        ids = []
+        for pattern in CORRELATION_ID_PATTERNS:
+            for match in pattern.finditer(message or ""):
+                value = match.group(1).strip()
+                if value and len(value) >= 6:
+                    prefix = pattern.pattern.split("(")[0].split("|")[0]
+                    prefix = re.sub(r'[^a-zA-Z]', '', prefix)[:10]
+                    ids.append(f"{prefix}={value}")
+        return ids
+
+    @staticmethod
+    def _detect_service_calls(message: str) -> list[str]:
+        """Detect service call targets mentioned in a log message."""
+        targets = []
+        for pattern in SERVICE_CALL_PATTERNS:
+            for match in pattern.finditer(message or ""):
+                target = match.group(1).strip().rstrip(",;。）)")
+                if target and len(target) > 2:
+                    targets.append(target)
+        return targets
+
+    @staticmethod
+    def _infer_log_level(entry: dict) -> str:
+        """Infer log level from filetype or message content."""
+        filetype = (entry.get("filetype") or "").lower()
+        if "error" in filetype:
+            return "error"
+        if "warn" in filetype:
+            return "warning"
+
+        action = (entry.get("action") or "").lower()
+        if any(kw in action for kw in ("exception", "error", "失败", "异常", "fatal", "严重")):
+            return "error"
+        if any(kw in action for kw in ("warn", "warning", "告警", "超时", "timeout")):
+            return "warning"
+        return "info"
+
+    def _group_into_trace_segments(
+        self, timeline: list[dict], service_topology: dict[str, dict]
+    ) -> tuple[list[dict], list[dict]]:
+        """
+        Group flat timeline entries into trace segments using correlation IDs
+        and time-proximity + service dependency inference.
+        """
+        # Step 1: Enrich entries with correlation IDs and level
+        for entry in timeline:
+            entry["correlation_ids"] = self._extract_correlation_ids(entry.get("action", ""))
+            entry["call_targets"] = self._detect_service_calls(entry.get("action", ""))
+            entry["level"] = self._infer_log_level(entry)
+
+        # Step 2: Group by shared correlation IDs
+        id_to_entries: dict[str, list[int]] = {}
+        for idx, entry in enumerate(timeline):
+            for cid in entry["correlation_ids"]:
+                id_to_entries.setdefault(cid, []).append(idx)
+
+        # Build union-find for merging entries that share any correlation ID
+        parent = list(range(len(timeline)))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for indices in id_to_entries.values():
+            for i in range(1, len(indices)):
+                union(indices[0], indices[i])
+
+        # Step 3: Time-proximity inference for uncorrelated entries
+        uncorrelated_indices = [i for i in range(len(timeline)) if not timeline[i]["correlation_ids"]]
+        for i in uncorrelated_indices:
+            entry_i = timeline[i]
+            time_i = entry_i.get("time", "")
+            service_i = entry_i.get("service", "")
+            downstream_i = set(service_topology.get(service_i, {}).get("downstream", []))
+
+            for j in range(len(timeline)):
+                if i == j or find(i) == find(j):
+                    continue
+                entry_j = timeline[j]
+                service_j = entry_j.get("service", "")
+                time_j = entry_j.get("time", "")
+
+                if service_j not in downstream_i and service_i not in set(
+                    service_topology.get(service_j, {}).get("downstream", [])
+                ):
+                    continue
+
+                try:
+                    dt_i = datetime.strptime(time_i, "%Y-%m-%d %H:%M:%S")
+                    dt_j = datetime.strptime(time_j, "%Y-%m-%d %H:%M:%S")
+                    delta = abs((dt_j - dt_i).total_seconds())
+                    if delta <= TRACE_TIME_PROXIMITY_SECONDS:
+                        union(i, j)
+                except ValueError:
+                    continue
+
+        # Step 4: Collect groups
+        groups: dict[int, list[int]] = {}
+        for i in range(len(timeline)):
+            root = find(i)
+            groups.setdefault(root, []).append(i)
+
+        # Step 5: Build trace segments
+        segments = []
+        uncorrelated = []
+        seg_counter = 0
+
+        for root, indices in sorted(groups.items(), key=lambda x: timeline[x[1][0]].get("time", "")):
+            entries = [timeline[i] for i in sorted(indices, key=lambda i: timeline[i].get("time", ""))]
+
+            if len(entries) == 1 and not entries[0]["correlation_ids"]:
+                uncorrelated.append(entries[0])
+                continue
+
+            seg_counter += 1
+            all_cids = []
+            for e in entries:
+                all_cids.extend(e["correlation_ids"])
+            unique_cids = list(dict.fromkeys(all_cids))
+
+            has_error = any(e["level"] == "error" for e in entries)
+            start_time = entries[0].get("time", "")
+            end_time = entries[-1].get("time", "")
+
+            duration_ms = 0
+            try:
+                dt_start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                dt_end = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+                duration_ms = int((dt_end - dt_start).total_seconds() * 1000)
+            except ValueError:
+                pass
+
+            error_summary = ""
+            if has_error:
+                error_entries = [e for e in entries if e["level"] == "error"]
+                if error_entries:
+                    first_err = error_entries[0]
+                    error_summary = f"{first_err.get('service', '')} — {first_err.get('action', '')[:80]}"
+
+            nodes = []
+            for e in entries:
+                nodes.append({
+                    "time": e.get("time", ""),
+                    "service": e.get("service", ""),
+                    "action": e.get("action", ""),
+                    "level": e["level"],
+                    "host": e.get("host", ""),
+                    "domain": e.get("domain", ""),
+                    "identity": e.get("identity", ""),
+                    "call_targets": e.get("call_targets", []),
+                })
+
+            segments.append({
+                "segment_id": f"seg_{seg_counter}",
+                "correlation_ids": unique_cids,
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration_ms": duration_ms,
+                "has_error": has_error,
+                "error_summary": error_summary,
+                "node_count": len(nodes),
+                "nodes": nodes,
+            })
+
+        return segments, uncorrelated
+
+    def _build_service_topology(self, targets: list, all_lines: list) -> dict[str, dict]:
+        """Build service topology map from BusinessLine.related_services."""
+        by_id = {biz.id: biz for biz in all_lines}
+        topology: dict[str, dict] = {}
+
+        for biz in targets:
+            try:
+                related = json.loads(biz.related_services) if biz.related_services else {}
+            except (json.JSONDecodeError, TypeError):
+                related = {}
+
+            upstream_names = [by_id[uid].name for uid in related.get("upstream", []) if uid in by_id]
+            downstream_names = [by_id[did].name for did in related.get("downstream", []) if did in by_id]
+
+            topology[biz.name] = {
+                "upstream": upstream_names,
+                "downstream": downstream_names,
+            }
+
+        return topology
+
+    async def _trace_linked_operations(
+        self,
+        tenant_id: str,
+        db_session,
+        *,
+        account: str = "",
+        keyword: str = "",
+        hours: int = 1,
+        service_names: list[str] | None = None,
+        scope: str = "core",
+        size: int = 60,
+    ) -> dict:
+        """
+        Advanced trace linking: collect timeline, extract correlation IDs,
+        do secondary queries to fill gaps, then group into trace segments.
+        """
+        from logmind.domain.log.service import log_service
+
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
+        targets = self._resolve_business_lines(biz_lines, service_names, scope)
+        targets = self._expand_related_business_lines(targets, biz_lines)
+
+        # Step 1: Collect raw timeline
+        timeline_data = await self._collect_operation_timeline(
+            tenant_id, db_session,
+            account=account, keyword=keyword, hours=hours,
+            service_names=service_names, scope=scope,
+            include_related=True, size=size,
+        )
+        timeline = timeline_data.get("timeline", [])
+
+        if not timeline:
+            return {
+                "account": account,
+                "keyword": keyword,
+                "time_range": f"最近 {hours} 小时",
+                "trace_segments": [],
+                "uncorrelated_entries": [],
+                "service_topology": {},
+                "summary": "未找到相关日志记录。",
+            }
+
+        # Step 2: Extract correlation IDs from initial results
+        initial_cids: set[str] = set()
+        for entry in timeline:
+            cids = self._extract_correlation_ids(entry.get("action", ""))
+            entry["_cids"] = cids
+            initial_cids.update(cids)
+
+        # Step 3: Secondary query — search for correlation IDs in other services
+        if initial_cids:
+            cid_values = [cid.split("=", 1)[1] for cid in initial_cids if "=" in cid]
+            unique_values = list(set(cid_values))[:10]
+
+            if unique_values:
+                now = datetime.now(timezone.utc)
+                since = now - timedelta(hours=hours)
+
+                for target in targets:
+                    already_has = any(e.get("service") == target.name for e in timeline)
+                    if already_has:
+                        continue
+
+                    should_clauses = []
+                    for val in unique_values:
+                        should_clauses.append({"match_phrase": {"message": val}})
+
+                    body = {
+                        "query": {
+                            "bool": {
+                                "must": [{"bool": {"should": should_clauses, "minimum_should_match": 1}}],
+                                "filter": [{"range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}}],
+                            }
+                        },
+                        "sort": [{"@timestamp": {"order": "asc"}}],
+                        "size": 15,
+                        "_source": [
+                            "@timestamp", "message", "gy.domain", "gy.filetype",
+                            "gy.hostname", "host.name",
+                            "userId", "userid", "user_id", "userName", "username",
+                            "account", "accountNo", "memberId", "member_id", "operator",
+                        ],
+                    }
+
+                    try:
+                        result = await log_service.es.search(index=target.es_index_pattern, body=body)
+                        hits = result.get("hits", {}).get("hits", [])
+                        for hit in hits:
+                            source = hit.get("_source", {})
+                            gy_info = source.get("gy", {}) or {}
+                            timeline.append({
+                                "time": self._to_beijing_time(source.get("@timestamp", "")),
+                                "service": target.name,
+                                "domain": gy_info.get("domain", "") or self._extract_domain_from_index_pattern(target.es_index_pattern or "") or "",
+                                "filetype": gy_info.get("filetype", ""),
+                                "host": gy_info.get("hostname") or source.get("host", {}).get("name", ""),
+                                "identity": self._extract_identity_value(source),
+                                "action": self._summarize_action_message(source.get("message", "")),
+                            })
+                    except Exception as e:
+                        logger.warning("trace_secondary_query_failed", service=target.name, error=str(e))
+
+                timeline.sort(key=lambda item: item.get("time", ""))
+
+        # Step 4: Build topology and group into segments
+        service_topology = self._build_service_topology(targets, biz_lines)
+        segments, uncorrelated = self._group_into_trace_segments(timeline, service_topology)
+
+        # Step 5: Build summary
+        error_count = sum(1 for s in segments if s["has_error"])
+        summary = (
+            f"账号 {account or keyword} 最近 {hours} 小时共追踪到 {len(segments)} 条链路"
+            f"（{error_count} 条包含错误），"
+            f"涉及 {len(timeline_data.get('services_scanned', []))} 个业务线。"
+        )
+        if uncorrelated:
+            summary += f" 另有 {len(uncorrelated)} 条未关联记录。"
+
+        return {
+            "account": account,
+            "keyword": keyword,
+            "time_range": f"最近 {hours} 小时",
+            "trace_segments": segments,
+            "uncorrelated_entries": uncorrelated[:10],
+            "service_topology": service_topology,
+            "summary": summary,
+        }
+
     async def _tool_query_account_activity(
         self, args: dict, tenant_id: str, db_session, es_index_pattern: str
     ) -> str:
@@ -1145,6 +1561,42 @@ class ChatService:
         )
         return json.dumps(timeline_data, ensure_ascii=False)
 
+    async def _tool_trace_linked_operations(self, args: dict, tenant_id: str, db_session) -> str:
+        """Execute trace_linked_operations tool — advanced trace correlation."""
+        account = str(args.get("account", "")).strip()
+        keyword = str(args.get("keyword", "")).strip()
+        if not account and not keyword:
+            return json.dumps({"error": "至少提供 account 或 keyword 之一"}, ensure_ascii=False)
+
+        hours = args.get("hours", 1)
+        try:
+            hours = int(hours)
+        except (TypeError, ValueError):
+            hours = 1
+        hours = min(max(hours, 1), 24)
+
+        size = args.get("size", 60)
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 60
+        size = min(max(size, 10), 100)
+
+        service_names = args.get("service_names") or []
+        if isinstance(service_names, str):
+            service_names = [name.strip() for name in service_names.split(",") if name.strip()]
+
+        result = await self._trace_linked_operations(
+            tenant_id, db_session,
+            account=account,
+            keyword=keyword,
+            hours=hours,
+            service_names=service_names or None,
+            scope=str(args.get("scope", "core")),
+            size=size,
+        )
+        return json.dumps(result, ensure_ascii=False)
+
     async def _tool_create_analysis_task(self, args: dict, tenant_id: str, db_session) -> str:
         """Create a deep analysis task."""
         service_name = args.get("service_name", "")
@@ -1203,7 +1655,37 @@ class ChatService:
         messages = [ChatMessage(role="system", content=system_prompt)]
         messages.extend(session.get_context_messages())
 
-        if self._looks_like_account_activity_request(user_message):
+        if self._looks_like_trace_request(user_message):
+            extracted = self._extract_context_entities(user_message, biz_lines)
+            account = extracted.get("account", "")
+            keyword = extracted.get("keyword", "")
+            if account or keyword:
+                preflight_args: dict[str, str | int] = {
+                    "account": account,
+                    "keyword": keyword,
+                    "hours": int(extracted.get("hours", "1")),
+                    "size": 60,
+                    "scope": extracted.get("scope", "core"),
+                }
+                if extracted.get("service_name"):
+                    preflight_args["service_names"] = [extracted["service_name"]]
+                    preflight_args["scope"] = "selected"
+                preflight_result = await self.execute_tool_call(
+                    "trace_linked_operations",
+                    preflight_args,
+                    session.tenant_id,
+                    db_session,
+                    es_index_pattern=default_index,
+                )
+                messages.append(ChatMessage(
+                    role="assistant",
+                    content=f"[预查询工具 trace_linked_operations({json.dumps(preflight_args, ensure_ascii=False)})]",
+                ))
+                messages.append(ChatMessage(
+                    role="user",
+                    content=f"预查询结果如下，请基于此继续分析并按需补充工具调用：\n{preflight_result[:4000]}",
+                ))
+        elif self._looks_like_account_activity_request(user_message):
             extracted = self._extract_context_entities(user_message, biz_lines)
             account = extracted.get("account")
             if account:
