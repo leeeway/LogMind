@@ -17,6 +17,7 @@ import { useAuthStore } from '@/stores/authStore';
 import AgentStepCard, { ToolStep } from '@/components/AgentStepCard';
 import TraceTimeline, { TraceSegment, TraceNode } from '@/components/TraceTimeline';
 import ServiceFlowDiagram, { ServiceTopology } from '@/components/ServiceFlowDiagram';
+import DiagnosticClues, { DiagnosticClue } from '@/components/DiagnosticClues';
 
 const { Text, Title } = Typography;
 
@@ -137,6 +138,8 @@ const ChatPage: React.FC = () => {
   const [traceSummary, setTraceSummary] = useState('');
   const [traceErrorServices, setTraceErrorServices] = useState<string[]>([]);
   const [multiAgentFindings, setMultiAgentFindings] = useState<{name: string; displayName: string; status: string; summary: string}[]>([]);
+  const [diagnosticClues, setDiagnosticClues] = useState<DiagnosticClue[]>([]);
+  const [searchSummary, setSearchSummary] = useState('');
   const [activeTemplateId, setActiveTemplateId] = useState('account-activity');
   const [templateValues, setTemplateValues] = useState<TemplateValues>({
     account: '',
@@ -367,6 +370,8 @@ const ChatPage: React.FC = () => {
     setTraceSummary('');
     setTraceErrorServices([]);
     setMultiAgentFindings([]);
+    setDiagnosticClues([]);
+    setSearchSummary('');
 
     // Add placeholder for assistant
     setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
@@ -462,6 +467,11 @@ const ChatPage: React.FC = () => {
                     ? { ...f, status: event.status, summary: event.summary || '' }
                     : f
                 ));
+
+              } else if (event.type === 'search_clues') {
+                setDiagnosticClues(event.clues || []);
+                setSearchSummary(event.summary || '');
+                setThinkingText('搜索完成，正在分析...');
 
               } else if (event.type === 'step_done') {
                 // Round complete, waiting for next
@@ -624,187 +634,64 @@ const ChatPage: React.FC = () => {
         <div style={{ flex: 1, overflow: 'auto', padding: '24px 0' }}>
           <div style={{ maxWidth: 800, margin: '0 auto', padding: '0 24px' }}>
             {messages.length === 0 && (
-              <div style={{ textAlign: 'center', paddingTop: 60 }}>
+              <div style={{ textAlign: 'center', paddingTop: 80 }}>
                 <div style={{
-                  width: 72, height: 72, borderRadius: 20, margin: '0 auto 20px',
+                  width: 64, height: 64, borderRadius: 18, margin: '0 auto 16px',
                   background: 'linear-gradient(135deg, rgba(22,119,255,0.15), rgba(114,46,209,0.15))',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   border: '1px solid rgba(22,119,255,0.1)',
                 }}>
-                  <ThunderboltOutlined style={{ fontSize: 32, color: '#1677ff' }} />
+                  <ThunderboltOutlined style={{ fontSize: 28, color: '#1677ff' }} />
                 </div>
-                <Title level={3} style={{ color: 'var(--lm-text)', marginBottom: 8 }}>
-                  LogMind AI 诊断助手
+                <Title level={4} style={{ color: 'var(--lm-text)', marginBottom: 6 }}>
+                  LogMind AI 诊断
                 </Title>
-                <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 14 }}>
-                  自主排查 Agent · 多轮推理 · 真实 ES 日志查询 · 12 种诊断工具
+                <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 13 }}>
+                  输入账号、订单号、traceId 或关键词，自动搜索全部业务线并给出诊断线索
                 </Text>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 28 }}>
-                  {(liveRecommendations.length > 0
-                    ? liveRecommendations.map((item) => item.prompt)
-                    : WELCOME_SUGGESTIONS
-                  ).map((s, i) => (
-                    <div
-                      key={i}
-                      onClick={() => sendMessage(s)}
-                      style={{
-                        padding: '8px 14px', borderRadius: 10, cursor: 'pointer', fontSize: 13,
-                        background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)',
-                        color: 'var(--lm-text-secondary)', transition: 'all 0.2s',
-                        maxWidth: 240,
-                      }}
-                      onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(22,119,255,0.3)'; e.currentTarget.style.color = 'var(--lm-text)'; }}
-                      onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--lm-border-light)'; e.currentTarget.style.color = 'var(--lm-text-secondary)'; }}
-                    >
-                      <ThunderboltOutlined style={{ marginRight: 6, color: '#1677ff' }} />{s}
-                    </div>
-                  ))}
-                </div>
-                {liveRecommendations.length > 0 && (
-                  <div style={{
-                    marginTop: 30,
-                    textAlign: 'left',
-                    background: 'linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))',
-                    border: '1px solid var(--lm-border-light)',
-                    borderRadius: 18,
-                    padding: 18,
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-                      <RadarChartOutlined style={{ color: '#1677ff', fontSize: 16 }} />
-                      <Text style={{ color: 'var(--lm-text)', fontWeight: 600, fontSize: 14 }}>
-                        实时诊断推荐
-                      </Text>
-                      <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 12 }}>
-                        每分钟刷新一次，把眼前最值得问的问题放前面
-                      </Text>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-                      {liveRecommendations.map((item) => {
-                        const meta = priorityMeta[item.priority] || priorityMeta.info;
-                        return (
-                          <div
-                            key={item.id}
-                            onClick={() => sendMessage(item.prompt)}
-                            style={{
-                              padding: '14px 15px',
-                              borderRadius: 14,
-                              cursor: 'pointer',
-                              border: `1px solid ${meta.color}33`,
-                              background: `linear-gradient(180deg, ${meta.color}10, rgba(255,255,255,0.02))`,
-                              transition: 'transform 0.2s ease, border-color 0.2s ease',
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.transform = 'translateY(-2px)';
-                              e.currentTarget.style.borderColor = `${meta.color}66`;
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.transform = 'translateY(0)';
-                              e.currentTarget.style.borderColor = `${meta.color}33`;
-                            }}
-                          >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                              <Tag color={meta.color} style={{ borderRadius: 999, margin: 0, fontSize: 10 }}>
-                                {meta.label}
-                              </Tag>
-                              {item.metric && (
-                                <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 11 }}>
-                                  {item.metric}
-                                </Text>
-                              )}
-                            </div>
-                            <Text style={{ display: 'block', color: 'var(--lm-text)', fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
-                              {item.title}
-                            </Text>
-                            <Text style={{ display: 'block', color: 'var(--lm-text-secondary)', fontSize: 12, lineHeight: 1.6, minHeight: 38 }}>
-                              {item.reason}
-                            </Text>
-                            <div style={{
-                              marginTop: 10,
-                              fontSize: 11,
-                              color: meta.color,
-                              fontWeight: 600,
-                            }}>
-                              点击直接发起诊断
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+
+                {/* Smart Search Bar */}
                 <div style={{
-                  marginTop: 28,
-                  textAlign: 'left',
-                  background: 'var(--lm-bg-card)',
-                  border: '1px solid var(--lm-border-light)',
-                  borderRadius: 16,
-                  padding: 18,
+                  maxWidth: 560, margin: '28px auto 0', textAlign: 'left',
                 }}>
-                  <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 14 }}>
-                    <div>
-                      <Text style={{ display: 'block', color: 'var(--lm-text)', fontSize: 14, fontWeight: 600 }}>
-                        动态问题发起
-                      </Text>
-                      <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 12 }}>
-                        先选场景，再补参数，直接发起严谨诊断
-                      </Text>
-                    </div>
-                    <Button type="primary" icon={<SendOutlined />} onClick={sendTemplatePrompt} disabled={sending}>
-                      发起查询
-                    </Button>
-                  </Space>
-
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-                    {dynamicTemplates.map((template) => {
-                      const active = template.id === activeTemplateId;
-                      return (
-                        <div
-                          key={template.id}
-                          onClick={() => applyTemplate(template.id)}
-                          style={{
-                            width: 'calc(33.333% - 7px)',
-                            minWidth: 180,
-                            padding: '12px 14px',
-                            borderRadius: 12,
-                            cursor: 'pointer',
-                            border: `1px solid ${active ? `${template.accent}55` : 'var(--lm-border-light)'}`,
-                            background: active ? `${template.accent}10` : 'var(--lm-bg-elevated)',
-                            transition: 'all 0.2s',
-                          }}
-                        >
-                          <Space align="start">
-                            <span style={{ color: template.accent, fontSize: 16 }}>{template.icon}</span>
-                            <div>
-                              <Text style={{ display: 'block', color: 'var(--lm-text)', fontWeight: 600, fontSize: 13 }}>
-                                {template.title}
-                              </Text>
-                              <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 11 }}>
-                                {template.description}
-                              </Text>
-                            </div>
-                          </Space>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <div style={{
+                    display: 'flex', gap: 8, alignItems: 'center',
+                    background: 'var(--lm-bg-elevated)', borderRadius: 14,
+                    border: '1px solid var(--lm-border-light)', padding: '10px 14px',
+                  }}>
+                    <SearchOutlined style={{ color: 'var(--lm-text-tertiary)', fontSize: 16 }} />
                     <Input
                       value={templateValues.account}
                       onChange={(e) => updateTemplateValue('account', e.target.value)}
-                      placeholder="账号 / userId / 手机号"
-                      style={{ flex: 1, minWidth: 180, borderRadius: 10 }}
+                      placeholder="输入账号、订单号、traceId 或错误关键词..."
+                      style={{ border: 'none', background: 'transparent', boxShadow: 'none', fontSize: 14, flex: 1 }}
+                      onPressEnter={() => {
+                        if (templateValues.account.trim()) {
+                          sendMessage(templateValues.account.trim());
+                        }
+                      }}
                     />
-                    <Input
-                      value={templateValues.keyword}
-                      onChange={(e) => updateTemplateValue('keyword', e.target.value)}
-                      placeholder="关键词（可选，如 登录 / 激活 / 异常）"
-                      style={{ flex: 1, minWidth: 180, borderRadius: 10 }}
-                    />
+                    <Button
+                      type="primary"
+                      icon={<SearchOutlined />}
+                      onClick={() => {
+                        if (templateValues.account.trim()) {
+                          sendMessage(templateValues.account.trim());
+                        }
+                      }}
+                      disabled={!templateValues.account.trim() || sending}
+                      style={{ borderRadius: 10 }}
+                    >
+                      搜索
+                    </Button>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'center' }}>
                     <Select
                       value={templateValues.hours}
                       onChange={(value) => updateTemplateValue('hours', value)}
                       style={{ width: 120 }}
+                      size="small"
                       options={[
                         { value: '1', label: '最近1小时' },
                         { value: '3', label: '最近3小时' },
@@ -815,44 +702,36 @@ const ChatPage: React.FC = () => {
                     <Select
                       value={templateValues.serviceScope}
                       onChange={(value) => updateTemplateValue('serviceScope', value)}
-                      style={{ width: 150 }}
+                      style={{ width: 130 }}
+                      size="small"
                       options={[
-                        { value: 'single', label: '单服务' },
-                        { value: 'selected', label: '多业务线' },
-                        { value: 'core', label: '核心业务线' },
                         { value: 'all', label: '全部业务线' },
+                        { value: 'core', label: '核心业务线' },
                       ]}
                     />
-                    <Select
-                      mode={templateValues.serviceScope === 'selected' ? 'multiple' : undefined}
-                      allowClear
-                      placeholder={templateValues.serviceScope === 'selected' ? '选择多个业务线' : '选择服务（可选）'}
-                      value={templateValues.serviceScope === 'selected' ? templateValues.serviceNames : (templateValues.serviceName || undefined)}
-                      onChange={(value) => {
-                        if (templateValues.serviceScope === 'selected') {
-                          updateTemplateValue('serviceNames', (value || []) as string[]);
-                        } else {
-                          updateTemplateValue('serviceName', (value || '') as string);
-                        }
-                      }}
-                      style={{ flex: 1, minWidth: 220 }}
-                      options={businessLines.map((biz) => ({ value: biz.name, label: biz.name }))}
-                    />
                   </div>
+                </div>
 
-                  <div style={{
-                    marginTop: 12,
-                    padding: '10px 12px',
-                    borderRadius: 10,
-                    background: 'var(--lm-bg-elevated)',
-                    border: '1px dashed var(--lm-border-light)',
-                    color: 'var(--lm-text-secondary)',
-                    fontSize: 12,
-                    lineHeight: 1.6,
-                  }}>
-                    <SearchOutlined style={{ marginRight: 6, color: '#1677ff' }} />
-                    {activeTemplate.buildPrompt(templateValues)}
-                  </div>
+                {/* Quick Actions */}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 24 }}>
+                  {(liveRecommendations.length > 0
+                    ? liveRecommendations.slice(0, 4).map((item) => item.prompt)
+                    : WELCOME_SUGGESTIONS.slice(0, 4)
+                  ).map((s, i) => (
+                    <div
+                      key={i}
+                      onClick={() => sendMessage(s)}
+                      style={{
+                        padding: '7px 12px', borderRadius: 10, cursor: 'pointer', fontSize: 12,
+                        background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)',
+                        color: 'var(--lm-text-secondary)', transition: 'all 0.2s',
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(22,119,255,0.3)'; e.currentTarget.style.color = 'var(--lm-text)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--lm-border-light)'; e.currentTarget.style.color = 'var(--lm-text-secondary)'; }}
+                    >
+                      <ThunderboltOutlined style={{ marginRight: 5, color: '#1677ff' }} />{s}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -938,6 +817,17 @@ const ChatPage: React.FC = () => {
                 </div>
               </div>
             ))}
+
+            {/* Diagnostic Clues from Smart Search */}
+            {diagnosticClues.length > 0 && !sending && (
+              <div style={{ marginBottom: 16, marginLeft: 46, animation: 'lm-fadeSlideIn 0.3s ease-out' }}>
+                <DiagnosticClues
+                  clues={diagnosticClues}
+                  summary={searchSummary}
+                  onAction={(prompt) => sendMessage(prompt)}
+                />
+              </div>
+            )}
 
             {/* Multi-Agent Collaboration */}
             {multiAgentFindings.length > 0 && (

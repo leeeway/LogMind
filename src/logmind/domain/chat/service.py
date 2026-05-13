@@ -654,6 +654,276 @@ class ChatService:
             flags=re.IGNORECASE,
         ))
 
+    @staticmethod
+    def _looks_like_smart_search(text: str) -> bool:
+        """Detect if user input is a short search query (account/order/keyword)."""
+        normalized = (text or "").strip()
+        # Short input (under 30 chars) that looks like an identifier or keyword
+        if len(normalized) > 60 or len(normalized) < 2:
+            return False
+        # Pure identifier (no Chinese sentence structure)
+        if re.match(r"^[A-Za-z0-9_\-@.]{3,64}$", normalized):
+            return True
+        # Short keyword (1-3 Chinese words, no sentence)
+        if re.match(r"^[一-鿿]{2,8}$", normalized):
+            return True
+        # "搜索/查/搜 XXX" pattern
+        if re.match(r"^(搜索|搜|查|查询|找)\s*.{2,30}$", normalized):
+            return True
+        return False
+
+    # ── Smart Search Engine ──────────────────────────────
+
+    KEYWORD_SYNONYMS = {
+        "NPE": ["NullPointerException", "NPE", "空指针", "null pointer"],
+        "OOM": ["OutOfMemoryError", "OOM", "内存溢出", "heap space", "out of memory"],
+        "超时": ["超时", "timeout", "Timeout", "timed out", "TimeoutException", "SocketTimeout"],
+        "连接": ["连接", "connection", "Connection refused", "连接超时", "ConnectionException"],
+        "死锁": ["死锁", "deadlock", "Deadlock", "lock wait timeout"],
+        "SQL": ["SQLServerException", "SQLException", "SQL Error", "数据库异常"],
+        "截断": ["截断", "truncat", "将截断字符串或二进制数据", "String or binary data would be truncated"],
+        "权限": ["权限", "permission", "denied", "unauthorized", "403", "Forbidden"],
+        "404": ["404", "Not Found", "找不到", "路由不存在"],
+        "500": ["500", "Internal Server Error", "服务器内部错误"],
+    }
+
+    @staticmethod
+    def _classify_search_input(query: str) -> dict:
+        """Classify user search input into type + expanded keywords."""
+        query = query.strip()
+        if not query:
+            return {"type": "keyword", "value": query, "expanded_keywords": [query]}
+
+        # Pure numeric 8-18 digits → account/phone
+        if re.match(r"^\d{8,18}$", query):
+            return {"type": "account", "value": query, "expanded_keywords": [query]}
+
+        # traceId/requestId format (hex or uuid-like)
+        if re.match(r"^[0-9a-f\-]{16,64}$", query, re.IGNORECASE):
+            return {"type": "trace_id", "value": query, "expanded_keywords": [query]}
+
+        # Order/transaction ID patterns
+        if re.match(r"^(ORD|TXN|PAY|ORDER|TRADE)[_\-]?\w{4,}", query, re.IGNORECASE):
+            return {"type": "order_id", "value": query, "expanded_keywords": [query]}
+
+        # Error keyword detection
+        if re.search(r"(Exception|Error|异常|失败|错误|Fault|Panic)", query, re.IGNORECASE):
+            return {"type": "error", "value": query, "expanded_keywords": [query]}
+
+        # Check synonym expansion
+        for key, synonyms in ChatService.KEYWORD_SYNONYMS.items():
+            if query.lower() in [s.lower() for s in synonyms] or query.lower() == key.lower():
+                return {"type": "error", "value": query, "expanded_keywords": synonyms}
+
+        return {"type": "keyword", "value": query, "expanded_keywords": [query]}
+
+    async def _smart_search(
+        self,
+        query: str,
+        hours: int,
+        scope: str,
+        tenant_id: str,
+        db_session,
+    ) -> dict:
+        """
+        Smart search: classify input, search across all business lines,
+        generate diagnostic clues.
+        """
+        import asyncio
+        from logmind.domain.log.service import log_service
+
+        classification = self._classify_search_input(query)
+        input_type = classification["type"]
+        expanded = classification["expanded_keywords"]
+
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
+        targets = self._resolve_business_lines(biz_lines, None, scope)
+        targets = self._expand_related_business_lines(targets, biz_lines)
+
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=hours)
+
+        # Parallel search across all target services
+        all_hits: list[dict] = []
+        services_scanned: list[str] = []
+        error_entries: list[dict] = []
+
+        for target in targets:
+            should_clauses = []
+            for kw in expanded:
+                should_clauses.append({"match_phrase": {"message": kw}})
+            if input_type == "account":
+                for field_name in ACCOUNT_FIELD_CANDIDATES:
+                    should_clauses.append({"term": {field_name: query}})
+
+            body = {
+                "query": {
+                    "bool": {
+                        "must": [{"bool": {"should": should_clauses, "minimum_should_match": 1}}],
+                        "filter": [{"range": {"@timestamp": {"gte": since.isoformat(), "lte": now.isoformat()}}}],
+                    }
+                },
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "size": 20,
+                "_source": [
+                    "@timestamp", "message", "gy.domain", "gy.filetype",
+                    "gy.hostname", "host.name",
+                    "userId", "userid", "user_id", "userName", "username",
+                    "account", "accountNo", "memberId", "member_id", "operator",
+                ],
+            }
+
+            try:
+                result = await log_service.es.search(index=target.es_index_pattern, body=body)
+                hits = result.get("hits", {}).get("hits", [])
+                if hits:
+                    services_scanned.append(target.name)
+                for hit in hits:
+                    source = hit.get("_source", {})
+                    gy_info = source.get("gy", {}) or {}
+                    entry = {
+                        "time": self._to_beijing_time(source.get("@timestamp", "")),
+                        "service": target.name,
+                        "domain": gy_info.get("domain", ""),
+                        "filetype": gy_info.get("filetype", ""),
+                        "host": gy_info.get("hostname") or source.get("host", {}).get("name", ""),
+                        "identity": self._extract_identity_value(source),
+                        "action": self._summarize_action_message(source.get("message", "")),
+                        "level": self._infer_log_level({"filetype": gy_info.get("filetype", ""), "action": source.get("message", "")}),
+                    }
+                    all_hits.append(entry)
+                    if entry["level"] == "error":
+                        error_entries.append(entry)
+            except Exception as e:
+                logger.warning("smart_search_service_failed", service=target.name, error=str(e))
+
+        all_hits.sort(key=lambda x: x.get("time", ""), reverse=True)
+
+        # Generate diagnostic clues
+        clues = self._generate_diagnostic_clues(all_hits, error_entries, services_scanned, hours)
+
+        return {
+            "query": query,
+            "input_type": input_type,
+            "expanded_keywords": expanded,
+            "time_range": f"最近 {hours} 小时",
+            "scope": scope,
+            "total_hits": len(all_hits),
+            "error_count": len(error_entries),
+            "services_involved": services_scanned,
+            "services_total": len(targets),
+            "clues": clues,
+            "timeline": all_hits[:30],
+            "summary": (
+                f"搜索 \"{query}\" 在 {len(targets)} 个业务线中命中 {len(all_hits)} 条记录"
+                f"（{len(error_entries)} 条错误），涉及 {len(services_scanned)} 个服务。"
+            ),
+        }
+
+    def _generate_diagnostic_clues(
+        self,
+        all_hits: list[dict],
+        error_entries: list[dict],
+        services_scanned: list[str],
+        hours: int,
+    ) -> list[dict]:
+        """Generate structured diagnostic clues from search results."""
+        clues: list[dict] = []
+
+        if not all_hits:
+            clues.append({
+                "severity": "info",
+                "title": "未找到相关记录",
+                "detail": f"在最近 {hours} 小时内未搜索到匹配的日志。",
+                "affected_services": [],
+                "time_range": "",
+                "suggestion": "尝试扩大时间范围或更换关键词。",
+            })
+            return clues
+
+        # Clue 1: Error concentration by service
+        error_by_service: dict[str, int] = {}
+        for entry in error_entries:
+            svc = entry.get("service", "unknown")
+            error_by_service[svc] = error_by_service.get(svc, 0) + 1
+
+        for svc, count in sorted(error_by_service.items(), key=lambda x: -x[1]):
+            if count >= 3:
+                sample = next((e for e in error_entries if e.get("service") == svc), {})
+                clues.append({
+                    "severity": "critical" if count >= 10 else "warning",
+                    "title": f"{svc} 出现 {count} 条错误",
+                    "detail": f"错误样本: {sample.get('action', '')[:120]}",
+                    "affected_services": [svc],
+                    "time_range": "",
+                    "suggestion": f"建议深入排查 {svc} 的错误日志，检查是否有配置变更或资源瓶颈。",
+                })
+
+        # Clue 2: Time burst detection
+        if error_entries:
+            time_buckets: dict[str, int] = {}
+            for entry in error_entries:
+                t = entry.get("time", "")[:16]  # group by minute
+                if t:
+                    time_buckets[t] = time_buckets.get(t, 0) + 1
+
+            burst_minutes = [(t, c) for t, c in time_buckets.items() if c >= 3]
+            if burst_minutes:
+                burst_minutes.sort(key=lambda x: -x[1])
+                top_burst = burst_minutes[0]
+                clues.append({
+                    "severity": "warning",
+                    "title": f"错误集中爆发于 {top_burst[0]}",
+                    "detail": f"该分钟内出现 {top_burst[1]} 条错误，可能是瞬时故障或批量操作触发。",
+                    "affected_services": list(error_by_service.keys())[:3],
+                    "time_range": top_burst[0],
+                    "suggestion": "对比该时间点前后的日志，查看是否有部署或配置变更。",
+                })
+
+        # Clue 3: Multi-service cascade
+        if len(error_by_service) >= 3:
+            clues.append({
+                "severity": "critical",
+                "title": f"疑似级联故障 — {len(error_by_service)} 个服务同时报错",
+                "detail": f"涉及服务: {', '.join(list(error_by_service.keys())[:5])}",
+                "affected_services": list(error_by_service.keys()),
+                "time_range": "",
+                "suggestion": "多服务同时报错通常由上游依赖故障引起，建议追踪链路定位源头。",
+            })
+
+        # Clue 4: Correlation IDs found
+        cid_count = 0
+        for entry in all_hits[:20]:
+            cids = self._extract_correlation_ids(entry.get("action", ""))
+            if cids:
+                cid_count += 1
+        if cid_count >= 2:
+            clues.append({
+                "severity": "info",
+                "title": f"发现 {cid_count} 条记录包含关联标识",
+                "detail": "日志中包含 traceId/requestId/orderId 等关联标识，可进一步追踪完整链路。",
+                "affected_services": services_scanned[:3],
+                "time_range": "",
+                "suggestion": "使用链路追踪功能查看完整调用链路和错误传播路径。",
+            })
+
+        # Clue 5: No errors found (positive signal)
+        if not error_entries and all_hits:
+            clues.append({
+                "severity": "info",
+                "title": f"找到 {len(all_hits)} 条记录，无错误",
+                "detail": "所有匹配记录均为正常级别日志，未发现异常。",
+                "affected_services": services_scanned,
+                "time_range": "",
+                "suggestion": "如果仍怀疑有问题，可尝试扩大时间范围或搜索相关错误关键词。",
+            })
+
+        # Sort by severity
+        severity_order = {"critical": 0, "warning": 1, "info": 2}
+        clues.sort(key=lambda c: severity_order.get(c["severity"], 9))
+
+        return clues[:6]
+
     def _build_suggested_actions(self, user_message: str, final_content: str, biz_lines: list) -> list[dict]:
         context = self._extract_context_entities(f"{user_message}\n{final_content}", biz_lines)
         actions: list[dict] = []
@@ -1716,7 +1986,46 @@ class ChatService:
         messages = [ChatMessage(role="system", content=system_prompt)]
         messages.extend(session.get_context_messages())
 
-        if self._looks_like_trace_request(user_message):
+        # ── Smart Search Path ────────────────────────────────
+        if self._looks_like_smart_search(user_message):
+            search_query = re.sub(r"^(搜索|搜|查|查询|找)\s*", "", user_message.strip())
+            search_result = await self._smart_search(
+                query=search_query,
+                hours=1,
+                scope="all",
+                tenant_id=session.tenant_id,
+                db_session=db_session,
+            )
+
+            yield self._sse({
+                "type": "search_clues",
+                "clues": search_result["clues"],
+                "summary": search_result["summary"],
+                "total_hits": search_result["total_hits"],
+                "error_count": search_result["error_count"],
+                "services_involved": search_result["services_involved"],
+                "input_type": search_result["input_type"],
+            })
+
+            # Inject search results as context for the LLM
+            messages.append(ChatMessage(
+                role="assistant",
+                content=f"[智能搜索 \"{search_query}\" 完成]",
+            ))
+            messages.append(ChatMessage(
+                role="user",
+                content=(
+                    f"搜索结果如下，请基于此分析并给出诊断建议：\n"
+                    f"命中 {search_result['total_hits']} 条记录，{search_result['error_count']} 条错误，"
+                    f"涉及服务: {', '.join(search_result['services_involved'][:5])}\n"
+                    f"诊断线索:\n" +
+                    "\n".join(f"- [{c['severity']}] {c['title']}: {c['detail']}" for c in search_result["clues"][:4]) +
+                    f"\n\n时间线前5条:\n" +
+                    "\n".join(f"- {e['time']} [{e['service']}] {e['action'][:80]}" for e in search_result["timeline"][:5])
+                ),
+            ))
+
+        elif self._looks_like_trace_request(user_message):
             extracted = self._extract_context_entities(user_message, biz_lines)
             account = extracted.get("account", "")
             keyword = extracted.get("keyword", "")
