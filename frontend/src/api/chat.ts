@@ -13,6 +13,9 @@ export const chatApi = {
   deleteSession: (sessionId: string) =>
     client.delete(`/chat/sessions/${sessionId}`),
 
+  getRecommendations: (params?: { window_minutes?: number; limit?: number }) =>
+    client.get('/chat/recommendations', { params }),
+
   // Note: sendMessage uses fetch() for SSE streaming, not axios
 };
 

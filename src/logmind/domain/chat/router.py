@@ -5,13 +5,18 @@ SSE-based streaming chat endpoint for real-time AI diagnosis.
 """
 
 import uuid
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
+from logmind.domain.alert.models import AlertHistory
+from logmind.domain.analysis.models import LogAnalysisTask
 from logmind.domain.chat.service import chat_service
 from logmind.domain.tenant.models import BusinessLine
 from logmind.shared.base_repository import BaseRepository
@@ -38,6 +43,23 @@ class SessionResponse(BaseModel):
     updated_at: str
 
 
+class RecommendationCard(BaseModel):
+    id: str
+    title: str
+    prompt: str
+    reason: str
+    priority: str
+    kind: str
+    tone: str
+    metric: str = ""
+
+
+class RecommendationsResponse(BaseModel):
+    generated_at: str
+    window_minutes: int
+    items: list[RecommendationCard]
+
+
 @router.post("/sessions", response_model=SessionResponse)
 async def create_session(session: DBSession, user: CurrentUser):
     """Create a new chat session."""
@@ -61,6 +83,144 @@ async def list_sessions(user: CurrentUser):
     """List chat sessions for current user."""
     sessions = chat_service.list_sessions(user.tenant_id, user.sub)
     return {"sessions": sessions}
+
+
+@router.get("/recommendations", response_model=RecommendationsResponse)
+async def get_recommendations(
+    db: DBSession,
+    user: CurrentUser,
+    window_minutes: int = 60,
+    limit: int = 6,
+):
+    """Build real-time chat recommendations from recent alerts and active services."""
+    window_minutes = min(max(window_minutes, 15), 240)
+    limit = min(max(limit, 3), 8)
+    since = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+
+    biz_lines = await biz_repo.get_all(db, tenant_id=user.tenant_id, limit=100)
+    biz_by_id = {b.id: b for b in biz_lines}
+    cards: list[RecommendationCard] = []
+
+    recent_rows = (
+        await db.execute(
+            select(AlertHistory, LogAnalysisTask.business_line_id)
+            .outerjoin(LogAnalysisTask, AlertHistory.analysis_task_id == LogAnalysisTask.id)
+            .where(
+                AlertHistory.tenant_id == user.tenant_id,
+                AlertHistory.fired_at >= since,
+            )
+            .order_by(AlertHistory.fired_at.desc())
+            .limit(60)
+        )
+    ).all()
+
+    severity_counts = Counter()
+    alerts_by_service: dict[str, list[AlertHistory]] = defaultdict(list)
+    message_counts: Counter[str] = Counter()
+
+    for alert, biz_id in recent_rows:
+        severity_counts[alert.severity or "info"] += 1
+        if biz_id:
+            alerts_by_service[biz_id].append(alert)
+        if alert.message:
+            message_counts[alert.message[:80]] += 1
+
+    ranked_services = sorted(
+        alerts_by_service.items(),
+        key=lambda item: (
+            sum(1 for a in item[1] if a.severity == "critical"),
+            len(item[1]),
+        ),
+        reverse=True,
+    )
+
+    for biz_id, service_alerts in ranked_services[:3]:
+        biz = biz_by_id.get(biz_id)
+        if not biz:
+            continue
+        critical_count = sum(1 for a in service_alerts if a.severity == "critical")
+        warning_count = sum(1 for a in service_alerts if a.severity == "warning")
+        hottest = next((a for a in service_alerts if a.message), None)
+        cards.append(RecommendationCard(
+            id=f"service-{biz_id}",
+            title=f"{biz.name} 正在升温",
+            prompt=f"请分析 {biz.name} 最近 {window_minutes // 60 if window_minutes >= 60 else 1} 小时的异常、告警与影响范围，并给出下一步排查建议。",
+            reason=(hottest.message[:60] if hottest and hottest.message else "最近告警频率上升"),
+            priority="critical" if critical_count > 0 else "warning",
+            kind="service",
+            tone="live",
+            metric=f"{critical_count} critical / {warning_count} warning",
+        ))
+
+    for message_text, count in message_counts.most_common(2):
+        if count < 2:
+            continue
+        cards.append(RecommendationCard(
+            id=f"pattern-{abs(hash(message_text)) % 100000}",
+            title="重复异常值得先问",
+            prompt=f"请围绕这类异常继续排查：{message_text}。重点说明最近 {window_minutes} 分钟重复出现的原因、影响服务和修复建议。",
+            reason=f"最近 {window_minutes} 分钟重复出现 {count} 次",
+            priority="warning",
+            kind="pattern",
+            tone="spotlight",
+            metric=f"{count} 次重复",
+        ))
+
+    active_biz = [b for b in biz_lines if getattr(b, "is_active", True)]
+    core_biz = [b for b in active_biz if getattr(b, "is_core_path", False)]
+    fallback_services = core_biz[:2] or active_biz[:2]
+    for biz in fallback_services:
+        cards.append(RecommendationCard(
+            id=f"health-{biz.id}",
+            title=f"检查 {biz.name} 健康状态",
+            prompt=f"请检查 {biz.name} 最近 1 小时的服务健康、错误趋势和潜在风险。",
+            reason="核心业务建议持续巡检",
+            priority="info",
+            kind="health",
+            tone="calm",
+            metric="巡检",
+        ))
+
+    cards.append(RecommendationCard(
+        id="account-activity",
+        title="追踪账号关键操作",
+        prompt="请帮我查询账号 a8872123 在最近 1 小时做了哪些操作，并按时间线列出关键动作、异常和影响服务。",
+        reason="账号轨迹类问题最适合直接发起动态诊断",
+        priority="info",
+        kind="account",
+        tone="action",
+        metric="账号",
+    ))
+
+    deduped: list[RecommendationCard] = []
+    seen_titles: set[str] = set()
+    for card in cards:
+        if card.title in seen_titles:
+            continue
+        seen_titles.add(card.title)
+        deduped.append(card)
+        if len(deduped) >= limit:
+            break
+
+    if not deduped:
+        deduped = [
+            RecommendationCard(
+                id="fallback-errors",
+                title="最近 1 小时有哪些关键错误？",
+                prompt="最近 1 小时有哪些关键错误？请按严重程度和影响服务总结。",
+                reason="暂无高优先级异常时，先看全局错误最稳妥",
+                priority="info",
+                kind="fallback",
+                tone="calm",
+                metric="全局",
+            )
+        ]
+
+    return RecommendationsResponse(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        window_minutes=window_minutes,
+        items=deduped,
+    )
 
 
 @router.get("/sessions/{session_id}")

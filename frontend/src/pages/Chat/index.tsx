@@ -55,6 +55,17 @@ interface DynamicQuestionTemplate {
   buildPrompt: (values: Record<string, string>) => string;
 }
 
+interface LiveRecommendation {
+  id: string;
+  title: string;
+  prompt: string;
+  reason: string;
+  priority: 'critical' | 'warning' | 'info';
+  kind: string;
+  tone: string;
+  metric?: string;
+}
+
 interface ChatRouteState {
   prefill?: string;
   source?: string;
@@ -78,6 +89,12 @@ const WELCOME_SUGGESTIONS = [
   '帮我追踪 NPE 的调用链',
 ];
 
+const priorityMeta: Record<LiveRecommendation['priority'], { color: string; label: string }> = {
+  critical: { color: '#ff4d4f', label: '现在最该看' },
+  warning: { color: '#faad14', label: '值得关注' },
+  info: { color: '#1677ff', label: '建议先问' },
+};
+
 const ChatPage: React.FC = () => {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [businessLines, setBusinessLines] = useState<BusinessLineOption[]>([]);
@@ -90,6 +107,7 @@ const ChatPage: React.FC = () => {
   const [thinkingText, setThinkingText] = useState('');
   const [followUps, setFollowUps] = useState<string[]>([]);
   const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
+  const [liveRecommendations, setLiveRecommendations] = useState<LiveRecommendation[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState('account-activity');
   const [templateValues, setTemplateValues] = useState<Record<string, string>>({
     account: '',
@@ -163,10 +181,27 @@ const ChatPage: React.FC = () => {
     } catch { /* ignore */ }
   }, []);
 
+  const loadRecommendations = useCallback(async () => {
+    try {
+      const { data } = await chatApi.getRecommendations({ window_minutes: 60, limit: 6 });
+      setLiveRecommendations(Array.isArray(data?.items) ? data.items as LiveRecommendation[] : []);
+    } catch {
+      setLiveRecommendations([]);
+    }
+  }, []);
+
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadSessions(); }, [loadSessions]);
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { loadBusinessLines(); }, [loadBusinessLines]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadRecommendations();
+    const timer = window.setInterval(() => {
+      loadRecommendations();
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [loadRecommendations]);
 
   // Scroll to bottom
   useEffect(() => {
@@ -494,7 +529,10 @@ const ChatPage: React.FC = () => {
                   自主排查 Agent · 多轮推理 · 真实 ES 日志查询 · 12 种诊断工具
                 </Text>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 28 }}>
-                  {WELCOME_SUGGESTIONS.map((s, i) => (
+                  {(liveRecommendations.length > 0
+                    ? liveRecommendations.map((item) => item.prompt)
+                    : WELCOME_SUGGESTIONS
+                  ).map((s, i) => (
                     <div
                       key={i}
                       onClick={() => sendMessage(s)}
@@ -511,6 +549,78 @@ const ChatPage: React.FC = () => {
                     </div>
                   ))}
                 </div>
+                {liveRecommendations.length > 0 && (
+                  <div style={{
+                    marginTop: 30,
+                    textAlign: 'left',
+                    background: 'linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))',
+                    border: '1px solid var(--lm-border-light)',
+                    borderRadius: 18,
+                    padding: 18,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                      <RadarChartOutlined style={{ color: '#1677ff', fontSize: 16 }} />
+                      <Text style={{ color: 'var(--lm-text)', fontWeight: 600, fontSize: 14 }}>
+                        实时诊断推荐
+                      </Text>
+                      <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 12 }}>
+                        每分钟刷新一次，把眼前最值得问的问题放前面
+                      </Text>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                      {liveRecommendations.map((item) => {
+                        const meta = priorityMeta[item.priority] || priorityMeta.info;
+                        return (
+                          <div
+                            key={item.id}
+                            onClick={() => sendMessage(item.prompt)}
+                            style={{
+                              padding: '14px 15px',
+                              borderRadius: 14,
+                              cursor: 'pointer',
+                              border: `1px solid ${meta.color}33`,
+                              background: `linear-gradient(180deg, ${meta.color}10, rgba(255,255,255,0.02))`,
+                              transition: 'transform 0.2s ease, border-color 0.2s ease',
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.transform = 'translateY(-2px)';
+                              e.currentTarget.style.borderColor = `${meta.color}66`;
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.transform = 'translateY(0)';
+                              e.currentTarget.style.borderColor = `${meta.color}33`;
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                              <Tag color={meta.color} style={{ borderRadius: 999, margin: 0, fontSize: 10 }}>
+                                {meta.label}
+                              </Tag>
+                              {item.metric && (
+                                <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 11 }}>
+                                  {item.metric}
+                                </Text>
+                              )}
+                            </div>
+                            <Text style={{ display: 'block', color: 'var(--lm-text)', fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
+                              {item.title}
+                            </Text>
+                            <Text style={{ display: 'block', color: 'var(--lm-text-secondary)', fontSize: 12, lineHeight: 1.6, minHeight: 38 }}>
+                              {item.reason}
+                            </Text>
+                            <div style={{
+                              marginTop: 10,
+                              fontSize: 11,
+                              color: meta.color,
+                              fontWeight: 600,
+                            }}>
+                              点击直接发起诊断
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <div style={{
                   marginTop: 28,
                   textAlign: 'left',

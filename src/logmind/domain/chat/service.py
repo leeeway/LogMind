@@ -23,14 +23,20 @@ MAX_TOOL_ROUNDS = 5  # Maximum ReAct reasoning loops
 ACCOUNT_FIELD_CANDIDATES = [
     "userId.keyword",
     "userId",
+    "userName.keyword",
+    "userName",
     "userid.keyword",
     "userid",
     "user_id.keyword",
     "user_id",
     "username.keyword",
     "username",
+    "memberId.keyword",
+    "memberId",
     "account.keyword",
     "account",
+    "accountNo.keyword",
+    "accountNo",
     "account_no.keyword",
     "account_no",
     "accountno.keyword",
@@ -424,6 +430,21 @@ class ChatService:
 
         return context
 
+    @staticmethod
+    def _looks_like_account_activity_request(text: str) -> bool:
+        normalized = text or ""
+        account_hint = re.search(
+            r"(账号|账户|用户|userId|userid|memberId|memberid|手机号|手机号码|会员号)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        action_hint = re.search(
+            r"(操作|做了什么|轨迹|记录|登录|激活|下单|支付|行为)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        return bool(account_hint and action_hint)
+
     def _build_suggested_actions(self, user_message: str, final_content: str, biz_lines: list) -> list[dict]:
         context = self._extract_context_entities(f"{user_message}\n{final_content}", biz_lines)
         actions: list[dict] = []
@@ -526,21 +547,26 @@ class ChatService:
             if tool_name in agent_tool_names:
                 from logmind.domain.analysis.agent_tools import execute_tool
                 now = datetime.now(timezone.utc)
-                # Resolve time range from args — don't hardcode 2h
-                hours = args.get("hours", 6)
-                if isinstance(hours, str):
-                    try:
-                        hours = int(hours)
-                    except ValueError:
-                        hours = 6
-                hours = min(max(hours, 1), 24)
-                time_from = now - timedelta(hours=hours)
+                # Respect explicit time_from/time_to first.
+                if args.get("time_from") or args.get("time_to"):
+                    time_from = None
+                    time_to = None
+                else:
+                    hours = args.get("hours", 6)
+                    if isinstance(hours, str):
+                        try:
+                            hours = int(hours)
+                        except ValueError:
+                            hours = 6
+                    hours = min(max(hours, 1), 24)
+                    time_from = now - timedelta(hours=hours)
+                    time_to = now
                 return await execute_tool(
                     tool_name=tool_name,
                     arguments=args,
                     es_index_pattern=es_index_pattern,
                     time_from=time_from,
-                    time_to=now,
+                    time_to=time_to,
                 )
 
             # Built-in tools
@@ -815,7 +841,16 @@ class ChatService:
         now = datetime.now(timezone.utc)
         since = now - timedelta(hours=hours)
 
-        should_clauses = [{"match_phrase": {"message": account}}]
+        should_clauses = [
+            {"match_phrase": {"message": account}},
+            {
+                "query_string": {
+                    "query": f"*{account}*",
+                    "fields": ["message"],
+                    "analyze_wildcard": True,
+                }
+            },
+        ]
         for field in ACCOUNT_FIELD_CANDIDATES:
             should_clauses.append({"term": {field: account}})
 
@@ -855,8 +890,11 @@ class ChatService:
                 "userId",
                 "userid",
                 "user_id",
+                "userName",
                 "username",
                 "account",
+                "accountNo",
+                "memberId",
                 "member_id",
                 "operator",
             ],
@@ -941,6 +979,33 @@ class ChatService:
         # Build messages with context
         messages = [ChatMessage(role="system", content=system_prompt)]
         messages.extend(session.get_context_messages())
+
+        if self._looks_like_account_activity_request(user_message):
+            extracted = self._extract_context_entities(user_message, biz_lines)
+            account = extracted.get("account")
+            if account:
+                preflight_args: dict[str, str | int] = {
+                    "account": account,
+                    "hours": int(extracted.get("hours", "1")),
+                    "size": 20,
+                }
+                if extracted.get("service_name"):
+                    preflight_args["service_name"] = extracted["service_name"]
+                preflight_result = await self.execute_tool_call(
+                    "query_account_activity",
+                    preflight_args,
+                    session.tenant_id,
+                    db_session,
+                    es_index_pattern=default_index,
+                )
+                messages.append(ChatMessage(
+                    role="assistant",
+                    content=f"[预查询工具 query_account_activity({json.dumps(preflight_args, ensure_ascii=False)})]",
+                ))
+                messages.append(ChatMessage(
+                    role="user",
+                    content=f"预查询结果如下，请基于此继续分析并按需补充工具调用：\n{preflight_result[:3000]}",
+                ))
 
         try:
             total_rounds = 0
