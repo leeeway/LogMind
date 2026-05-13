@@ -6,7 +6,7 @@ import {
   UserOutlined, ThunderboltOutlined, CopyOutlined,
   LoadingOutlined, BranchesOutlined, ExportOutlined,
   QuestionCircleOutlined, ClockCircleOutlined, RadarChartOutlined,
-  AlertOutlined, SearchOutlined,
+  AlertOutlined, SearchOutlined, CheckCircleOutlined, ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -136,6 +136,7 @@ const ChatPage: React.FC = () => {
   const [traceTopology, setTraceTopology] = useState<ServiceTopology>({});
   const [traceSummary, setTraceSummary] = useState('');
   const [traceErrorServices, setTraceErrorServices] = useState<string[]>([]);
+  const [multiAgentFindings, setMultiAgentFindings] = useState<{name: string; displayName: string; status: string; summary: string}[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState('account-activity');
   const [templateValues, setTemplateValues] = useState<TemplateValues>({
     account: '',
@@ -365,6 +366,7 @@ const ChatPage: React.FC = () => {
     setTraceTopology({});
     setTraceSummary('');
     setTraceErrorServices([]);
+    setMultiAgentFindings([]);
 
     // Add placeholder for assistant
     setMessages(prev => [...prev, { role: 'assistant', content: '', isStreaming: true }]);
@@ -446,6 +448,21 @@ const ChatPage: React.FC = () => {
                   } catch { /* ignore */ }
                 }
 
+              } else if (event.type === 'multi_agent_start') {
+                setThinkingRound(0);
+                setThinkingText('多Agent协作诊断中...');
+                const agents = (event.agents || []).map((a: {name: string; display_name: string}) => ({
+                  name: a.name, displayName: a.display_name, status: 'running', summary: '',
+                }));
+                setMultiAgentFindings(agents);
+
+              } else if (event.type === 'agent_done') {
+                setMultiAgentFindings(prev => prev.map(f =>
+                  f.name === event.agent
+                    ? { ...f, status: event.status, summary: event.summary || '' }
+                    : f
+                ));
+
               } else if (event.type === 'step_done') {
                 // Round complete, waiting for next
                 setThinkingText(`第 ${event.round}/${event.total_rounds} 轮完成，继续分析...`);
@@ -499,7 +516,16 @@ const ChatPage: React.FC = () => {
         }
       }
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : '网络错误';
+      let errorMessage = '网络错误';
+      if (err instanceof Error) {
+        if (err.message.includes('422')) {
+          errorMessage = '消息内容过长或格式无效，请精简后重试';
+        } else if (err.message.includes('401')) {
+          errorMessage = '登录已过期，请重新登录';
+        } else {
+          errorMessage = err.message;
+        }
+      }
       message.error('发送失败: ' + errorMessage);
       setMessages(prev => {
         const updated = [...prev];
@@ -913,6 +939,50 @@ const ChatPage: React.FC = () => {
               </div>
             ))}
 
+            {/* Multi-Agent Collaboration */}
+            {multiAgentFindings.length > 0 && (
+              <div style={{
+                marginBottom: 16, marginLeft: 46,
+                padding: '14px 16px', borderRadius: 14,
+                background: 'linear-gradient(135deg, rgba(114,46,209,0.03), rgba(22,119,255,0.03))',
+                border: '1px solid rgba(114,46,209,0.12)',
+                animation: 'lm-fadeSlideIn 0.3s ease-out',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                  <BranchesOutlined style={{ color: '#722ed1', fontSize: 14 }} />
+                  <Text style={{ fontSize: 12, fontWeight: 600, color: 'var(--lm-text)' }}>
+                    多Agent协作诊断
+                  </Text>
+                  <Tag color="purple" style={{ margin: 0, borderRadius: 999, fontSize: 10 }}>
+                    {multiAgentFindings.filter(f => f.status === 'done').length}/{multiAgentFindings.length} 完成
+                  </Tag>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+                  {multiAgentFindings.map((finding) => (
+                    <div key={finding.name} style={{
+                      padding: '10px 12px', borderRadius: 10,
+                      background: 'var(--lm-bg-card)',
+                      border: `1px solid ${finding.status === 'done' ? 'rgba(82,196,26,0.2)' : finding.status === 'error' ? 'rgba(255,77,79,0.2)' : 'var(--lm-border-light)'}`,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                        {finding.status === 'running' && <LoadingOutlined style={{ fontSize: 11, color: '#722ed1' }} />}
+                        {finding.status === 'done' && <CheckCircleOutlined style={{ fontSize: 11, color: '#52c41a' }} />}
+                        {finding.status === 'error' && <ExclamationCircleOutlined style={{ fontSize: 11, color: '#ff4d4f' }} />}
+                        <Text style={{ fontSize: 12, fontWeight: 600, color: 'var(--lm-text)' }}>
+                          {finding.displayName}
+                        </Text>
+                      </div>
+                      {finding.summary && (
+                        <Text style={{ fontSize: 11, color: 'var(--lm-text-secondary)', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                          {finding.summary}
+                        </Text>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Agent Thinking Chain */}
             {(toolSteps.length > 0 || thinkingRound > 0) && (
               <div style={{
@@ -1102,104 +1172,18 @@ const ChatPage: React.FC = () => {
         }}>
           <div style={{ maxWidth: 800, margin: '0 auto' }}>
             <div style={{
-              display: 'flex',
-              gap: 8,
-              flexWrap: 'wrap',
-              marginBottom: 10,
-            }}>
-              {dynamicTemplates.map((template) => {
-                const active = template.id === activeTemplateId;
-                return (
-                  <div
-                    key={template.id}
-                    onClick={() => applyTemplate(template.id)}
-                    style={{
-                      padding: '6px 10px',
-                      borderRadius: 999,
-                      cursor: 'pointer',
-                      border: `1px solid ${active ? `${template.accent}55` : 'var(--lm-border-light)'}`,
-                      background: active ? `${template.accent}10` : 'var(--lm-bg-elevated)',
-                      color: active ? 'var(--lm-text)' : 'var(--lm-text-secondary)',
-                      fontSize: 12,
-                    }}
-                  >
-                    <span style={{ color: template.accent, marginRight: 6 }}>{template.icon}</span>
-                    {template.title}
-                  </div>
-                );
-              })}
-            </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
-              <Input
-                value={templateValues.account}
-                onChange={(e) => updateTemplateValue('account', e.target.value)}
-                placeholder="账号 / userId"
-                style={{ width: 180, borderRadius: 10 }}
-                disabled={sending}
-              />
-              <Input
-                value={templateValues.keyword}
-                onChange={(e) => updateTemplateValue('keyword', e.target.value)}
-                placeholder="关键词"
-                style={{ width: 180, borderRadius: 10 }}
-                disabled={sending}
-              />
-              <Select
-                value={templateValues.hours}
-                onChange={(value) => updateTemplateValue('hours', value)}
-                style={{ width: 130 }}
-                disabled={sending}
-                options={[
-                  { value: '1', label: '最近1小时' },
-                  { value: '3', label: '最近3小时' },
-                  { value: '6', label: '最近6小时' },
-                  { value: '24', label: '最近24小时' },
-                ]}
-              />
-              <Select
-                value={templateValues.serviceScope}
-                onChange={(value) => updateTemplateValue('serviceScope', value)}
-                style={{ width: 140 }}
-                disabled={sending}
-                options={[
-                  { value: 'single', label: '单服务' },
-                  { value: 'selected', label: '多业务线' },
-                  { value: 'core', label: '核心业务线' },
-                  { value: 'all', label: '全部业务线' },
-                ]}
-              />
-              <Select
-                mode={templateValues.serviceScope === 'selected' ? 'multiple' : undefined}
-                allowClear
-                placeholder={templateValues.serviceScope === 'selected' ? '业务线（多选）' : '服务（可选）'}
-                value={templateValues.serviceScope === 'selected' ? templateValues.serviceNames : (templateValues.serviceName || undefined)}
-                onChange={(value) => {
-                  if (templateValues.serviceScope === 'selected') {
-                    updateTemplateValue('serviceNames', (value || []) as string[]);
-                  } else {
-                    updateTemplateValue('serviceName', (value || '') as string);
-                  }
-                }}
-                style={{ minWidth: 220, flex: 1 }}
-                disabled={sending}
-                options={businessLines.map((biz) => ({ value: biz.name, label: biz.name }))}
-              />
-              <Button onClick={sendTemplatePrompt} disabled={sending} icon={<ThunderboltOutlined />}>
-                套用模板提问
-              </Button>
-            </div>
-            <div style={{
               display: 'flex', gap: 12, alignItems: 'flex-end',
               background: 'var(--lm-bg-elevated)', borderRadius: 14,
-              border: '1px solid var(--lm-border-light)', padding: '8px 12px',
+              border: `1px solid ${input.length > 7500 ? 'rgba(255,77,79,0.4)' : 'var(--lm-border-light)'}`, padding: '8px 12px',
               transition: 'border-color 0.2s',
             }}>
               <Input.TextArea
                 ref={inputRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                placeholder="描述你的问题... (Ctrl+Enter 发送，Ctrl+Shift+D 快捷诊断)"
+                placeholder="描述你的问题... (Ctrl+Enter 发送)"
                 autoSize={{ minRows: 1, maxRows: 4 }}
+                maxLength={8000}
                 style={{ border: 'none', background: 'transparent', boxShadow: 'none', fontSize: 14, resize: 'none', padding: '4px 0' }}
                 onPressEnter={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); sendMessage(); } }}
                 disabled={sending}
@@ -1209,14 +1193,19 @@ const ChatPage: React.FC = () => {
                 shape="circle"
                 icon={sending ? <LoadingOutlined /> : <SendOutlined />}
                 onClick={() => sendMessage()}
-                disabled={!input.trim() || sending}
+                disabled={!input.trim() || sending || input.length > 8000}
                 style={{ flexShrink: 0 }}
               />
             </div>
-            <div style={{ textAlign: 'center', marginTop: 6 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, padding: '0 4px' }}>
               <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-                LogMind AI v4.0 · 12 种诊断工具 · ReAct 多轮推理 · Ctrl+Enter 发送
+                Ctrl+Enter 发送 · 多轮推理 · 多Agent协作
               </Text>
+              {input.length > 0 && (
+                <Text style={{ fontSize: 11, color: input.length > 7500 ? '#ff4d4f' : 'var(--lm-text-tertiary)' }}>
+                  {input.length} / 8000
+                </Text>
+              )}
             </div>
           </div>
         </div>

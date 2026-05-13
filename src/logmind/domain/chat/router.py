@@ -32,7 +32,7 @@ class CreateSessionRequest(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
-    content: str = Field(..., min_length=1, max_length=2000)
+    content: str = Field(..., min_length=1, max_length=8000)
 
 
 class SessionResponse(BaseModel):

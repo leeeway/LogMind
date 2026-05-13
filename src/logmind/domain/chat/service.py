@@ -99,6 +99,7 @@ CHAT_SYSTEM_PROMPT = """你是 LogMind AI 诊断助手 — 一个高级 SRE 级�
 - `query_account_activity` — 查询账号在一段时间内的操作轨迹
 - `query_operation_timeline` — 跨多个业务线按时间梳理账号/关键词相关操作链路
 - `trace_linked_operations` — 智能链路追踪：自动提取 traceId/requestId/订单号等关联标识，跨服务追踪完整调用链路并按链路分组
+- `predict_service_trend` — 预测服务未来30分钟的错误趋势（上升/平稳/下降），判断问题是否在恶化
 - `create_analysis_task` — 创建深度分析任务
 
 ## ReAct 推理规范
@@ -274,6 +275,24 @@ CHAT_TOOLS = AGENT_TOOLS + [
                     "size": {"type": "integer", "description": "最多返回多少条记录，默认 40，最大 100", "default": 40},
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "predict_service_trend",
+            "description": (
+                "预测指定服务未来30分钟的错误趋势。基于过去24小时的历史数据，"
+                "使用加权线性回归分析趋势方向（上升/平稳/下降）和预计错误量。"
+                "用于判断问题是否在恶化、是否需要提前干预。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service_name": {"type": "string", "description": "服务/业务线名称"},
+                },
+                "required": ["service_name"],
             },
         },
     },
@@ -625,6 +644,16 @@ class ChatService:
         )
         return bool(trace_hint)
 
+    @staticmethod
+    def _looks_like_multi_agent_request(text: str) -> bool:
+        """Detect if user is asking for comprehensive multi-agent analysis."""
+        normalized = text or ""
+        return bool(re.search(
+            r"(全面分析|深度诊断|彻底排查|完整分析|所有可能|多角度|综合排查|全方位)",
+            normalized,
+            flags=re.IGNORECASE,
+        ))
+
     def _build_suggested_actions(self, user_message: str, final_content: str, biz_lines: list) -> list[dict]:
         context = self._extract_context_entities(f"{user_message}\n{final_content}", biz_lines)
         actions: list[dict] = []
@@ -773,6 +802,10 @@ class ChatService:
                 )
             elif tool_name == "trace_linked_operations":
                 return await self._tool_trace_linked_operations(
+                    args, tenant_id, db_session
+                )
+            elif tool_name == "predict_service_trend":
+                return await self._tool_predict_service_trend(
                     args, tenant_id, db_session
                 )
             elif tool_name == "create_analysis_task":
@@ -1614,6 +1647,34 @@ class ChatService:
             "hint": "请前往「分析中心」查看分析进度和结果",
         }, ensure_ascii=False)
 
+    async def _tool_predict_service_trend(self, args: dict, tenant_id: str, db_session) -> str:
+        """Predict service error trend for the next 30 minutes."""
+        from logmind.domain.anomaly.predictor import trend_predictor
+
+        service_name = args.get("service_name", "")
+        biz_lines = await self._load_business_lines(tenant_id, db_session)
+        target = self._resolve_business_line(biz_lines, service_name)
+
+        if not target:
+            return json.dumps({"error": f"未找到服务 '{service_name}'"}, ensure_ascii=False)
+
+        result = await trend_predictor.predict(
+            index_pattern=target.es_index_pattern,
+            severity_threshold=target.severity_threshold or "error",
+        )
+
+        return json.dumps({
+            "service": target.name,
+            "predicted_errors_30m": result.predicted_errors_30m,
+            "predicted_level": result.predicted_level,
+            "trend_direction": result.trend_direction,
+            "trend_slope": result.trend_slope,
+            "confidence": result.confidence,
+            "current_rate": result.current_rate,
+            "baseline_mean": result.baseline_mean,
+            "detail": result.detail,
+        }, ensure_ascii=False)
+
     # ── Multi-round ReAct Streaming ──────────────────────
 
     async def chat_stream(
@@ -1716,6 +1777,46 @@ class ChatService:
                     role="user",
                     content=f"预查询结果如下，请基于此继续分析并按需补充工具调用：\n{preflight_result[:3000]}",
                 ))
+
+        # ── Multi-Agent Path ────────────────────────────────
+        if self._looks_like_multi_agent_request(user_message):
+            from logmind.domain.chat.multi_agent import MultiAgentOrchestrator, AGENT_ROLES
+
+            orchestrator = MultiAgentOrchestrator(self)
+            agent_names = orchestrator.select_agents(user_message)
+
+            yield self._sse({
+                "type": "multi_agent_start",
+                "agents": [{"name": n, "display_name": AGENT_ROLES[n].display_name} for n in agent_names],
+            })
+
+            findings, synthesis = await orchestrator.orchestrate(
+                user_message=user_message,
+                tenant_id=session.tenant_id,
+                db_session=db_session,
+                default_index=default_index,
+                biz_lines=biz_lines,
+                service_list=service_list,
+            )
+
+            for finding in findings:
+                yield self._sse({
+                    "type": "agent_done",
+                    "agent": finding.agent_name,
+                    "display_name": finding.display_name,
+                    "status": finding.status,
+                    "summary": finding.summary[:300],
+                    "tool_calls": finding.tool_calls[:5],
+                })
+
+            # Stream synthesis
+            chunk_size = 4
+            for i in range(0, len(synthesis), chunk_size):
+                yield self._sse({"type": "token", "content": synthesis[i:i + chunk_size]})
+
+            session.add_message("assistant", synthesis)
+            yield self._sse({"type": "done", "total_rounds": 0, "mode": "multi_agent"})
+            return
 
         try:
             total_rounds = 0
