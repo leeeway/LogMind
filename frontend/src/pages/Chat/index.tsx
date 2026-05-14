@@ -740,8 +740,7 @@ const ChatPage: React.FC = () => {
   }, [followUps, suggestedActions]);
 
   const assistantMessageCount = messages.filter((item) => item.role === 'assistant').length;
-  const showComposerSummary = !showRightRail && (
-    messages.length > 0 ||
+  const showComposerSummary = !showRightRail && messages.length === 0 && (
     sessionStats.toolCount > 0 ||
     timelineEntries.length > 0 ||
     traceSegments.length > 0 ||
@@ -934,7 +933,7 @@ const ChatPage: React.FC = () => {
           maxHeight: isMobile ? 'none' : '100%',
         }}
       >
-        <div style={{ padding: 20, borderBottom: '1px solid var(--lm-border-light)' }}>
+        <div style={{ padding: messages.length > 0 ? '16px 20px' : 20, borderBottom: '1px solid var(--lm-border-light)' }}>
           <div
             style={{
               display: 'flex',
@@ -963,12 +962,14 @@ const ChatPage: React.FC = () => {
                   ? (sessions.find((session) => session.id === activeSessionId)?.title || '当前对话')
                   : '更强的 Chat 诊断页'}
               </Title>
-              <Text style={{ fontSize: 13, color: 'var(--lm-text-secondary)' }}>
-                支持诊断线索、工具推理链、链路追踪和快捷深挖动作，底部输入区改成持续可用的工作区。
-              </Text>
+              {messages.length === 0 && (
+                <Text style={{ fontSize: 13, color: 'var(--lm-text-secondary)' }}>
+                  支持诊断线索、工具推理链、链路追踪和快捷深挖动作，底部输入区改成持续可用的工作区。
+                </Text>
+              )}
             </div>
 
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
               <div style={{ ...sectionStyle, minWidth: 140, padding: '12px 14px' }}>
                 <Text style={{ display: 'block', fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
                   AI 回复
@@ -986,6 +987,16 @@ const ChatPage: React.FC = () => {
                 </Text>
               </div>
               {messages.length > 0 && (
+                <div style={{ ...sectionStyle, minWidth: 140, padding: '12px 14px' }}>
+                  <Text style={{ display: 'block', fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
+                    对话消息
+                  </Text>
+                  <Text style={{ fontSize: 22, fontWeight: 700, color: 'var(--lm-text)' }}>
+                    {messages.length}
+                  </Text>
+                </div>
+              )}
+              {messages.length > 0 && (
                 <Tooltip title="复制当前会话为诊断报告">
                   <Button
                     icon={<ExportOutlined />}
@@ -1000,7 +1011,7 @@ const ChatPage: React.FC = () => {
           </div>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 20 }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: messages.length > 0 ? '16px 20px 20px' : 20 }}>
           {messages.length === 0 && (
             <div
               style={{
@@ -1148,7 +1159,7 @@ const ChatPage: React.FC = () => {
           )}
 
           {messages.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 18, minHeight: '100%' }}>
               {messages.map((msg, idx) => (
                 <div
                   key={`${msg.role}-${idx}`}
@@ -1156,6 +1167,7 @@ const ChatPage: React.FC = () => {
                     display: 'flex',
                     gap: 12,
                     justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                    width: '100%',
                   }}
                 >
                   {msg.role !== 'user' && (
@@ -1178,17 +1190,19 @@ const ChatPage: React.FC = () => {
 
                   <div
                     style={{
-                      maxWidth: 'min(860px, 88%)',
+                      width: msg.role === 'assistant' ? 'min(100%, 980px)' : 'fit-content',
+                      maxWidth: msg.role === 'assistant' ? 'calc(100% - 50px)' : 'min(920px, 82%)',
+                      minWidth: isMobile ? 0 : (msg.role === 'assistant' ? 320 : 180),
                       padding: msg.role === 'user' ? '14px 16px' : '16px 18px',
                       borderRadius: 20,
                       background: msg.role === 'user'
                         ? 'linear-gradient(135deg, #1677ff, #4096ff)'
-                        : 'rgba(255,255,255,0.94)',
+                        : 'var(--lm-bg-elevated)',
                       color: msg.role === 'user' ? '#fff' : 'var(--lm-text)',
                       border: msg.role === 'user' ? 'none' : '1px solid var(--lm-border-light)',
                       boxShadow: msg.role === 'user'
                         ? '0 18px 40px rgba(22,119,255,0.18)'
-                        : '0 10px 28px rgba(15, 23, 42, 0.06)',
+                        : 'var(--lm-shadow-card)',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -1462,7 +1476,7 @@ const ChatPage: React.FC = () => {
                         padding: '9px 14px',
                         borderRadius: 999,
                         border: '1px solid var(--lm-border-light)',
-                        background: 'rgba(255,255,255,0.88)',
+                        background: 'var(--lm-bg-elevated)',
                         color: 'var(--lm-text-secondary)',
                         cursor: 'pointer',
                         fontSize: 12,
@@ -1484,6 +1498,7 @@ const ChatPage: React.FC = () => {
             borderTop: '1px solid var(--lm-border-light)',
             padding: 18,
             background: 'linear-gradient(180deg, rgba(13,18,32,0.02), var(--lm-bg-container))',
+            flexShrink: 0,
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
