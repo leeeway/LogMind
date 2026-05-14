@@ -149,8 +149,10 @@ const priorityMeta: Record<LiveRecommendation['priority'], { color: string; labe
 const panelStyle: React.CSSProperties = {
   borderRadius: 18,
   border: '1px solid var(--lm-border-light)',
-  background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.88))',
-  boxShadow: '0 18px 48px rgba(15, 23, 42, 0.08)',
+  background: 'linear-gradient(180deg, var(--lm-bg-container), var(--lm-bg-card))',
+  boxShadow: 'var(--lm-shadow-elevated)',
+  backdropFilter: 'blur(18px)',
+  WebkitBackdropFilter: 'blur(18px)',
   overflow: 'hidden',
 };
 
@@ -158,7 +160,7 @@ const sectionStyle: React.CSSProperties = {
   padding: 16,
   borderRadius: 16,
   border: '1px solid var(--lm-border-light)',
-  background: 'var(--lm-bg-card)',
+  background: 'var(--lm-bg-elevated)',
 };
 
 const formatRelativeTime = (iso?: string) => {
@@ -281,8 +283,8 @@ const ChatPage: React.FC = () => {
   ]), []);
 
   const activeTemplate = dynamicTemplates.find((item) => item.id === activeTemplateId) || dynamicTemplates[0];
-  const isMobile = viewportWidth < 1120;
-  const showRightRail = viewportWidth >= 1360;
+  const isMobile = viewportWidth < 1180;
+  const showRightRail = viewportWidth >= 1580;
 
   const resetDiagnosticState = useCallback(() => {
     setToolSteps([]);
@@ -738,6 +740,13 @@ const ChatPage: React.FC = () => {
   }, [followUps, suggestedActions]);
 
   const assistantMessageCount = messages.filter((item) => item.role === 'assistant').length;
+  const showComposerSummary = !showRightRail && (
+    messages.length > 0 ||
+    sessionStats.toolCount > 0 ||
+    timelineEntries.length > 0 ||
+    traceSegments.length > 0 ||
+    diagnosticClues.length > 0
+  );
 
   return (
     <div
@@ -749,8 +758,9 @@ const ChatPage: React.FC = () => {
         minHeight: 'calc(100vh - 56px)',
         margin: '-24px',
         padding: 18,
-        overflow: 'hidden',
-        background: 'radial-gradient(circle at top left, rgba(22,119,255,0.14), transparent 28%), linear-gradient(180deg, #f6f9fc 0%, #edf3fb 100%)',
+        overflowX: 'hidden',
+        overflowY: isMobile ? 'auto' : 'hidden',
+        background: 'radial-gradient(circle at top left, rgba(22,119,255,0.16), transparent 28%), radial-gradient(circle at bottom right, rgba(114,46,209,0.12), transparent 24%), var(--lm-bg-layout)',
       }}
     >
       <div
@@ -760,7 +770,7 @@ const ChatPage: React.FC = () => {
           minWidth: isMobile ? undefined : 286,
           display: 'flex',
           flexDirection: 'column',
-          maxHeight: isMobile ? 280 : '100%',
+          maxHeight: isMobile ? 320 : '100%',
         }}
       >
         <div style={{ padding: 18, borderBottom: '1px solid var(--lm-border-light)' }}>
@@ -815,7 +825,7 @@ const ChatPage: React.FC = () => {
                 style={{
                   padding: 12,
                   borderRadius: 14,
-                  background: 'var(--lm-bg-card)',
+                  background: 'var(--lm-bg-elevated)',
                   border: '1px solid var(--lm-border-light)',
                 }}
               >
@@ -838,7 +848,7 @@ const ChatPage: React.FC = () => {
                 padding: 18,
                 borderRadius: 16,
                 border: '1px dashed var(--lm-border-light)',
-                background: 'rgba(255,255,255,0.7)',
+                background: 'var(--lm-bg-elevated)',
                 textAlign: 'center',
               }}
             >
@@ -862,7 +872,7 @@ const ChatPage: React.FC = () => {
                   : '1px solid var(--lm-border-light)',
                 background: activeSessionId === session.id
                   ? 'linear-gradient(180deg, rgba(22,119,255,0.10), rgba(22,119,255,0.04))'
-                  : 'rgba(255,255,255,0.84)',
+                  : 'var(--lm-bg-elevated)',
               }}
             >
               <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
@@ -873,7 +883,7 @@ const ChatPage: React.FC = () => {
                     borderRadius: 12,
                     background: activeSessionId === session.id
                       ? 'linear-gradient(135deg, #1677ff, #69b1ff)'
-                      : 'rgba(15,23,42,0.05)',
+                      : 'rgba(22,119,255,0.10)',
                     color: activeSessionId === session.id ? '#fff' : 'var(--lm-text-secondary)',
                     display: 'flex',
                     alignItems: 'center',
@@ -1053,7 +1063,7 @@ const ChatPage: React.FC = () => {
                       style={{
                         padding: 16,
                         borderRadius: 16,
-                        background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.92))',
+                        background: 'linear-gradient(180deg, var(--lm-bg-container), var(--lm-bg-elevated))',
                         border: '1px solid var(--lm-border-light)',
                       }}
                     >
@@ -1084,7 +1094,7 @@ const ChatPage: React.FC = () => {
                           padding: '10px 14px',
                           borderRadius: 999,
                           border: '1px solid rgba(22,119,255,0.16)',
-                          background: 'rgba(22,119,255,0.06)',
+                          background: 'rgba(22,119,255,0.10)',
                           color: '#1677ff',
                           cursor: 'pointer',
                           fontSize: 12,
@@ -1473,7 +1483,7 @@ const ChatPage: React.FC = () => {
           style={{
             borderTop: '1px solid var(--lm-border-light)',
             padding: 18,
-            background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(246,249,252,0.98))',
+            background: 'linear-gradient(180deg, rgba(13,18,32,0.02), var(--lm-bg-container))',
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1486,7 +1496,7 @@ const ChatPage: React.FC = () => {
                     padding: '8px 12px',
                     borderRadius: 999,
                     border: '1px solid rgba(22,119,255,0.14)',
-                    background: 'rgba(22,119,255,0.05)',
+                    background: 'rgba(22,119,255,0.10)',
                     color: '#1677ff',
                     cursor: 'pointer',
                     fontSize: 12,
@@ -1501,7 +1511,7 @@ const ChatPage: React.FC = () => {
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: showRightRail ? '1.2fr 320px' : '1fr',
+                gridTemplateColumns: '1fr',
                 gap: 14,
               }}
             >
@@ -1509,8 +1519,8 @@ const ChatPage: React.FC = () => {
                 style={{
                   borderRadius: 18,
                   border: `1px solid ${input.length > 7500 ? 'rgba(255,77,79,0.45)' : 'var(--lm-border-light)'}`,
-                  background: 'rgba(255,255,255,0.96)',
-                  boxShadow: '0 16px 36px rgba(15, 23, 42, 0.06)',
+                  background: 'linear-gradient(180deg, var(--lm-bg-container), var(--lm-bg-elevated))',
+                  boxShadow: 'var(--lm-shadow-card)',
                   padding: 12,
                 }}
               >
@@ -1538,7 +1548,7 @@ const ChatPage: React.FC = () => {
                   }}
                 />
 
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, gap: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, gap: 12, flexWrap: 'wrap' }}>
                   <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>
                     Enter 发送，Shift+Enter 换行，支持连续追问和流式诊断。
                   </Text>
@@ -1561,12 +1571,12 @@ const ChatPage: React.FC = () => {
                 </div>
               </div>
 
-              {showRightRail && (
+              {showComposerSummary && (
                 <div
                   style={{
                     borderRadius: 18,
                     border: '1px solid var(--lm-border-light)',
-                    background: 'rgba(255,255,255,0.92)',
+                    background: 'var(--lm-bg-elevated)',
                     padding: 14,
                     display: 'flex',
                     flexDirection: 'column',
@@ -1574,7 +1584,7 @@ const ChatPage: React.FC = () => {
                   }}
                 >
                   <Text style={{ fontSize: 12, fontWeight: 700, color: 'var(--lm-text)' }}>
-                    右侧面板摘要
+                    诊断摘要
                   </Text>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
                     {[
@@ -1612,8 +1622,8 @@ const ChatPage: React.FC = () => {
         <div
           style={{
             ...panelStyle,
-            width: 340,
-            minWidth: 340,
+            width: 320,
+            minWidth: 320,
             display: 'flex',
             flexDirection: 'column',
             gap: 14,
