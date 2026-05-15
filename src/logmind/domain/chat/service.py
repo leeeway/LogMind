@@ -350,7 +350,7 @@ CHAT_TOOLS = AGENT_TOOLS + [
 
 @dataclass
 class ChatSession:
-    """In-memory chat session with conversation history."""
+    """Chat session with conversation history, backed by DB persistence."""
     id: str
     tenant_id: str
     user_id: str
@@ -358,6 +358,7 @@ class ChatSession:
     messages: list[dict] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    _evidence_counter: int = field(default=0, repr=False)
 
     def add_message(
         self,
@@ -391,9 +392,94 @@ class ChatSession:
             if m["role"] in ("user", "assistant")
         ]
 
+    def next_evidence_label(self) -> str:
+        """Generate next evidence label: E-1, E-2, ..."""
+        self._evidence_counter += 1
+        return f"E-{self._evidence_counter}"
 
-# In-memory session store (production should use Redis)
+
+# In-memory cache (write-through to DB)
 _sessions: dict[str, ChatSession] = {}
+
+
+async def _persist_session(session: ChatSession, db_session) -> None:
+    """Write-through: persist session state to DB."""
+    from logmind.domain.chat.models import ChatConversation, ChatMessageRecord
+    from sqlalchemy import select
+
+    stmt = select(ChatConversation).where(ChatConversation.id == session.id)
+    result = await db_session.execute(stmt)
+    conv = result.scalar_one_or_none()
+
+    if not conv:
+        conv = ChatConversation(
+            id=session.id,
+            tenant_id=session.tenant_id,
+            user_id=session.user_id,
+            title=session.title,
+        )
+        db_session.add(conv)
+    else:
+        conv.title = session.title
+
+    # Sync messages: only add new ones
+    existing_count_stmt = select(ChatMessageRecord).where(
+        ChatMessageRecord.conversation_id == session.id
+    )
+    existing_result = await db_session.execute(existing_count_stmt)
+    existing_count = len(existing_result.scalars().all())
+
+    for idx, msg in enumerate(session.messages[existing_count:], start=existing_count):
+        record = ChatMessageRecord(
+            conversation_id=session.id,
+            seq=idx,
+            role=msg["role"],
+            content=msg["content"],
+            metadata_json=json.dumps(msg.get("metadata") or {}, ensure_ascii=False),
+            evidence_refs=json.dumps(msg.get("evidence_refs") or [], ensure_ascii=False),
+        )
+        db_session.add(record)
+
+    await db_session.flush()
+
+
+async def _load_session_from_db(session_id: str, db_session) -> ChatSession | None:
+    """Load a session from DB into memory cache."""
+    from logmind.domain.chat.models import ChatConversation
+    from sqlalchemy import select
+
+    stmt = select(ChatConversation).where(ChatConversation.id == session_id)
+    result = await db_session.execute(stmt)
+    conv = result.scalar_one_or_none()
+    if not conv:
+        return None
+
+    messages = []
+    for msg_record in (conv.messages or []):
+        msg = {
+            "role": msg_record.role,
+            "content": msg_record.content,
+            "timestamp": msg_record.created_at.isoformat() if msg_record.created_at else "",
+        }
+        try:
+            meta = json.loads(msg_record.metadata_json) if msg_record.metadata_json else {}
+            if meta:
+                msg["metadata"] = meta
+        except (json.JSONDecodeError, TypeError):
+            pass
+        messages.append(msg)
+
+    session = ChatSession(
+        id=conv.id,
+        tenant_id=conv.tenant_id,
+        user_id=conv.user_id,
+        title=conv.title,
+        messages=messages,
+        created_at=conv.created_at.isoformat() if conv.created_at else "",
+        updated_at=conv.updated_at.isoformat() if conv.updated_at else "",
+    )
+    _sessions[session_id] = session
+    return session
 
 
 def _extract_error_core(msg: str, max_len: int = 500) -> str:
@@ -995,6 +1081,59 @@ class ChatService:
         _sessions[session_id] = session
         return session
 
+    async def get_or_create_session_persistent(
+        self, session_id: str, tenant_id: str, user_id: str, db_session
+    ) -> ChatSession:
+        """Get from cache or load from DB; create if not exists."""
+        if session_id in _sessions:
+            return _sessions[session_id]
+        # Try loading from DB
+        loaded = await _load_session_from_db(session_id, db_session)
+        if loaded:
+            return loaded
+        # Create new
+        session = ChatSession(
+            id=session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _sessions[session_id] = session
+        await _persist_session(session, db_session)
+        return session
+
+    async def list_sessions_persistent(self, tenant_id: str, user_id: str, db_session) -> list[dict]:
+        """List sessions from DB."""
+        from logmind.domain.chat.models import ChatConversation
+        from sqlalchemy import select, func
+        from logmind.domain.chat.models import ChatMessageRecord
+
+        stmt = (
+            select(ChatConversation)
+            .where(
+                ChatConversation.tenant_id == tenant_id,
+                ChatConversation.user_id == user_id,
+                ChatConversation.status == "active",
+            )
+            .order_by(ChatConversation.updated_at.desc())
+            .limit(50)
+        )
+        result = await db_session.execute(stmt)
+        conversations = result.scalars().all()
+
+        sessions = []
+        for conv in conversations:
+            msg_count = len(conv.messages) if conv.messages else 0
+            sessions.append({
+                "id": conv.id,
+                "title": conv.title,
+                "message_count": msg_count,
+                "created_at": conv.created_at.isoformat() if conv.created_at else "",
+                "updated_at": conv.updated_at.isoformat() if conv.updated_at else "",
+            })
+        return sessions
+
     def list_sessions(self, tenant_id: str, user_id: str) -> list[dict]:
         result = []
         for s in _sessions.values():
@@ -1008,8 +1147,27 @@ class ChatService:
                 })
         return sorted(result, key=lambda x: x["updated_at"], reverse=True)
 
+    async def get_session_persistent(self, session_id: str, db_session) -> ChatSession | None:
+        """Get session from cache or DB."""
+        if session_id in _sessions:
+            return _sessions[session_id]
+        return await _load_session_from_db(session_id, db_session)
+
     def get_session(self, session_id: str) -> ChatSession | None:
         return _sessions.get(session_id)
+
+    async def delete_session_persistent(self, session_id: str, db_session) -> None:
+        """Mark session as archived in DB and remove from cache."""
+        from logmind.domain.chat.models import ChatConversation
+        from sqlalchemy import select
+
+        _sessions.pop(session_id, None)
+        stmt = select(ChatConversation).where(ChatConversation.id == session_id)
+        result = await db_session.execute(stmt)
+        conv = result.scalar_one_or_none()
+        if conv:
+            conv.status = "archived"
+            await db_session.flush()
 
     def delete_session(self, session_id: str):
         _sessions.pop(session_id, None)
@@ -1086,7 +1244,62 @@ class ChatService:
             logger.error("tool_call_failed", tool=tool_name, error=str(e))
             return json.dumps({"error": f"工具调用失败: {str(e)}"})
 
-    async def _tool_get_alerts(self, args: dict, tenant_id: str, db_session) -> str:
+    async def execute_tool_call_with_evidence(
+        self,
+        tool_name: str,
+        args: dict,
+        tenant_id: str,
+        db_session,
+        session: "ChatSession",
+        es_index_pattern: str = "*",
+    ) -> tuple[str, str]:
+        """
+        Execute tool call and create a DiagnosticEvidence record.
+        Returns (tool_result, evidence_label).
+        """
+        result = await self.execute_tool_call(
+            tool_name, args, tenant_id, db_session, es_index_pattern
+        )
+
+        # Generate evidence record
+        label = session.next_evidence_label()
+
+        try:
+            from logmind.domain.chat.models import DiagnosticEvidence
+            import uuid as _uuid
+
+            # Parse result to extract hit/error counts
+            hit_count = 0
+            error_count = 0
+            try:
+                parsed = json.loads(result)
+                hit_count = parsed.get("count", 0) or parsed.get("total_hits", 0) or len(parsed.get("timeline", []))
+                error_count = parsed.get("error_count", 0)
+                if not hit_count and isinstance(parsed.get("activities"), list):
+                    hit_count = len(parsed["activities"])
+                if not hit_count and isinstance(parsed.get("alerts"), list):
+                    hit_count = len(parsed["alerts"])
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
+            evidence = DiagnosticEvidence(
+                id=str(_uuid.uuid4()),
+                conversation_id=session.id,
+                label=label,
+                tool_name=tool_name,
+                tool_args=json.dumps(args, ensure_ascii=False)[:2000],
+                es_index_pattern=es_index_pattern,
+                source_service=args.get("service_name", "") or args.get("domain", ""),
+                hit_count=hit_count,
+                error_count=error_count,
+                result_preview=result[:1000],
+                evidence_type="tool_result",
+            )
+            db_session.add(evidence)
+        except Exception as e:
+            logger.warning("evidence_creation_failed", tool=tool_name, error=str(e))
+
+        return result, label
         """Get recent alerts."""
         from logmind.domain.alert.models import AlertHistory
         from logmind.shared.base_repository import BaseRepository
@@ -2183,9 +2396,9 @@ class ChatService:
                             if exact_domain:
                                 func_args["domain"] = exact_domain
 
-                        tool_result = await self.execute_tool_call(
+                        tool_result, evidence_label = await self.execute_tool_call_with_evidence(
                             func_name, func_args, session.tenant_id,
-                            db_session, es_index_pattern=tool_index,
+                            db_session, session=session, es_index_pattern=tool_index,
                         )
 
                         # Generate result summary (first 200 chars)
@@ -2197,6 +2410,7 @@ class ChatService:
                             "name": func_name,
                             "result": tool_result[:2000],
                             "summary": summary,
+                            "evidence_label": evidence_label,
                         })
 
                         # Add tool interaction to message context for next round

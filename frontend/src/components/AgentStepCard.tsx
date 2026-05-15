@@ -30,6 +30,7 @@ export interface ToolStep {
   args: any;
   result?: string;
   summary?: string;
+  evidence_label?: string;
   round: number;
   status: 'running' | 'done' | 'error';
   startTime: number;
@@ -109,6 +110,17 @@ const AgentStepCard: React.FC<Props> = ({ step, isLast }) => {
             {argsSummary}
           </Text>
           <Space size={4}>
+            {step.evidence_label && (
+              <Tooltip title="证据编号">
+                <Tag style={{
+                  borderRadius: 4, fontSize: 10, margin: 0,
+                  background: 'rgba(114,46,209,0.1)', border: '1px solid rgba(114,46,209,0.25)',
+                  color: '#722ed1', fontFamily: 'monospace', fontWeight: 600,
+                }}>
+                  {step.evidence_label}
+                </Tag>
+              </Tooltip>
+            )}
             {elapsed && (
               <Text style={{ fontSize: 10, color: 'var(--lm-text-tertiary)', fontFamily: 'monospace' }}>
                 {elapsed}s

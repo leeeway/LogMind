@@ -145,8 +145,13 @@ const AlertList: React.FC = () => {
     {
       title: '告警信息', dataIndex: 'message', ellipsis: true,
       render: (text: string, r: any) => (
-        <a onClick={() => { setDetailAlert(r); setDrawerOpen(true); }} style={{ color: 'var(--lm-text)' }}>
-          {text}
+        <a onClick={() => { setDetailAlert(r); setDrawerOpen(true); }} style={{ color: 'var(--lm-text)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          {r.alert_type === 'predictive' && (
+            <Tooltip title="预测告警 — 趋势上升，尚未触发阈值">
+              <Tag color="#722ed1" style={{ borderRadius: 4, fontSize: 10, margin: 0, flexShrink: 0 }}>预测</Tag>
+            </Tooltip>
+          )}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
         </a>
       ),
     },
@@ -311,6 +316,13 @@ const AlertList: React.FC = () => {
                 </Descriptions.Item>
                 <Descriptions.Item label="严重度">
                   <Tag color={detailAlert.severity === 'critical' ? '#ff4d4f' : '#faad14'}>{detailAlert.severity}</Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="告警类型">
+                  {detailAlert.alert_type === 'predictive' ? (
+                    <Tag color="#722ed1" style={{ borderRadius: 4 }}>预测告警</Tag>
+                  ) : (
+                    <Tag color="#1677ff" style={{ borderRadius: 4 }}>实时告警</Tag>
+                  )}
                 </Descriptions.Item>
                 <Descriptions.Item label="状态">
                   <Tag color={statusLabels[detailAlert.status]?.color || '#8c8c8c'}>

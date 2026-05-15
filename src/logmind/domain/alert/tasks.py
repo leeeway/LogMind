@@ -126,6 +126,7 @@ async def _patrol_single(business_line_id: str):
     from logmind.domain.analysis.models import LogAnalysisTask
     from logmind.domain.analysis.tasks import run_analysis_task
     from logmind.domain.anomaly.detector import anomaly_detector
+    from logmind.domain.anomaly.predictor import trend_predictor
     from logmind.domain.tenant.models import BusinessLine
 
     settings = get_settings()
@@ -144,44 +145,136 @@ async def _patrol_single(business_line_id: str):
             severity_threshold=biz.severity_threshold,
         )
 
-        if not anomaly.is_anomaly:
+        if anomaly.is_anomaly:
+            logger.info(
+                "patrol_anomaly_triggered",
+                business_line=biz.name,
+                level=anomaly.level,
+                z_score=anomaly.z_score,
+                current_errors=anomaly.current_errors,
+                detail=anomaly.detail,
+            )
+
+            # Create patrol task with anomaly metadata
+            task = LogAnalysisTask(
+                tenant_id=biz.tenant_id,
+                business_line_id=biz.id,
+                task_type="scheduled",
+                status="pending",
+                time_from=now - timedelta(minutes=settings.analysis_cooldown_minutes),
+                time_to=now,
+                query_params="{}",
+            )
+            session.add(task)
+            await session.flush()
+
+            run_analysis_task.delay(task.id)
+            logger.info(
+                "patrol_task_created",
+                business_line=biz.name,
+                task_id=task.id,
+                anomaly_level=anomaly.level,
+                z_score=anomaly.z_score,
+            )
+            return  # Realtime anomaly handled — skip predictive check
+
+        # ── Predictive Alerting ───────────────────────────
+        # Z-Score is normal now, but check if trend is rising toward threshold
+        prediction = await trend_predictor.predict(
+            index_pattern=biz.es_index_pattern,
+            severity_threshold=biz.severity_threshold,
+        )
+
+        if prediction.predicted_level in ("warning", "critical") and prediction.trend_direction == "rising":
+            logger.warning(
+                "patrol_predictive_alert",
+                business_line=biz.name,
+                predicted_level=prediction.predicted_level,
+                trend_slope=prediction.trend_slope,
+                predicted_errors_30m=prediction.predicted_errors_30m,
+                confidence=prediction.confidence,
+                detail=prediction.detail,
+            )
+            await _fire_predictive_alert(biz, prediction, now, session)
+        else:
             logger.info(
                 "patrol_skipped_no_anomaly",
                 business_line=biz.name,
                 z_score=anomaly.z_score,
                 current_errors=anomaly.current_errors,
                 baseline_mean=anomaly.baseline_mean,
+                predicted_level=prediction.predicted_level,
+                trend_direction=prediction.trend_direction,
             )
-            return  # No anomaly → skip expensive AI analysis
 
-        logger.info(
-            "patrol_anomaly_triggered",
+
+async def _fire_predictive_alert(biz, prediction, now, session):
+    """
+    Write a predictive AlertHistory record when trend forecasting signals
+    an upcoming threshold breach. Does NOT trigger AI analysis — this is
+    a lightweight early-warning signal only.
+
+    Deduplication: skip if a predictive alert for this business line was
+    already fired in the last 60 minutes to avoid alert storms.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from logmind.domain.alert.models import AlertHistory
+
+    # Dedup: skip if we already fired a predictive alert recently
+    recent_cutoff = now - timedelta(minutes=60)
+    existing = (
+        await session.execute(
+            select(AlertHistory).where(
+                AlertHistory.business_line_id == biz.id,
+                AlertHistory.alert_type == "predictive",
+                AlertHistory.fired_at >= recent_cutoff,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if existing:
+        logger.debug(
+            "predictive_alert_dedup_skip",
             business_line=biz.name,
-            level=anomaly.level,
-            z_score=anomaly.z_score,
-            current_errors=anomaly.current_errors,
-            detail=anomaly.detail,
+            last_fired=existing.fired_at.isoformat(),
         )
+        return
 
-        # Create patrol task with anomaly metadata
-        task = LogAnalysisTask(
-            tenant_id=biz.tenant_id,
-            business_line_id=biz.id,
-            task_type="scheduled",
-            status="pending",
-            time_from=now - timedelta(minutes=settings.analysis_cooldown_minutes),
-            time_to=now,
-            query_params="{}",
-        )
-        session.add(task)
-        await session.flush()
+    severity = prediction.predicted_level  # warning / critical
+    priority = "P1" if severity == "critical" else "P2"
+    confidence_pct = int(prediction.confidence * 100)
 
-        # Dispatch analysis
-        run_analysis_task.delay(task.id)
-        logger.info(
-            "patrol_task_created",
-            business_line=biz.name,
-            task_id=task.id,
-            anomaly_level=anomaly.level,
-            z_score=anomaly.z_score,
-        )
+    message = (
+        f"[预测告警] {biz.name} 错误趋势持续上升，"
+        f"预计未来30分钟约 {prediction.predicted_errors_30m:.0f} 条错误"
+        f"（当前 {prediction.current_rate:.0f}/h，基线 {prediction.baseline_mean:.0f}/h）。"
+        f"置信度 {confidence_pct}%。{prediction.detail}"
+    )
+
+    alert_record = AlertHistory(
+        alert_rule_id=None,
+        analysis_task_id=None,
+        tenant_id=biz.tenant_id,
+        business_line_id=biz.id,
+        status="fired",
+        severity=severity,
+        message=message,
+        notify_result="{}",
+        fired_at=now,
+        priority=priority,
+        alert_type="predictive",
+    )
+    session.add(alert_record)
+    await session.flush()
+
+    logger.info(
+        "predictive_alert_fired",
+        business_line=biz.name,
+        severity=severity,
+        predicted_errors_30m=prediction.predicted_errors_30m,
+        confidence=prediction.confidence,
+        alert_id=alert_record.id,
+    )

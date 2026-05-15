@@ -50,9 +50,11 @@ class AlertHistoryResponse(BaseSchema):
     id: str
     alert_rule_id: str | None
     analysis_task_id: str | None
+    business_line_id: str | None = None
     status: str
     severity: str
     priority: str
+    alert_type: str = "realtime"
     message: str
     fired_at: datetime
     acked_at: datetime | None

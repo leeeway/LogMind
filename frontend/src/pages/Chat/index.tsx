@@ -429,11 +429,27 @@ const ChatPage: React.FC = () => {
 
   const exportSession = () => {
     if (!messages.length) return;
-    const md = messages
+    const now = new Date().toLocaleString();
+    const evidenceSection = toolSteps.length > 0
+      ? `## 证据链\n\n${toolSteps
+          .filter((s) => s.status === 'done')
+          .map((s) => {
+            const label = s.evidence_label ? `**${s.evidence_label}**` : '-';
+            const args = Object.entries(s.args || {})
+              .filter(([, v]) => v !== undefined && v !== null && v !== '')
+              .map(([k, v]) => `${k}=${String(v).slice(0, 60)}`)
+              .join(', ');
+            const elapsed = s.endTime ? `${((s.endTime - s.startTime) / 1000).toFixed(1)}s` : '';
+            return `| ${label} | ${s.name} | ${args} | ${s.summary?.slice(0, 80) || ''} | ${elapsed} |`;
+          })
+          .join('\n')}\n\n> 表头: 证据编号 | 工具 | 参数 | 摘要 | 耗时\n\n---\n\n`
+      : '';
+    const conversationSection = messages
       .map((item) => item.role === 'user' ? `## 用户\n${item.content}` : `## AI 助手\n${item.content}`)
       .join('\n\n---\n\n');
-    const header = `# LogMind 诊断报告\n\n> 时间: ${new Date().toLocaleString()}\n> 工具调用: ${toolSteps.length} 次\n\n---\n\n`;
-    navigator.clipboard.writeText(header + md).then(() => message.success('诊断报告已复制到剪贴板'));
+    const header = `# LogMind 诊断报告\n\n> 时间: ${now}\n> 工具调用: ${toolSteps.length} 次\n\n---\n\n`;
+    navigator.clipboard.writeText(header + evidenceSection + conversationSection)
+      .then(() => message.success('诊断报告已复制到剪贴板'));
   };
 
   const sendMessage = useCallback(async (content?: string) => {
@@ -518,6 +534,7 @@ const ChatPage: React.FC = () => {
                 ...step,
                 result: event.result as string | undefined,
                 summary: event.summary as string | undefined,
+                evidence_label: event.evidence_label as string | undefined,
                 status: 'done' as const,
                 endTime: Date.now(),
               }

@@ -17,7 +17,7 @@ from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
 from logmind.domain.alert.models import AlertHistory
 from logmind.domain.analysis.models import LogAnalysisTask
-from logmind.domain.chat.service import chat_service
+from logmind.domain.chat.service import chat_service, _persist_session
 from logmind.domain.tenant.models import BusinessLine
 from logmind.shared.base_repository import BaseRepository
 
@@ -64,10 +64,11 @@ class RecommendationsResponse(BaseModel):
 async def create_session(session: DBSession, user: CurrentUser):
     """Create a new chat session."""
     session_id = str(uuid.uuid4())
-    chat_session = chat_service.get_or_create_session(
+    chat_session = await chat_service.get_or_create_session_persistent(
         session_id=session_id,
         tenant_id=user.tenant_id,
         user_id=user.sub,
+        db_session=session,
     )
     return SessionResponse(
         id=chat_session.id,
@@ -79,9 +80,9 @@ async def create_session(session: DBSession, user: CurrentUser):
 
 
 @router.get("/sessions")
-async def list_sessions(user: CurrentUser):
+async def list_sessions(db: DBSession, user: CurrentUser):
     """List chat sessions for current user."""
-    sessions = chat_service.list_sessions(user.tenant_id, user.sub)
+    sessions = await chat_service.list_sessions_persistent(user.tenant_id, user.sub, db)
     return {"sessions": sessions}
 
 
@@ -224,9 +225,9 @@ async def get_recommendations(
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str, user: CurrentUser):
+async def get_session(session_id: str, db: DBSession, user: CurrentUser):
     """Get a chat session with all messages."""
-    s = chat_service.get_session(session_id)
+    s = await chat_service.get_session_persistent(session_id, db)
     if not s or s.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="Session not found")
     return {
@@ -239,12 +240,12 @@ async def get_session(session_id: str, user: CurrentUser):
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str, user: CurrentUser):
+async def delete_session(session_id: str, db: DBSession, user: CurrentUser):
     """Delete a chat session."""
-    s = chat_service.get_session(session_id)
+    s = await chat_service.get_session_persistent(session_id, db)
     if not s or s.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="Session not found")
-    chat_service.delete_session(session_id)
+    await chat_service.delete_session_persistent(session_id, db)
     return {"ok": True}
 
 
@@ -265,10 +266,11 @@ async def send_message(
       - {"type": "done"}
       - {"type": "error", "message": "..."}
     """
-    chat_session = chat_service.get_or_create_session(
+    chat_session = await chat_service.get_or_create_session_persistent(
         session_id=session_id,
         tenant_id=user.tenant_id,
         user_id=user.sub,
+        db_session=db,
     )
 
     # Build service list context
@@ -291,17 +293,27 @@ async def send_message(
         )
     service_list = "\n".join(service_list_items) or "暂无配置的业务线"
 
-    return StreamingResponse(
-        chat_service.chat_stream(
+    async def stream_and_persist():
+        async for chunk in chat_service.chat_stream(
             session=chat_session,
             user_message=req.content,
             db_session=db,
             service_list=service_list,
-        ),
+        ):
+            yield chunk
+        # Persist session after streaming completes
+        try:
+            await _persist_session(chat_session, db)
+            await db.commit()
+        except Exception:
+            pass
+
+    return StreamingResponse(
+        stream_and_persist(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "X-Accel-Buffering": "no",
         },
     )

@@ -53,3 +53,5 @@ class AlertHistory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     resolved_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     priority: Mapped[str] = mapped_column(String(10), default="P2")  # P0 / P1 / P2
+    alert_type: Mapped[str] = mapped_column(String(20), default="realtime")  # realtime / predictive
+    business_line_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
