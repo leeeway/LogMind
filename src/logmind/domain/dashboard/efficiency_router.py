@@ -5,17 +5,16 @@ Measures 6 dimensions of operational efficiency with month-over-month
 comparison and auto-generated improvement reports.
 """
 
-from datetime import datetime, timezone, timedelta
-from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func, case
+from sqlalchemy import case, func, select
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
 from logmind.domain.alert.models import AlertHistory
-from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
+from logmind.domain.analysis.models import AnalysisResult, LogAnalysisTask
 
 logger = get_logger(__name__)
 
@@ -54,6 +53,20 @@ class OpsEfficiencyResponse(BaseModel):
     report: EfficiencyReport
 
 
+def _duration_minutes(start: datetime | None, end: datetime | None) -> float | None:
+    """Return a non-negative minute duration for DB datetimes."""
+    if start is None or end is None:
+        return None
+
+    if start.tzinfo is None and end.tzinfo is not None:
+        start = start.replace(tzinfo=end.tzinfo)
+    elif start.tzinfo is not None and end.tzinfo is None:
+        end = end.replace(tzinfo=start.tzinfo)
+
+    minutes = (end - start).total_seconds() / 60
+    return max(0.0, minutes)
+
+
 async def _calc_period_metrics(session, tenant_id: str, since: datetime, until: datetime) -> dict:
     """Calculate all efficiency metrics for a time period."""
     # Alert metrics
@@ -72,13 +85,12 @@ async def _calc_period_metrics(session, tenant_id: str, since: datetime, until: 
     )
     ar = (await session.execute(alert_stmt)).one()
 
-    # MTTR
+    # MTTR. Calculate in Python instead of SQL EXTRACT(EPOCH) so the endpoint
+    # works across PostgreSQL and MySQL deployments.
     mttr_stmt = (
         select(
-            func.avg(
-                func.extract("epoch", AlertHistory.resolved_at) -
-                func.extract("epoch", AlertHistory.fired_at)
-            ).label("avg_mttr"),
+            AlertHistory.fired_at,
+            AlertHistory.resolved_at,
         )
         .select_from(AlertHistory)
         .where(
@@ -88,8 +100,12 @@ async def _calc_period_metrics(session, tenant_id: str, since: datetime, until: 
             AlertHistory.resolved_at != None,  # noqa: E711
         )
     )
-    mttr_row = (await session.execute(mttr_stmt)).one()
-    avg_mttr_min = (mttr_row.avg_mttr or 0) / 60
+    mttr_values = [
+        duration
+        for row in (await session.execute(mttr_stmt)).all()
+        if (duration := _duration_minutes(row.fired_at, row.resolved_at)) is not None
+    ]
+    avg_mttr_min = sum(mttr_values) / len(mttr_values) if mttr_values else 0.0
 
     # Noise ratio (P2 never acked)
     noise_stmt = (
