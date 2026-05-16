@@ -75,6 +75,8 @@ interface LiveRecommendation {
   kind: string;
   tone: string;
   metric?: string;
+  expected_path?: string;
+  expected_steps?: string[];
 }
 
 interface ChatRouteState {
@@ -358,17 +360,14 @@ const ChatPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadSessions();
   }, [loadSessions]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadBusinessLines();
   }, [loadBusinessLines]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadRecommendations();
     const timer = window.setInterval(() => {
       loadRecommendations();
@@ -455,7 +454,7 @@ const ChatPage: React.FC = () => {
     if (!messages.length) return;
     const now = new Date().toLocaleString();
     const diagnosisSection = diagnosisCase
-      ? `## 专家案件状态\n\n- 阶段: ${diagnosisCase.stage}\n- 当前假设: ${diagnosisCase.hypothesis || '待确认'}\n- 置信度: ${diagnosisCase.confidence || 0}%\n- 影响范围: ${diagnosisCase.impact_scope || '待确认'}\n\n${
+      ? `## 专家案件状态\n\n- 阶段: ${diagnosisCase.stage}\n- 当前假设: ${diagnosisCase.hypothesis || '待确认'}\n- 置信度: ${diagnosisCase.confidence || 0}%\n- 影响范围: ${diagnosisCase.impact_scope || '待确认'}\n- 待确认: ${(diagnosisCase.missing_confirmations || []).join('；') || '暂无'}\n\n${
           (diagnosisCase.evidence_summaries || []).map((item) => `- ${item.label || '未编号'}: ${item.summary}`).join('\n') || '- 暂无结构化证据'
         }\n\n---\n\n`
       : '';
@@ -575,6 +574,7 @@ const ChatPage: React.FC = () => {
             counter_evidence: update.counter_evidence || [],
             evidence_summaries: update.evidence_summaries || [],
             impact_scope: update.impact_scope,
+            missing_confirmations: update.missing_confirmations || latestDiagnosisCase?.missing_confirmations || [],
             actions: latestDecisionActions,
           };
           setDiagnosisCase(latestDiagnosisCase);
@@ -811,7 +811,6 @@ const ChatPage: React.FC = () => {
   useEffect(() => {
     const state = (location.state || {}) as ChatRouteState;
     if (!state.prefill) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setInput(state.prefill);
     window.history.replaceState({}, document.title);
     const timer = window.setTimeout(() => {
@@ -1786,7 +1785,7 @@ const ChatPage: React.FC = () => {
                       {priorityMeta[item.priority].label}
                     </Tag>
                     <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>
-                      {recommendationPathLabel(item.kind)}
+                      {item.expected_path || recommendationPathLabel(item.kind)}
                     </Text>
                   </div>
                   <Text style={{ display: 'block', fontSize: 13, fontWeight: 700, color: 'var(--lm-text)' }}>
@@ -1795,6 +1794,15 @@ const ChatPage: React.FC = () => {
                   <Text style={{ fontSize: 12, color: 'var(--lm-text-secondary)', lineHeight: 1.6 }}>
                     {item.reason}
                   </Text>
+                  {item.expected_steps && item.expected_steps.length > 0 && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+                      {item.expected_steps.slice(0, 4).map((step) => (
+                        <Tag key={step} style={{ margin: 0, borderRadius: 999, fontSize: 11 }}>
+                          {step}
+                        </Tag>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
               {liveRecommendations.length === 0 && (

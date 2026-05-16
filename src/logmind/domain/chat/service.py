@@ -1235,6 +1235,7 @@ class ChatService:
             "counter_evidence": counter,
             "evidence_summaries": evidence_summaries[-8:],
             "impact_scope": self._infer_impact_scope(update, case_state),
+            "missing_confirmations": self._infer_missing_confirmations(update, case_state),
         })
         return {
             "type": "hypothesis_update",
@@ -1244,6 +1245,7 @@ class ChatService:
             "counter_evidence": counter,
             "evidence_summaries": case_state["evidence_summaries"],
             "impact_scope": case_state["impact_scope"],
+            "missing_confirmations": case_state["missing_confirmations"],
         }
 
     def _infer_impact_scope(self, update: dict, case_state: dict) -> str:
@@ -1254,6 +1256,20 @@ class ChatService:
         if update.get("error_count", 0) > 0:
             return "已发现异常证据，影响范围仍需继续确认。"
         return case_state.get("impact_scope") or "暂无明确影响范围。"
+
+    def _infer_missing_confirmations(self, update: dict, case_state: dict) -> list[str]:
+        gaps: list[str] = []
+        if update.get("hit_count", 0) == 0:
+            gaps.append("扩大时间窗口或更换关键词，确认是否存在遗漏证据")
+        if case_state.get("confidence", 0) < 55:
+            gaps.append("补充一条反向查询，排除偶发噪声或误报")
+        if case_state.get("path") in {"trace", "service_error"} and update.get("error_count", 0) > 0:
+            gaps.append("确认首个异常节点是否早于下游报错")
+        if case_state.get("path") == "account_replay":
+            gaps.append("确认账号关键动作前后是否存在失败响应或风控拦截")
+        if not gaps:
+            gaps.append("确认变更、发布或依赖状态是否与异常时间点重合")
+        return gaps[:3]
 
     def _build_decision_actions(
         self,
@@ -1312,13 +1328,23 @@ class ChatService:
             "用于升级协同处理。",
         )
         add(
+            "postmortem-draft",
+            "生成复盘草稿",
+            (
+                "请基于当前诊断案件生成一份故障复盘草稿，包含时间线、影响范围、根因假设、"
+                "已确认/待确认证据、短期止血和长期改进。"
+            ),
+            "follow_up",
+            "把诊断链转成可复用的复盘资产。",
+        )
+        add(
             "copy-report",
             "复制诊断报告",
             "",
             "copy",
             "复制结论、证据链和建议动作。",
         )
-        return actions[:4]
+        return actions[:5]
 
     def _format_expert_answer(self, content: str, case_state: dict, actions: list[dict]) -> str:
         if "## 结论摘要" in content or "# 结论摘要" in content:
@@ -1332,11 +1358,12 @@ class ChatService:
             for action in actions
             if action.get("kind") != "copy"
         ) or "- 继续补充查询以验证当前假设。"
-        confirm_lines = (
-            "- 首个异常出现的准确时间点。\n"
-            "- 异常是否集中在单服务、单账号、单链路或单部署批次。\n"
-            "- 当前证据中的反例是否能排除。"
-        )
+        confirmations = case_state.get("missing_confirmations") or [
+            "首个异常出现的准确时间点",
+            "异常是否集中在单服务、单账号、单链路或单部署批次",
+            "当前证据中的反例是否能排除",
+        ]
+        confirm_lines = "\n".join(f"- {item}" for item in confirmations)
         return (
             f"## 结论摘要\n{content.strip()}\n\n"
             f"## 证据链\n{evidence_lines}\n\n"
@@ -2494,6 +2521,7 @@ class ChatService:
             "evidence_summaries": [],
             "actions": [],
             "impact_scope": "待确认",
+            "missing_confirmations": ["等待第一批工具证据确认问题范围"],
         }
         yield self._sse(self._stage_payload(case_state, "侦察", summary="开始收集问题上下文和可用证据。"))
 

@@ -25,6 +25,7 @@ export interface HypothesisUpdate {
   counter_evidence?: string[];
   evidence_summaries?: EvidenceSummary[];
   impact_scope?: string;
+  missing_confirmations?: string[];
 }
 
 export interface DecisionAction {
@@ -49,6 +50,7 @@ export interface DiagnosisCaseState {
   counter_evidence?: string[];
   evidence_summaries?: EvidenceSummary[];
   impact_scope?: string;
+  missing_confirmations?: string[];
   actions?: DecisionAction[];
 }
 
@@ -183,6 +185,27 @@ const DiagnosisCasePanel: React.FC<Props> = ({ caseState, actions = [], onAction
                 {item.summary}
               </Text>
             </div>
+          ))}
+        </div>
+      )}
+
+      {!compact && (caseState.missing_confirmations || []).length > 0 && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: '10px 12px',
+            borderRadius: 8,
+            background: 'rgba(250,140,22,0.08)',
+            border: '1px solid rgba(250,140,22,0.18)',
+          }}
+        >
+          <Text style={{ display: 'block', fontSize: 12, fontWeight: 700, color: 'var(--lm-text)', marginBottom: 6 }}>
+            还需要确认
+          </Text>
+          {(caseState.missing_confirmations || []).slice(0, 3).map((item) => (
+            <Text key={item} style={{ display: 'block', fontSize: 12, color: 'var(--lm-text-secondary)', lineHeight: 1.7 }}>
+              {item}
+            </Text>
           ))}
         </div>
       )}

@@ -8,8 +8,8 @@ comparison and auto-generated improvement reports.
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
-from sqlalchemy import case, func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
@@ -41,6 +41,9 @@ class EfficiencyReport(BaseModel):
     highlights: list[str]
     improvements_needed: list[str]
     suggestions: list[str]
+    action_items: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    north_star: str = ""
 
 
 class OpsEfficiencyResponse(BaseModel):
@@ -69,27 +72,17 @@ def _duration_minutes(start: datetime | None, end: datetime | None) -> float | N
 
 async def _calc_period_metrics(session, tenant_id: str, since: datetime, until: datetime) -> dict:
     """Calculate all efficiency metrics for a time period."""
-    # Alert metrics
+    # Keep the aggregation in Python instead of dialect-specific SQL expressions.
+    # This endpoint is shown on the exec dashboard, so graceful cross-database behavior
+    # matters more than shaving a few milliseconds from small dashboard windows.
     alert_stmt = (
         select(
-            func.count().label("total"),
-            func.count(case((AlertHistory.status.in_(["acknowledged", "resolved"]), 1))).label("acked"),
-            func.count(case((AlertHistory.resolved_at != None, 1))).label("resolved"),  # noqa: E711
-        )
-        .select_from(AlertHistory)
-        .where(
-            AlertHistory.tenant_id == tenant_id,
-            AlertHistory.fired_at >= since,
-            AlertHistory.fired_at < until,
-        )
-    )
-    ar = (await session.execute(alert_stmt)).one()
-
-    # MTTR. Calculate in Python instead of SQL EXTRACT(EPOCH) so the endpoint
-    # works across PostgreSQL and MySQL deployments.
-    mttr_stmt = (
-        select(
+            AlertHistory.status,
+            AlertHistory.severity,
+            AlertHistory.priority,
+            AlertHistory.message,
             AlertHistory.fired_at,
+            AlertHistory.acked_at,
             AlertHistory.resolved_at,
         )
         .select_from(AlertHistory)
@@ -97,37 +90,32 @@ async def _calc_period_metrics(session, tenant_id: str, since: datetime, until: 
             AlertHistory.tenant_id == tenant_id,
             AlertHistory.fired_at >= since,
             AlertHistory.fired_at < until,
-            AlertHistory.resolved_at != None,  # noqa: E711
         )
     )
+    alert_rows = (await session.execute(alert_stmt)).all()
+    total_alerts = len(alert_rows)
+    acked_alerts = sum(
+        1
+        for row in alert_rows
+        if row.status in {"acknowledged", "resolved"} or row.acked_at is not None
+    )
+    resolved_alerts = sum(1 for row in alert_rows if row.resolved_at is not None)
+    p0_alerts = sum(1 for row in alert_rows if row.priority == "P0")
+    critical_alerts = sum(1 for row in alert_rows if row.severity == "critical")
     mttr_values = [
         duration
-        for row in (await session.execute(mttr_stmt)).all()
+        for row in alert_rows
         if (duration := _duration_minutes(row.fired_at, row.resolved_at)) is not None
     ]
     avg_mttr_min = sum(mttr_values) / len(mttr_values) if mttr_values else 0.0
+    unacked_alerts = sum(1 for row in alert_rows if row.status == "fired" and row.acked_at is None)
+    noise_ratio = unacked_alerts / max(total_alerts, 1) * 100
 
-    # Noise ratio (P2 never acked)
-    noise_stmt = (
-        select(
-            func.count().label("total"),
-            func.count(case((AlertHistory.status == "fired", 1))).label("unacked"),
-        )
-        .select_from(AlertHistory)
-        .where(
-            AlertHistory.tenant_id == tenant_id,
-            AlertHistory.fired_at >= since,
-            AlertHistory.fired_at < until,
-        )
-    )
-    nr = (await session.execute(noise_stmt)).one()
-    noise_ratio = (nr.unacked or 0) / max(nr.total or 1, 1) * 100
-
-    # AI utilization
     ai_stmt = (
         select(
-            func.count().label("total"),
-            func.count(case((LogAnalysisTask.token_usage > 0, 1))).label("ai_used"),
+            LogAnalysisTask.id,
+            LogAnalysisTask.status,
+            LogAnalysisTask.token_usage,
         )
         .select_from(LogAnalysisTask)
         .where(
@@ -136,14 +124,17 @@ async def _calc_period_metrics(session, tenant_id: str, since: datetime, until: 
             LogAnalysisTask.created_at < until,
         )
     )
-    ai_row = (await session.execute(ai_stmt)).one()
-    ai_usage_rate = (ai_row.ai_used or 0) / max(ai_row.total or 1, 1) * 100
+    task_rows = (await session.execute(ai_stmt)).all()
+    total_tasks = len(task_rows)
+    ai_used = sum(1 for row in task_rows if (row.token_usage or 0) > 0)
+    ai_usage_rate = ai_used / max(total_tasks, 1) * 100
+    skipped_or_cached = sum(1 for row in task_rows if row.status in {"skipped", "skipped_dedup", "cached"})
+    automation_rate = (ai_used + skipped_or_cached) / max(total_tasks, 1) * 100
 
-    # Critical findings with positive feedback
     quality_stmt = (
         select(
-            func.count().label("total"),
-            func.count(case((AnalysisResult.feedback_score > 0, 1))).label("positive"),
+            AnalysisResult.feedback_score,
+            AnalysisResult.severity,
         )
         .select_from(AnalysisResult)
         .join(LogAnalysisTask, AnalysisResult.task_id == LogAnalysisTask.id)
@@ -154,21 +145,24 @@ async def _calc_period_metrics(session, tenant_id: str, since: datetime, until: 
             AnalysisResult.severity.in_(["critical", "warning"]),
         )
     )
-    qr = (await session.execute(quality_stmt)).one()
-    finding_quality = (qr.positive or 0) / max(qr.total or 1, 1) * 100
-
-    # Recurrence rate (alerts with same message pattern appearing >3 times)
-    total_alerts = ar.total or 0
+    finding_rows = (await session.execute(quality_stmt)).all()
+    total_findings = len(finding_rows)
+    positive_findings = sum(1 for row in finding_rows if (row.feedback_score or 0) > 0)
+    finding_quality = positive_findings / max(total_findings, 1) * 100
 
     return {
         "total_alerts": total_alerts,
-        "ack_rate": (ar.acked or 0) / max(total_alerts, 1) * 100,
-        "resolve_rate": (ar.resolved or 0) / max(total_alerts, 1) * 100,
+        "p0_alerts": p0_alerts,
+        "critical_alerts": critical_alerts,
+        "ack_rate": acked_alerts / max(total_alerts, 1) * 100,
+        "resolve_rate": resolved_alerts / max(total_alerts, 1) * 100,
         "avg_mttr_min": avg_mttr_min,
         "noise_ratio": noise_ratio,
         "ai_usage_rate": ai_usage_rate,
+        "automation_rate": automation_rate,
         "finding_quality": finding_quality,
-        "total_findings": qr.total or 0,
+        "total_findings": total_findings,
+        "total_tasks": total_tasks,
     }
 
 
@@ -178,7 +172,7 @@ async def get_ops_efficiency(
     user: CurrentUser,
     days: int = Query(30, ge=7, le=90),
 ):
-    """Calculate 6-dimension operational efficiency score."""
+    """Calculate operational efficiency score across core SRE dimensions."""
     now = datetime.now(timezone.utc)
     current_since = now - timedelta(days=days)
     prev_since = current_since - timedelta(days=days)
@@ -214,6 +208,11 @@ async def get_ops_efficiency(
             min(100, p["ai_usage_rate"]),
             f"AI 分析占比 {c['ai_usage_rate']:.0f}%",
         )),
+        _score("自动化成熟度", "🧭", lambda c, p: (
+            min(100, c["automation_rate"]),
+            min(100, p["automation_rate"]),
+            f"自动处理/复用率 {c['automation_rate']:.0f}% / 任务 {c['total_tasks']} 个",
+        )),
         _score("发现质量", "🎯", lambda c, p: (
             min(100, c["finding_quality"] * 1.5 + 30),
             min(100, p["finding_quality"] * 1.5 + 30),
@@ -232,7 +231,7 @@ async def get_ops_efficiency(
     ]
 
     # Composite score
-    weights = [0.25, 0.20, 0.10, 0.15, 0.20, 0.10]
+    weights = [0.22, 0.18, 0.10, 0.12, 0.14, 0.16, 0.08]
     overall = sum(d.score * w for d, w in zip(dimensions, weights))
     overall_prev = sum(d.previous_score * w for d, w in zip(dimensions, weights))
 
@@ -255,6 +254,7 @@ async def get_ops_efficiency(
         w_score = (
             min(100, max(0, 100 - w_metrics["avg_mttr_min"] * 1.5)) * 0.25
             + max(0, 100 - w_metrics["noise_ratio"]) * 0.20
+            + min(100, w_metrics["automation_rate"]) * 0.10
             + (w_metrics["ack_rate"] * 0.5 + w_metrics["resolve_rate"] * 0.5) * 0.20
         )
         # Simplified for performance
@@ -267,6 +267,8 @@ async def get_ops_efficiency(
     highlights = []
     improvements = []
     suggestions = []
+    action_items = []
+    risk_flags = []
 
     for d in dimensions:
         if d.change > 5:
@@ -284,11 +286,34 @@ async def get_ops_efficiency(
             "MTTR 趋势": "建议优化告警响应流程，引入自动化诊断加速修复",
             "告警质量": "建议梳理低价值告警规则，启用告警疲劳自抑制",
             "AI 利用率": "更多服务开启 AI 分析可提升问题发现效率",
+            "自动化成熟度": "把高频重复故障沉淀成自动化诊断入口和复用规则",
             "发现质量": "鼓励团队对 AI 分析结果提供反馈，帮助模型持续优化",
             "响应覆盖": "告警确认率偏低，建议完善值班响应机制",
             "告警负载": "告警量偏高，建议排查 top 噪音源并优化告警规则",
         }
         suggestions.append(f"💡 {d.name}: {suggestion_map.get(d.name, '持续关注')}")
+
+    if current["avg_mttr_min"] > 45:
+        risk_flags.append(f"MTTR 已达到 {current['avg_mttr_min']:.0f} 分钟，存在恢复时间过长风险")
+        action_items.append("把最近 3 个 P0/P1 故障复盘成一键诊断模板，并挂到指挥中心入口")
+    if current["noise_ratio"] > 45:
+        risk_flags.append(f"未确认告警占比 {current['noise_ratio']:.0f}%，可能正在产生告警疲劳")
+        action_items.append("筛出本周重复触发最多的 5 条告警，执行降噪或抑制策略")
+    if current["ai_usage_rate"] < 35 and current["total_tasks"] > 0:
+        risk_flags.append(f"AI 覆盖率仅 {current['ai_usage_rate']:.0f}%，诊断自动化空间较大")
+        action_items.append("优先为核心服务开启 AI 分析，并为低价值任务启用去重跳过")
+    if current["p0_alerts"] or current["critical_alerts"]:
+        risk_flags.append(
+            f"本期出现 {current['p0_alerts']} 个 P0 / {current['critical_alerts']} 个 critical 告警"
+        )
+        action_items.append("将 P0/critical 告警默认升级到故障作战室并自动附带证据链")
+    if not action_items:
+        action_items.append("保持当前节奏，每周复核最低分维度并把有效经验写入知识库")
+
+    north_star = (
+        f"本期北极星：把综合分从 {overall:.1f} 提升到 {min(100, overall + 8):.1f}，"
+        f"优先提升 {sorted_dims[0].name}。"
+    )
 
     return OpsEfficiencyResponse(
         overall_score=round(overall, 1),
@@ -301,5 +326,8 @@ async def get_ops_efficiency(
             highlights=highlights,
             improvements_needed=improvements,
             suggestions=suggestions,
+            action_items=action_items[:4],
+            risk_flags=risk_flags[:4],
+            north_star=north_star,
         ),
     )

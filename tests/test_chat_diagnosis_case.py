@@ -41,6 +41,7 @@ def test_hypothesis_update_preserves_evidence_labels_and_confidence():
     assert event["supporting_evidence"] == ["E-2"]
     assert event["confidence"] > 20
     assert event["evidence_summaries"][0]["label"] == "E-2"
+    assert event["missing_confirmations"]
 
 
 def test_expert_answer_uses_fixed_sections_and_evidence_chain():
@@ -59,3 +60,19 @@ def test_expert_answer_uses_fixed_sections_and_evidence_chain():
         assert f"## {title}" in content
     assert "E-3" in content
     assert "62%" in content
+
+
+def test_decision_actions_include_postmortem_and_copy():
+    service = ChatService()
+
+    actions = service._build_decision_actions(
+        "分析 payment-core 最近 1 小时错误",
+        [],
+        "service_error",
+        {"hypothesis": "payment-core 错误升高"},
+        "payment-core 近期错误升高。",
+    )
+
+    labels = {item["label"] for item in actions}
+    assert "生成复盘草稿" in labels
+    assert "复制诊断报告" in labels

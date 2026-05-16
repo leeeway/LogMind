@@ -52,6 +52,8 @@ class RecommendationCard(BaseModel):
     kind: str
     tone: str
     metric: str = ""
+    expected_path: str = ""
+    expected_steps: list[str] = Field(default_factory=list)
 
 
 class RecommendationsResponse(BaseModel):
@@ -151,6 +153,8 @@ async def get_recommendations(
             kind="service",
             tone="live",
             metric=f"{critical_count} critical / {warning_count} warning",
+            expected_path="服务错误诊断",
+            expected_steps=["查告警", "看服务健康", "聚合错误模式", "给出升级建议"],
         ))
 
     for message_text, count in message_counts.most_common(2):
@@ -165,6 +169,8 @@ async def get_recommendations(
             kind="pattern",
             tone="spotlight",
             metric=f"{count} 次重复",
+            expected_path="异常模式复核",
+            expected_steps=["定位重复日志", "对比时间窗口", "确认影响范围", "沉淀降噪规则"],
         ))
 
     active_biz = [b for b in biz_lines if getattr(b, "is_active", True)]
@@ -180,6 +186,8 @@ async def get_recommendations(
             kind="health",
             tone="calm",
             metric="巡检",
+            expected_path="服务健康巡检",
+            expected_steps=["读取健康指标", "识别错误趋势", "检查最近告警", "输出值班建议"],
         ))
 
     cards.append(RecommendationCard(
@@ -191,6 +199,8 @@ async def get_recommendations(
         kind="account",
         tone="action",
         metric="账号",
+        expected_path="账号回放",
+        expected_steps=["查询操作时间线", "标注失败动作", "关联服务链路", "给出确认点"],
     ))
 
     deduped: list[RecommendationCard] = []
@@ -214,6 +224,8 @@ async def get_recommendations(
                 kind="fallback",
                 tone="calm",
                 metric="全局",
+                expected_path="全局侦察",
+                expected_steps=["扫描关键错误", "按严重度排序", "聚焦服务", "建议下一步"],
             )
         ]
 

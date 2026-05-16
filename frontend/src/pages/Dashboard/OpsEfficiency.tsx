@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Card, Typography, Space, Button, Tag, Row, Col, Progress, Empty, Spin,
+  Alert, Card, Typography, Space, Button, Tag, Row, Col, Progress, Empty, Spin,
 } from 'antd';
 import {
   RadarChartOutlined, ReloadOutlined, RiseOutlined, FallOutlined,
-  CheckCircleOutlined, WarningOutlined, BulbOutlined,
+  CheckCircleOutlined, WarningOutlined, BulbOutlined, RocketOutlined,
 } from '@ant-design/icons';
 import client from '@/api/client';
 
@@ -14,23 +14,77 @@ const gradeColors: Record<string, string> = {
   S: '#722ed1', A: '#52c41a', B: '#1677ff', C: '#faad14', D: '#ff4d4f',
 };
 
+interface EfficiencyDimension {
+  name: string;
+  score: number;
+  previous_score: number;
+  change: number;
+  detail: string;
+  icon: string;
+}
+
+interface WeeklyEfficiency {
+  week_label: string;
+  score: number;
+}
+
+interface EfficiencyReport {
+  highlights: string[];
+  improvements_needed: string[];
+  suggestions: string[];
+  action_items?: string[];
+  risk_flags?: string[];
+  north_star?: string;
+}
+
+interface OpsEfficiencyData {
+  overall_score: number;
+  overall_previous: number;
+  overall_change: number;
+  grade: string;
+  dimensions: EfficiencyDimension[];
+  weekly_trend: WeeklyEfficiency[];
+  report: EfficiencyReport;
+}
+
 const OpsEfficiency: React.FC = () => {
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<OpsEfficiencyData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
       const { data: res } = await client.get('/dashboard/ops-efficiency', { params: { days: 30 } });
-      setData(res);
-    } catch { /* ignore */ }
+      setData(res as OpsEfficiencyData);
+    } catch {
+      setError('效能雷达加载失败，可能是后端指标聚合暂时不可用。');
+    }
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
   if (loading && !data) return <Spin style={{ display: 'block', textAlign: 'center', marginTop: 80 }} />;
-  if (!data) return <Empty description="暂无效能数据" style={{ marginTop: 80 }} />;
+  if (!data) {
+    return (
+      <div className="lm-animate-in">
+        {error && (
+          <Alert
+            type="warning"
+            showIcon
+            message={error}
+            action={<Button size="small" onClick={load}>重试</Button>}
+            style={{ marginBottom: 16 }}
+          />
+        )}
+        <Empty description="暂无效能数据" style={{ marginTop: 80 }} />
+      </div>
+    );
+  }
 
   const improving = data.overall_change > 0;
 
@@ -42,6 +96,27 @@ const OpsEfficiency: React.FC = () => {
         </Title>
         <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>
       </div>
+
+      {error && (
+        <Alert
+          type="warning"
+          showIcon
+          message={error}
+          action={<Button size="small" onClick={load}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {data.report?.north_star && (
+        <Alert
+          type="info"
+          showIcon
+          icon={<RocketOutlined />}
+          message="本期北极星"
+          description={data.report.north_star}
+          style={{ marginBottom: 16, borderRadius: 12 }}
+        />
+      )}
 
       {/* Overall Score */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
@@ -85,8 +160,8 @@ const OpsEfficiency: React.FC = () => {
             styles={{ header: { borderBottom: '1px solid var(--lm-border-light)', fontSize: 13 } }}
           >
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', height: 130, padding: '0 16px' }}>
-              {data.weekly_trend?.map((w: any) => {
-                const maxS = Math.max(...data.weekly_trend.map((t: any) => t.score || 1), 1);
+              {data.weekly_trend?.map((w: WeeklyEfficiency) => {
+                const maxS = Math.max(...data.weekly_trend.map((t: WeeklyEfficiency) => t.score || 1), 1);
                 const barH = Math.max(12, (w.score / maxS) * 120);
                 return (
                   <div key={w.week_label} style={{ flex: 1, textAlign: 'center' }}>
@@ -109,7 +184,7 @@ const OpsEfficiency: React.FC = () => {
 
       {/* 6 Dimensions */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        {data.dimensions?.map((d: any, i: number) => (
+        {data.dimensions?.map((d: EfficiencyDimension, i: number) => (
           <Col span={8} key={i}>
             <Card size="small" style={{
               background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 10,
@@ -145,6 +220,35 @@ const OpsEfficiency: React.FC = () => {
             </Card>
           </Col>
         ))}
+      </Row>
+
+      <Row gutter={16} style={{ marginBottom: 16 }}>
+        <Col span={12}>
+          <Card
+            title={<Space><WarningOutlined style={{ color: '#fa8c16' }} /> 风险旗帜</Space>}
+            size="small"
+            style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}
+            styles={{ header: { borderBottom: '1px solid var(--lm-border-light)', fontSize: 13 } }}
+          >
+            {data.report?.risk_flags?.length ? data.report.risk_flags.map((item: string, i: number) => (
+              <div key={i} style={{ padding: '5px 0', fontSize: 12, color: 'var(--lm-text)' }}>{item}</div>
+            )) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>暂无明显风险，继续保持当前节奏。</Text>
+            )}
+          </Card>
+        </Col>
+        <Col span={12}>
+          <Card
+            title={<Space><RocketOutlined style={{ color: '#1677ff' }} /> 下一步动作</Space>}
+            size="small"
+            style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }}
+            styles={{ header: { borderBottom: '1px solid var(--lm-border-light)', fontSize: 13 } }}
+          >
+            {data.report?.action_items?.map((item: string, i: number) => (
+              <div key={i} style={{ padding: '5px 0', fontSize: 12, color: 'var(--lm-text)' }}>{item}</div>
+            ))}
+          </Card>
+        </Col>
       </Row>
 
       {/* Report */}
