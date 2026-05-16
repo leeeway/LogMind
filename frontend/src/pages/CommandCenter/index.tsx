@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Typography, Space, Tag, Button, Tooltip } from 'antd';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Space, Tag, Button } from 'antd';
 import {
-  FullscreenOutlined, FullscreenExitOutlined, ReloadOutlined,
+  FullscreenOutlined, FullscreenExitOutlined,
   AlertOutlined, CheckCircleOutlined, ClockCircleOutlined,
   ThunderboltOutlined, RocketOutlined, FireOutlined,
   RadarChartOutlined, CloudOutlined,
@@ -9,7 +9,43 @@ import {
 import { dashboardApi } from '@/api/dashboard';
 import dayjs from 'dayjs';
 
-const { Text } = Typography;
+interface SeverityPoint {
+  severity: string;
+  count: number;
+}
+
+interface OverviewData {
+  total_tasks?: number;
+  total_alerts?: number;
+  active_incidents?: number;
+  today_anomalies?: number;
+  storm_count?: number;
+  ai_insight?: string;
+  severity_distribution?: SeverityPoint[];
+}
+
+interface HealthItem {
+  business_line_id?: string;
+  business_line_name?: string;
+  name?: string;
+  critical_count?: number;
+  warning_count?: number;
+  critical?: number;
+  warning?: number;
+  success_rate?: number;
+  total_tasks?: number;
+}
+
+interface CommandEvent {
+  time: string;
+  level: 'critical' | 'warning' | 'info' | 'success';
+  message: string;
+}
+
+interface TrendPoint {
+  task_count?: number;
+  failed_count?: number;
+}
 
 // ── Color System ─────────────────────────────────
 const COLORS = {
@@ -27,9 +63,9 @@ const COLORS = {
 const CommandCenter: React.FC = () => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [clock, setClock] = useState(dayjs().format('HH:mm:ss'));
-  const [overview, setOverview] = useState<any>(null);
-  const [health, setHealth] = useState<any[]>([]);
-  const [events, setEvents] = useState<any[]>([]);
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [health, setHealth] = useState<HealthItem[]>([]);
+  const [events, setEvents] = useState<CommandEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const healthCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -64,12 +100,14 @@ const CommandCenter: React.FC = () => {
   // ── Data Loading ───────────────────────────────
   const loadData = useCallback(async () => {
     try {
-      const [ovRes, hlRes] = await Promise.all([
+      const [ovRes, hlRes, trRes] = await Promise.all([
         dashboardApi.getOverview(1),
         dashboardApi.getBusinessHealth(1),
+        dashboardApi.getTrends(1),
       ]);
-      setOverview(ovRes.data);
-      const services = (hlRes.data?.items || []).map((s: any) => ({
+      const nextOverview = ovRes.data as OverviewData;
+      setOverview(nextOverview);
+      const services = ((hlRes.data?.items || []) as HealthItem[]).map((s) => ({
         ...s,
         name: s.business_line_name,
         critical: s.critical_count || 0,
@@ -77,39 +115,72 @@ const CommandCenter: React.FC = () => {
       }));
       setHealth(services);
 
-      // Build synthetic event feed from data
-      const newEvents: any[] = [];
-      (hlRes.data?.services || []).forEach((s: any) => {
+      const newEvents: CommandEvent[] = [];
+      services.forEach((s) => {
+        const name = s.name || s.business_line_name || '未知服务';
         if (s.critical > 0) {
           newEvents.push({
             time: dayjs().subtract(Math.random() * 60, 'minute').format('HH:mm'),
             level: 'critical',
-            message: `${s.name}: ${s.critical} 个严重异常`,
+            message: `${name}: ${s.critical} 个严重异常待处理`,
           });
         }
         if (s.warning > 0) {
           newEvents.push({
             time: dayjs().subtract(Math.random() * 120, 'minute').format('HH:mm'),
             level: 'warning',
-            message: `${s.name}: ${s.warning} 个告警`,
+            message: `${name}: ${s.warning} 个告警需要确认`,
           });
         }
       });
+      if (newEvents.length === 0 && services.length > 0) {
+        newEvents.push({
+          time: dayjs().format('HH:mm'),
+          level: 'success',
+          message: `巡检完成：${services.length} 个服务暂无严重异常`,
+        });
+      }
+      if ((nextOverview.total_tasks || 0) > 0) {
+        newEvents.push({
+          time: dayjs().format('HH:mm'),
+          level: 'info',
+          message: `今日已完成 ${nextOverview.total_tasks || 0} 个分析任务，告警 ${nextOverview.total_alerts || 0} 条`,
+        });
+      }
       newEvents.sort((a, b) => b.time.localeCompare(a.time));
       setEvents(prev => [...newEvents.slice(0, 20), ...prev].slice(0, 50));
 
-      // Feed wave data
-      const errorRate = ovRes.data?.severity_distribution?.find((d: any) => d.severity === 'critical')?.count || 0;
-      waveDataRef.current.push(errorRate + Math.random() * 5);
+      const trendData = ((trRes.data?.data || []) as TrendPoint[]).map((item) => {
+        const total = Math.max(item.task_count || 0, 1);
+        return Math.round(((item.failed_count || 0) / total) * 100);
+      });
+      if (trendData.length >= 2) {
+        waveDataRef.current = trendData.slice(-120);
+      } else {
+        const critical = nextOverview.severity_distribution?.find((d) => d.severity === 'critical')?.count || 0;
+        const warning = nextOverview.severity_distribution?.find((d) => d.severity === 'warning')?.count || 0;
+        const base = critical * 8 + warning * 2;
+        waveDataRef.current = Array.from({ length: 48 }, (_, i) => {
+          const pulse = Math.max(0, Math.sin(i / 3) * 4);
+          return Math.max(0, base + pulse + (i % 11 === 0 ? critical * 5 : 0));
+        });
+      }
+      const criticalRate = nextOverview.severity_distribution?.find((d) => d.severity === 'critical')?.count || 0;
+      waveDataRef.current.push(criticalRate + Math.random() * 3);
       if (waveDataRef.current.length > 120) waveDataRef.current.shift();
     } catch { /* ignore */ }
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    loadData();
+    const initialTimer = window.setTimeout(() => {
+      void loadData();
+    }, 0);
     const interval = setInterval(loadData, 30000);
-    return () => clearInterval(interval);
+    return () => {
+      window.clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
   }, [loadData]);
 
   // ── Health Matrix Canvas ───────────────────────
@@ -135,7 +206,7 @@ const CommandCenter: React.FC = () => {
       timeRef.current += 0.016;
       ctx.clearRect(0, 0, W, H);
 
-      health.forEach((s: any, i: number) => {
+      health.forEach((s, i: number) => {
         const col = i % cols;
         const row = Math.floor(i / cols);
         const cx = 10 + col * cellW + cellW / 2;
@@ -171,7 +242,8 @@ const CommandCenter: React.FC = () => {
         ctx.font = `${Math.min(10, size / 6)}px Inter, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const label = s.name?.length > 8 ? s.name.slice(0, 7) + '…' : s.name || '';
+        const serviceName = s.name || s.business_line_name || '';
+        const label = serviceName.length > 8 ? serviceName.slice(0, 7) + '…' : serviceName;
         ctx.fillText(label, cx, cy);
       });
 
@@ -262,12 +334,13 @@ const CommandCenter: React.FC = () => {
   }, [loading]);
 
   // Stats
-  const criticalCount = overview?.severity_distribution?.find((d: any) => d.severity === 'critical')?.count || health.reduce((s: number, h: any) => s + (h.critical || 0), 0);
-  const warningCount = overview?.severity_distribution?.find((d: any) => d.severity === 'warning')?.count || health.reduce((s: number, h: any) => s + (h.warning || 0), 0);
-  const healthyCount = health.filter((s: any) => !s.critical && !s.warning).length;
+  const criticalCount = overview?.severity_distribution?.find((d) => d.severity === 'critical')?.count || health.reduce((s, h) => s + (h.critical || 0), 0);
+  const warningCount = overview?.severity_distribution?.find((d) => d.severity === 'warning')?.count || health.reduce((s, h) => s + (h.warning || 0), 0);
+  const healthyCount = health.filter((s) => !s.critical && !s.warning).length;
   const totalServices = health.length;
+  const activeIncidents = overview?.active_incidents || 0;
 
-  const statusText = criticalCount > 0 ? 'DEGRADED' : warningCount > 0 ? 'WARNING' : 'OPERATIONAL';
+  const statusText = criticalCount > 0 ? '局部降级' : warningCount > 0 ? '关注告警' : '运行正常';
   const statusColor = criticalCount > 0 ? COLORS.red : warningCount > 0 ? COLORS.orange : COLORS.green;
 
   return (
@@ -298,7 +371,7 @@ const CommandCenter: React.FC = () => {
       }}>
         <Space size={12}>
           <RocketOutlined style={{ fontSize: 20, color: COLORS.blue }} />
-          <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: 2 }}>LOGMIND COMMAND CENTER</span>
+          <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: 1 }}>LogMind 指挥中心</span>
         </Space>
         <Space size={16}>
           <Tag
@@ -329,18 +402,18 @@ const CommandCenter: React.FC = () => {
       {/* ── KPI Row ───────────────────────────────── */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(7, 1fr)',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))',
         gap: 10,
         padding: '10px 24px',
       }}>
         {[
-          { label: 'CRITICAL', value: criticalCount, icon: <AlertOutlined />, color: COLORS.red, pulse: criticalCount > 0 },
-          { label: 'WARNING', value: warningCount, icon: <ThunderboltOutlined />, color: COLORS.orange, pulse: false },
-          { label: 'HEALTHY', value: `${healthyCount}/${totalServices}`, icon: <CheckCircleOutlined />, color: COLORS.green, pulse: false },
-          { label: 'TASKS', value: overview?.total_tasks || 0, icon: <ClockCircleOutlined />, color: COLORS.blue, pulse: false },
-          { label: 'INCIDENTS', value: overview?.active_incidents || 0, icon: <FireOutlined />, color: overview?.active_incidents > 0 ? COLORS.red : COLORS.purple, pulse: (overview?.active_incidents || 0) > 0 },
-          { label: 'ANOMALIES', value: overview?.today_anomalies || 0, icon: <RadarChartOutlined />, color: COLORS.orange, pulse: false },
-          { label: 'STORMS', value: overview?.storm_count || 0, icon: <CloudOutlined />, color: COLORS.blue, pulse: false },
+          { label: '严重异常', value: criticalCount, icon: <AlertOutlined />, color: COLORS.red, pulse: criticalCount > 0 },
+          { label: '告警关注', value: warningCount, icon: <ThunderboltOutlined />, color: COLORS.orange, pulse: false },
+          { label: '健康服务', value: `${healthyCount}/${totalServices}`, icon: <CheckCircleOutlined />, color: COLORS.green, pulse: false },
+          { label: '分析任务', value: overview?.total_tasks || 0, icon: <ClockCircleOutlined />, color: COLORS.blue, pulse: false },
+          { label: '活跃故障', value: activeIncidents, icon: <FireOutlined />, color: activeIncidents > 0 ? COLORS.red : COLORS.purple, pulse: activeIncidents > 0 },
+          { label: '今日异常', value: overview?.today_anomalies || 0, icon: <RadarChartOutlined />, color: COLORS.orange, pulse: false },
+          { label: '告警风暴', value: overview?.storm_count || 0, icon: <CloudOutlined />, color: COLORS.blue, pulse: false },
         ].map((kpi, i) => (
           <div
             key={i}
@@ -395,7 +468,7 @@ const CommandCenter: React.FC = () => {
               fontSize: 11, color: 'rgba(255,255,255,0.7)', letterSpacing: 0.5,
               fontWeight: 500, whiteSpace: 'nowrap',
             }}>
-              AI INSIGHT
+              AI 洞察
             </span>
             <span style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.1)', flexShrink: 0 }} />
             <div style={{
@@ -431,7 +504,7 @@ const CommandCenter: React.FC = () => {
             letterSpacing: 1,
             fontWeight: 600,
           }}>
-            SERVICE HEALTH MATRIX
+            服务健康矩阵
           </div>
           <div style={{ flex: 1, position: 'relative' }}>
             <canvas ref={healthCanvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
@@ -457,8 +530,8 @@ const CommandCenter: React.FC = () => {
             display: 'flex',
             justifyContent: 'space-between',
           }}>
-            <span>LIVE EVENT FEED</span>
-            <span style={{ color: COLORS.green }}>● LIVE</span>
+            <span>实时事件流</span>
+            <span style={{ color: COLORS.green }}>● 实时</span>
           </div>
           <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
             {events.map((e, i) => (
@@ -479,15 +552,15 @@ const CommandCenter: React.FC = () => {
                 </span>
                 <span style={{
                   width: 6, height: 6, borderRadius: '50%', flexShrink: 0, marginTop: 4,
-                  background: e.level === 'critical' ? COLORS.red : e.level === 'warning' ? COLORS.orange : COLORS.green,
-                  boxShadow: `0 0 6px ${e.level === 'critical' ? COLORS.red : e.level === 'warning' ? COLORS.orange : COLORS.green}`,
+                  background: e.level === 'critical' ? COLORS.red : e.level === 'warning' ? COLORS.orange : e.level === 'info' ? COLORS.blue : COLORS.green,
+                  boxShadow: `0 0 6px ${e.level === 'critical' ? COLORS.red : e.level === 'warning' ? COLORS.orange : e.level === 'info' ? COLORS.blue : COLORS.green}`,
                 }} />
                 <span style={{ color: 'rgba(255,255,255,0.7)', lineHeight: 1.4 }}>{e.message}</span>
               </div>
             ))}
             {events.length === 0 && (
               <div style={{ textAlign: 'center', padding: 40, color: 'rgba(255,255,255,0.2)' }}>
-                等待事件...
+                暂无实时事件，系统处于静默观察中
               </div>
             )}
           </div>
@@ -505,7 +578,7 @@ const CommandCenter: React.FC = () => {
           padding: '8px 16px 4px',
         }}>
           <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', letterSpacing: 1, marginBottom: 4, fontWeight: 600 }}>
-            ERROR RATE WAVEFORM
+            错误率波形
           </div>
           <div style={{ position: 'relative' }}>
             <canvas ref={waveCanvasRef} style={{ display: 'block', width: '100%', height: 80 }} />
