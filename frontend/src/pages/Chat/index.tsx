@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Button, Input, Typography, Space, Tag, message, Tooltip, Select } from 'antd';
 import {
   SendOutlined, PlusOutlined, DeleteOutlined, RobotOutlined,
@@ -19,6 +19,12 @@ import AgentStepCard, { ToolStep } from '@/components/AgentStepCard';
 import TraceTimeline, { TraceSegment, TraceNode } from '@/components/TraceTimeline';
 import ServiceFlowDiagram, { ServiceTopology } from '@/components/ServiceFlowDiagram';
 import DiagnosticClues, { DiagnosticClue } from '@/components/DiagnosticClues';
+import DiagnosisCasePanel, {
+  DecisionAction,
+  DiagnosisCaseState,
+  DiagnosisStage,
+  HypothesisUpdate,
+} from '@/components/DiagnosisCasePanel';
 
 const { Text, Title } = Typography;
 
@@ -29,6 +35,7 @@ interface ChatMessage {
   isStreaming?: boolean;
   metadata?: {
     suggested_actions?: SuggestedAction[];
+    diagnosis_case?: DiagnosisCaseState;
   };
 }
 
@@ -46,7 +53,7 @@ interface BusinessLineOption {
 interface SuggestedAction {
   label: string;
   prompt: string;
-  kind?: 'follow_up' | 'diagnose' | 'task';
+  kind?: 'follow_up' | 'diagnose' | 'task' | 'incident' | 'copy';
 }
 
 interface DynamicQuestionTemplate {
@@ -81,6 +88,7 @@ interface RawChatMessage {
   timestamp?: string;
   metadata?: {
     suggested_actions?: SuggestedAction[];
+    diagnosis_case?: DiagnosisCaseState;
   };
 }
 
@@ -144,6 +152,15 @@ const priorityMeta: Record<LiveRecommendation['priority'], { color: string; labe
   critical: { color: '#ff4d4f', label: '马上处理' },
   warning: { color: '#faad14', label: '值得关注' },
   info: { color: '#1677ff', label: '建议先问' },
+};
+
+const recommendationPathLabel = (kind: string) => {
+  const normalized = kind.toLowerCase();
+  if (normalized.includes('account') || normalized.includes('user')) return '账号回放';
+  if (normalized.includes('trace') || normalized.includes('chain')) return '链路追踪';
+  if (normalized.includes('service') || normalized.includes('error')) return '服务错误诊断';
+  if (normalized.includes('health')) return '服务健康巡检';
+  return '异常模式复核';
 };
 
 const panelStyle: React.CSSProperties = {
@@ -216,6 +233,8 @@ const ChatPage: React.FC = () => {
   const [multiAgentFindings, setMultiAgentFindings] = useState<{ name: string; displayName: string; status: string; summary: string }[]>([]);
   const [diagnosticClues, setDiagnosticClues] = useState<DiagnosticClue[]>([]);
   const [searchSummary, setSearchSummary] = useState('');
+  const [diagnosisCase, setDiagnosisCase] = useState<DiagnosisCaseState | null>(null);
+  const [decisionActions, setDecisionActions] = useState<DecisionAction[]>([]);
   const [activeTemplateId, setActiveTemplateId] = useState('account-activity');
   const [templateValues, setTemplateValues] = useState<TemplateValues>({
     account: '',
@@ -230,6 +249,7 @@ const ChatPage: React.FC = () => {
   const inputRef = useRef<TextAreaRef>(null);
   const token = useAuthStore((s) => s.token);
   const location = useLocation();
+  const navigate = useNavigate();
 
   const dynamicTemplates = useMemo<DynamicQuestionTemplate[]>(() => ([
     {
@@ -302,6 +322,8 @@ const ChatPage: React.FC = () => {
     setMultiAgentFindings([]);
     setDiagnosticClues([]);
     setSearchSummary('');
+    setDiagnosisCase(null);
+    setDecisionActions([]);
   }, []);
 
   const loadSessions = useCallback(async () => {
@@ -362,7 +384,7 @@ const ChatPage: React.FC = () => {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, toolSteps, thinkingRound, followUps, suggestedActions]);
+  }, [messages, toolSteps, thinkingRound, followUps, suggestedActions, diagnosisCase]);
 
   const createSession = async () => {
     try {
@@ -393,6 +415,8 @@ const ChatPage: React.FC = () => {
       const assistantMessages = rawMessages.filter((item) => item.role === 'assistant');
       const lastAssistant = assistantMessages[assistantMessages.length - 1];
       setSuggestedActions(lastAssistant?.metadata?.suggested_actions || []);
+      setDiagnosisCase(lastAssistant?.metadata?.diagnosis_case || null);
+      setDecisionActions(lastAssistant?.metadata?.diagnosis_case?.actions || []);
     } catch {
       setMessages([]);
     }
@@ -430,6 +454,11 @@ const ChatPage: React.FC = () => {
   const exportSession = () => {
     if (!messages.length) return;
     const now = new Date().toLocaleString();
+    const diagnosisSection = diagnosisCase
+      ? `## 专家案件状态\n\n- 阶段: ${diagnosisCase.stage}\n- 当前假设: ${diagnosisCase.hypothesis || '待确认'}\n- 置信度: ${diagnosisCase.confidence || 0}%\n- 影响范围: ${diagnosisCase.impact_scope || '待确认'}\n\n${
+          (diagnosisCase.evidence_summaries || []).map((item) => `- ${item.label || '未编号'}: ${item.summary}`).join('\n') || '- 暂无结构化证据'
+        }\n\n---\n\n`
+      : '';
     const evidenceSection = toolSteps.length > 0
       ? `## 证据链\n\n${toolSteps
           .filter((s) => s.status === 'done')
@@ -448,7 +477,7 @@ const ChatPage: React.FC = () => {
       .map((item) => item.role === 'user' ? `## 用户\n${item.content}` : `## AI 助手\n${item.content}`)
       .join('\n\n---\n\n');
     const header = `# LogMind 诊断报告\n\n> 时间: ${now}\n> 工具调用: ${toolSteps.length} 次\n\n---\n\n`;
-    navigator.clipboard.writeText(header + evidenceSection + conversationSection)
+    navigator.clipboard.writeText(header + diagnosisSection + evidenceSection + conversationSection)
       .then(() => message.success('诊断报告已复制到剪贴板'));
   };
 
@@ -495,6 +524,8 @@ const ChatPage: React.FC = () => {
       const decoder = new TextDecoder();
       let assistantContent = '';
       let latestSuggestedActions: SuggestedAction[] = [];
+      let latestDiagnosisCase: DiagnosisCaseState | null = null;
+      let latestDecisionActions: DecisionAction[] = [];
       let buffer = '';
 
       const applyAssistantContent = (nextContent: string, isStreaming = true, metadata?: ChatMessage['metadata']) => {
@@ -513,6 +544,51 @@ const ChatPage: React.FC = () => {
         if (event.type === 'thinking') {
           setThinkingRound((event.round as number) || 0);
           setThinkingText((event.content as string) || '');
+          return;
+        }
+
+        if (event.type === 'diagnosis_state') {
+          const stage = (event.stage as DiagnosisStage) || '侦察';
+          latestDiagnosisCase = {
+            ...(latestDiagnosisCase || { stage }),
+            stage,
+            stage_index: event.stage_index as number,
+            total_stages: event.total_stages as number,
+            status: event.status as string,
+            stage_summary: event.summary as string,
+            question: event.question as string,
+            confidence: (event.confidence as number) ?? latestDiagnosisCase?.confidence ?? 0,
+            path: event.path as string,
+            actions: latestDecisionActions,
+          };
+          setDiagnosisCase(latestDiagnosisCase);
+          return;
+        }
+
+        if (event.type === 'hypothesis_update') {
+          const update = event as unknown as HypothesisUpdate;
+          latestDiagnosisCase = {
+            ...(latestDiagnosisCase || { stage: '侦察' as DiagnosisStage }),
+            hypothesis: update.hypothesis,
+            confidence: update.confidence,
+            supporting_evidence: update.supporting_evidence || [],
+            counter_evidence: update.counter_evidence || [],
+            evidence_summaries: update.evidence_summaries || [],
+            impact_scope: update.impact_scope,
+            actions: latestDecisionActions,
+          };
+          setDiagnosisCase(latestDiagnosisCase);
+          return;
+        }
+
+        if (event.type === 'decision_actions') {
+          latestDecisionActions = (event.actions as DecisionAction[]) || [];
+          setDecisionActions(latestDecisionActions);
+          latestDiagnosisCase = {
+            ...(latestDiagnosisCase || { stage: '结论' as DiagnosisStage }),
+            actions: latestDecisionActions,
+          };
+          setDiagnosisCase(latestDiagnosisCase);
           return;
         }
 
@@ -625,7 +701,10 @@ const ChatPage: React.FC = () => {
         }
 
         if (event.type === 'done') {
-          applyAssistantContent(assistantContent, false, { suggested_actions: latestSuggestedActions });
+          applyAssistantContent(assistantContent, false, {
+            suggested_actions: latestSuggestedActions,
+            diagnosis_case: latestDiagnosisCase || undefined,
+          });
           setFollowUps(buildFollowUpsFromAssistant(assistantContent));
           return;
         }
@@ -697,6 +776,20 @@ const ChatPage: React.FC = () => {
       inputRef.current?.focus();
     }
   }, [activeSessionId, input, loadSessions, resetDiagnosticState, sending, token]);
+
+  const handleDiagnosisAction = (action: DecisionAction) => {
+    if (action.kind === 'copy') {
+      exportSession();
+      return;
+    }
+    if (action.kind === 'incident') {
+      navigate('/incidents');
+      return;
+    }
+    if (action.prompt) {
+      sendMessage(action.prompt);
+    }
+  };
 
   const sendTemplatePrompt = useCallback(() => {
     if (activeTemplateId === 'account-activity' && !templateValues.account.trim()) {
@@ -1334,6 +1427,14 @@ const ChatPage: React.FC = () => {
                 <DiagnosticClues clues={diagnosticClues} summary={searchSummary} onAction={(prompt) => sendMessage(prompt)} />
               )}
 
+              {diagnosisCase && (
+                <DiagnosisCasePanel
+                  caseState={diagnosisCase}
+                  actions={decisionActions}
+                  onAction={handleDiagnosisAction}
+                />
+              )}
+
               {multiAgentFindings.length > 0 && (
                 <div style={sectionStyle}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
@@ -1685,7 +1786,7 @@ const ChatPage: React.FC = () => {
                       {priorityMeta[item.priority].label}
                     </Tag>
                     <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>
-                      {item.kind}
+                      {recommendationPathLabel(item.kind)}
                     </Text>
                   </div>
                   <Text style={{ display: 'block', fontSize: 13, fontWeight: 700, color: 'var(--lm-text)' }}>
@@ -1703,6 +1804,15 @@ const ChatPage: React.FC = () => {
               )}
             </div>
           </div>
+
+          {diagnosisCase && (
+            <DiagnosisCasePanel
+              compact
+              caseState={diagnosisCase}
+              actions={decisionActions}
+              onAction={handleDiagnosisAction}
+            />
+          )}
 
           <div style={sectionStyle}>
             <Text style={{ display: 'block', fontSize: 13, fontWeight: 700, color: 'var(--lm-text)', marginBottom: 12 }}>

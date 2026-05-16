@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 # ── Configuration ────────────────────────────────────────
 MAX_CONTEXT_TURNS = 10
 MAX_TOOL_ROUNDS = 5  # Maximum ReAct reasoning loops
+DIAGNOSIS_STAGES = ["侦察", "聚焦", "关联", "验证", "结论"]
 ACCOUNT_FIELD_CANDIDATES = [
     "userId.keyword",
     "userId",
@@ -1065,6 +1066,286 @@ class ChatService:
             add_action(item[:16], item)
 
         return actions[:4]
+
+    def _infer_diagnosis_path(self, user_message: str) -> str:
+        text = user_message.lower()
+        if self._looks_like_multi_agent_request(user_message):
+            return "multi_agent"
+        if self._looks_like_trace_request(user_message):
+            return "trace"
+        if self._looks_like_account_activity_request(user_message):
+            return "account_replay"
+        if self._looks_like_smart_search(user_message):
+            return "smart_search"
+        if any(word in text for word in ["error", "exception", "timeout", "错误", "异常", "失败", "超时", "告警"]):
+            return "service_error"
+        return "general"
+
+    def _stage_payload(
+        self,
+        case_state: dict,
+        stage: str,
+        status: str = "running",
+        summary: str = "",
+    ) -> dict:
+        stage_index = DIAGNOSIS_STAGES.index(stage) if stage in DIAGNOSIS_STAGES else 0
+        case_state.update({
+            "stage": stage,
+            "stage_index": stage_index,
+            "status": status,
+        })
+        if summary:
+            case_state["stage_summary"] = summary
+        return {
+            "type": "diagnosis_state",
+            "stage": stage,
+            "stage_index": stage_index,
+            "total_stages": len(DIAGNOSIS_STAGES),
+            "status": status,
+            "summary": summary or case_state.get("stage_summary", ""),
+            "question": case_state.get("question", ""),
+            "confidence": case_state.get("confidence", 0),
+            "path": case_state.get("path", "general"),
+        }
+
+    def _round_stage(self, round_num: int) -> str:
+        if round_num <= 1:
+            return "侦察"
+        if round_num == 2:
+            return "聚焦"
+        if round_num == 3:
+            return "关联"
+        if round_num == 4:
+            return "验证"
+        return "结论"
+
+    def _safe_parse_tool_result(self, result: str) -> dict:
+        try:
+            parsed = json.loads(result)
+            return parsed if isinstance(parsed, dict) else {"items": parsed}
+        except (TypeError, json.JSONDecodeError):
+            return {"raw": result}
+
+    def _infer_result_counts(self, parsed: dict) -> tuple[int, int]:
+        hit_count = parsed.get("count", 0) or parsed.get("total_hits", 0)
+        for key in ("timeline", "activities", "alerts", "trace_segments", "results", "items"):
+            value = parsed.get(key)
+            if not hit_count and isinstance(value, list):
+                hit_count = len(value)
+        error_count = parsed.get("error_count", 0) or parsed.get("failed_count", 0)
+        if not error_count:
+            for key in ("alerts", "timeline", "activities"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    error_count += sum(
+                        1
+                        for item in value
+                        if isinstance(item, dict)
+                        and str(item.get("severity") or item.get("level") or item.get("status") or "").lower()
+                        in {"critical", "error", "warning", "failed", "failure"}
+                    )
+        return int(hit_count or 0), int(error_count or 0)
+
+    def _summarize_tool_result_structured(
+        self,
+        tool_name: str,
+        args: dict,
+        result: str,
+        evidence_label: str = "",
+    ) -> dict:
+        parsed = self._safe_parse_tool_result(result)
+        hit_count, error_count = self._infer_result_counts(parsed)
+        supporting: list[str] = []
+        counter: list[str] = []
+        confidence_delta = 8
+
+        if evidence_label:
+            if parsed.get("error") or hit_count == 0:
+                counter.append(evidence_label)
+            else:
+                supporting.append(evidence_label)
+
+        target = (
+            args.get("service_name")
+            or args.get("domain")
+            or args.get("account")
+            or args.get("keyword")
+            or "当前问题"
+        )
+
+        if parsed.get("error"):
+            hypothesis = f"{target} 的工具查询失败，当前只能保持低置信度判断。"
+            summary = str(parsed.get("error"))[:160]
+            confidence_delta = -8
+        elif hit_count == 0:
+            hypothesis = f"暂未找到 {target} 的直接异常证据，需要扩大时间窗或更换关键词确认。"
+            summary = "该轮查询未返回可引用证据。"
+            confidence_delta = -4
+        elif tool_name in {"trace_linked_operations", "trace_error_chain", "search_cross_service_logs"}:
+            hypothesis = f"已形成 {target} 的跨服务链路证据，优先检查错误传播路径和首个异常节点。"
+            summary = f"发现 {hit_count} 条链路/关联记录，其中 {error_count} 条指向异常。"
+            confidence_delta = 18 if error_count else 10
+        elif tool_name in {"query_operation_timeline", "query_account_activity"}:
+            hypothesis = f"已定位到 {target} 的操作时间线，可按时间顺序回放触发点。"
+            summary = f"时间线命中 {hit_count} 条记录，异常相关 {error_count} 条。"
+            confidence_delta = 14 if error_count else 7
+        elif tool_name in {"get_alerts", "get_service_health", "count_error_patterns"}:
+            hypothesis = f"{target} 的告警/健康数据正在支持当前异常判断。"
+            summary = f"命中 {hit_count} 条健康或告警证据，异常计数 {error_count}。"
+            confidence_delta = 16 if error_count else 8
+        elif tool_name in {"search_knowledge_base", "search_similar_incidents"}:
+            hypothesis = f"已找到可对照的历史知识，适合进入根因验证。"
+            summary = f"知识检索命中 {hit_count} 条可参考材料。"
+            confidence_delta = 12
+        else:
+            hypothesis = f"已获取 {target} 的日志证据，正在判断是否集中于同一根因。"
+            summary = f"命中 {hit_count} 条记录，异常相关 {error_count} 条。"
+            confidence_delta = 12 if error_count else 6
+
+        return {
+            "hypothesis": hypothesis,
+            "summary": summary,
+            "supporting_evidence": supporting,
+            "counter_evidence": counter,
+            "confidence_delta": confidence_delta,
+            "hit_count": hit_count,
+            "error_count": error_count,
+        }
+
+    def _apply_hypothesis_update(self, case_state: dict, update: dict) -> dict:
+        support = list(dict.fromkeys(
+            list(case_state.get("supporting_evidence", [])) + update.get("supporting_evidence", [])
+        ))
+        counter = list(dict.fromkeys(
+            list(case_state.get("counter_evidence", [])) + update.get("counter_evidence", [])
+        ))
+        confidence = max(5, min(95, int(case_state.get("confidence", 15)) + int(update.get("confidence_delta", 0))))
+        if update.get("hit_count", 0) == 0:
+            confidence = min(confidence, 35)
+        evidence_summaries = list(case_state.get("evidence_summaries", []))
+        if update.get("summary"):
+            evidence_summaries.append({
+                "label": (update.get("supporting_evidence") or update.get("counter_evidence") or [""])[0],
+                "summary": update["summary"],
+            })
+        case_state.update({
+            "hypothesis": update.get("hypothesis") or case_state.get("hypothesis", ""),
+            "confidence": confidence,
+            "supporting_evidence": support,
+            "counter_evidence": counter,
+            "evidence_summaries": evidence_summaries[-8:],
+            "impact_scope": self._infer_impact_scope(update, case_state),
+        })
+        return {
+            "type": "hypothesis_update",
+            "hypothesis": case_state["hypothesis"],
+            "confidence": confidence,
+            "supporting_evidence": support,
+            "counter_evidence": counter,
+            "evidence_summaries": case_state["evidence_summaries"],
+            "impact_scope": case_state["impact_scope"],
+        }
+
+    def _infer_impact_scope(self, update: dict, case_state: dict) -> str:
+        if case_state.get("path") == "trace" and update.get("hit_count", 0) > 0:
+            return "涉及跨服务调用链，需以首个异常节点为准。"
+        if update.get("error_count", 0) >= 10:
+            return "错误较集中，建议按服务级故障优先处理。"
+        if update.get("error_count", 0) > 0:
+            return "已发现异常证据，影响范围仍需继续确认。"
+        return case_state.get("impact_scope") or "暂无明确影响范围。"
+
+    def _build_decision_actions(
+        self,
+        user_message: str,
+        biz_lines: list,
+        diagnosis_path: str,
+        case_state: dict,
+        final_content: str = "",
+    ) -> list[dict]:
+        actions: list[dict] = []
+        context = self._extract_context_entities(f"{user_message}\n{final_content}", biz_lines)
+        service_name = context.get("service_name") or "当前服务"
+        account = context.get("account")
+        hours = context.get("hours", "1")
+
+        def add(action_id: str, label: str, prompt: str, kind: str, description: str = ""):
+            if any(item["id"] == action_id for item in actions):
+                return
+            actions.append({
+                "id": action_id,
+                "label": label,
+                "prompt": prompt,
+                "kind": kind,
+                "description": description,
+            })
+
+        if diagnosis_path == "trace":
+            add(
+                "continue-trace",
+                "继续查链路",
+                f"请沿着当前证据继续追踪 {service_name} 的上下游链路，找出首个异常服务和传播路径。",
+                "diagnose",
+                "复用链路追踪能力继续收敛根因。",
+            )
+        if diagnosis_path == "account_replay" or account:
+            target = account or "该账号"
+            add(
+                "account-replay",
+                "账号回放",
+                f"请按时间线回放账号 {target} 最近 {hours} 小时的关键操作，并标记失败、告警和关联服务。",
+                "follow_up",
+                "继续用时间线确认触发点。",
+            )
+        add(
+            "create-analysis",
+            "创建深度分析",
+            f"请为 {service_name} 当前问题创建一个深度分析任务，目标是验证根因假设：{case_state.get('hypothesis', '')}",
+            "task",
+            "证据不足或影响扩大时升级为异步分析。",
+        )
+        add(
+            "open-incident",
+            "进入故障作战室",
+            "请基于当前诊断结论创建或进入故障作战室，并保留证据链。",
+            "incident",
+            "用于升级协同处理。",
+        )
+        add(
+            "copy-report",
+            "复制诊断报告",
+            "",
+            "copy",
+            "复制结论、证据链和建议动作。",
+        )
+        return actions[:4]
+
+    def _format_expert_answer(self, content: str, case_state: dict, actions: list[dict]) -> str:
+        if "## 结论摘要" in content or "# 结论摘要" in content:
+            return content
+        evidence = case_state.get("evidence_summaries", [])
+        evidence_lines = "\n".join(
+            f"- {item.get('label') or '未编号'}: {item.get('summary', '')}" for item in evidence
+        ) or "- 暂无直接证据，需要继续确认。"
+        action_lines = "\n".join(
+            f"- {action['label']}: {action.get('description') or action.get('prompt') or '可复制当前报告。'}"
+            for action in actions
+            if action.get("kind") != "copy"
+        ) or "- 继续补充查询以验证当前假设。"
+        confirm_lines = (
+            "- 首个异常出现的准确时间点。\n"
+            "- 异常是否集中在单服务、单账号、单链路或单部署批次。\n"
+            "- 当前证据中的反例是否能排除。"
+        )
+        return (
+            f"## 结论摘要\n{content.strip()}\n\n"
+            f"## 证据链\n{evidence_lines}\n\n"
+            f"## 影响范围\n{case_state.get('impact_scope') or '暂无明确影响范围。'}\n\n"
+            f"## 置信度\n{case_state.get('confidence', 0)}% - "
+            f"{case_state.get('hypothesis', '仍在收集证据。')}\n\n"
+            f"## 建议动作\n{action_lines}\n\n"
+            f"## 我还需要确认什么\n{confirm_lines}"
+        )
 
     def get_or_create_session(
         self, session_id: str, tenant_id: str, user_id: str
@@ -2199,6 +2480,23 @@ class ChatService:
         messages = [ChatMessage(role="system", content=system_prompt)]
         messages.extend(session.get_context_messages())
 
+        diagnosis_path = self._infer_diagnosis_path(user_message)
+        case_state = {
+            "question": user_message,
+            "path": diagnosis_path,
+            "stage": "侦察",
+            "stage_index": 0,
+            "status": "running",
+            "hypothesis": "正在侦察问题现场，等待第一批证据。",
+            "confidence": 15,
+            "supporting_evidence": [],
+            "counter_evidence": [],
+            "evidence_summaries": [],
+            "actions": [],
+            "impact_scope": "待确认",
+        }
+        yield self._sse(self._stage_payload(case_state, "侦察", summary="开始收集问题上下文和可用证据。"))
+
         # ── Smart Search Path ────────────────────────────────
         if self._looks_like_smart_search(user_message):
             search_query = re.sub(r"^(搜索|搜|查|查询|找)\s*", "", user_message.strip())
@@ -2219,6 +2517,22 @@ class ChatService:
                 "services_involved": search_result["services_involved"],
                 "input_type": search_result["input_type"],
             })
+            search_update = {
+                "hypothesis": (
+                    f"智能搜索已命中 {search_result['total_hits']} 条记录，"
+                    f"其中 {search_result['error_count']} 条错误，可作为初始诊断方向。"
+                    if search_result["total_hits"] else
+                    "智能搜索暂无直接命中，需要扩大范围或换关键词。"
+                ),
+                "summary": search_result["summary"],
+                "supporting_evidence": [],
+                "counter_evidence": [],
+                "confidence_delta": 12 if search_result["error_count"] else (-4 if not search_result["total_hits"] else 5),
+                "hit_count": search_result["total_hits"],
+                "error_count": search_result["error_count"],
+            }
+            yield self._sse(self._apply_hypothesis_update(case_state, search_update))
+            yield self._sse(self._stage_payload(case_state, "聚焦", summary="已完成智能搜索，准备聚焦关键线索。"))
 
             # Inject search results as context for the LLM
             messages.append(ChatMessage(
@@ -2253,13 +2567,33 @@ class ChatService:
                 if extracted.get("service_name"):
                     preflight_args["service_names"] = [extracted["service_name"]]
                     preflight_args["scope"] = "selected"
-                preflight_result = await self.execute_tool_call(
+                yield self._sse({
+                    "type": "tool_call",
+                    "round": 0,
+                    "name": "trace_linked_operations",
+                    "args": preflight_args,
+                })
+                preflight_result, evidence_label = await self.execute_tool_call_with_evidence(
                     "trace_linked_operations",
                     preflight_args,
                     session.tenant_id,
                     db_session,
+                    session=session,
                     es_index_pattern=default_index,
                 )
+                preflight_update = self._summarize_tool_result_structured(
+                    "trace_linked_operations", preflight_args, preflight_result, evidence_label
+                )
+                yield self._sse(self._apply_hypothesis_update(case_state, preflight_update))
+                yield self._sse(self._stage_payload(case_state, "关联", summary="已预查询链路证据，进入关联分析。"))
+                yield self._sse({
+                    "type": "tool_result",
+                    "round": 0,
+                    "name": "trace_linked_operations",
+                    "result": preflight_result[:2000],
+                    "summary": preflight_result[:200] + ("..." if len(preflight_result) > 200 else ""),
+                    "evidence_label": evidence_label,
+                })
                 messages.append(ChatMessage(
                     role="assistant",
                     content=f"[预查询工具 trace_linked_operations({json.dumps(preflight_args, ensure_ascii=False)})]",
@@ -2284,13 +2618,33 @@ class ChatService:
                     preflight_args["scope"] = "selected"
                 if extracted.get("keyword"):
                     preflight_args["keyword"] = extracted["keyword"]
-                preflight_result = await self.execute_tool_call(
+                yield self._sse({
+                    "type": "tool_call",
+                    "round": 0,
+                    "name": "query_operation_timeline",
+                    "args": preflight_args,
+                })
+                preflight_result, evidence_label = await self.execute_tool_call_with_evidence(
                     "query_operation_timeline",
                     preflight_args,
                     session.tenant_id,
                     db_session,
+                    session=session,
                     es_index_pattern=default_index,
                 )
+                preflight_update = self._summarize_tool_result_structured(
+                    "query_operation_timeline", preflight_args, preflight_result, evidence_label
+                )
+                yield self._sse(self._apply_hypothesis_update(case_state, preflight_update))
+                yield self._sse(self._stage_payload(case_state, "聚焦", summary="已预查询账号/对象时间线，准备聚焦触发点。"))
+                yield self._sse({
+                    "type": "tool_result",
+                    "round": 0,
+                    "name": "query_operation_timeline",
+                    "result": preflight_result[:2000],
+                    "summary": preflight_result[:200] + ("..." if len(preflight_result) > 200 else ""),
+                    "evidence_label": evidence_label,
+                })
                 messages.append(ChatMessage(
                     role="assistant",
                     content=f"[预查询工具 query_operation_timeline({json.dumps(preflight_args, ensure_ascii=False)})]",
@@ -2306,6 +2660,7 @@ class ChatService:
 
             orchestrator = MultiAgentOrchestrator(self)
             agent_names = orchestrator.select_agents(user_message)
+            yield self._sse(self._stage_payload(case_state, "关联", summary="启动多 Agent 分支并行核对证据。"))
 
             yield self._sse({
                 "type": "multi_agent_start",
@@ -2331,12 +2686,33 @@ class ChatService:
                     "tool_calls": finding.tool_calls[:5],
                 })
 
+            agent_summary = "；".join(f"{finding.display_name}: {finding.summary[:80]}" for finding in findings[:3])
+            multi_update = {
+                "hypothesis": agent_summary or "多 Agent 已完成分支诊断，当前结论需要结合最终汇总判断。",
+                "summary": agent_summary or "多 Agent 分支返回空摘要。",
+                "supporting_evidence": [],
+                "counter_evidence": [],
+                "confidence_delta": 18 if agent_summary else 4,
+                "hit_count": len(findings),
+                "error_count": sum(1 for finding in findings if finding.status == "error"),
+            }
+            yield self._sse(self._apply_hypothesis_update(case_state, multi_update))
+            yield self._sse(self._stage_payload(case_state, "结论", status="done", summary="多 Agent 诊断完成，生成汇总结论。"))
+            decision_actions = self._build_decision_actions(
+                user_message, biz_lines, diagnosis_path, case_state, synthesis
+            )
+            case_state["actions"] = decision_actions
+            yield self._sse({"type": "decision_actions", "actions": decision_actions})
+            synthesis = self._format_expert_answer(synthesis, case_state, decision_actions)
+
             # Stream synthesis
             chunk_size = 4
             for i in range(0, len(synthesis), chunk_size):
                 yield self._sse({"type": "token", "content": synthesis[i:i + chunk_size]})
 
-            session.add_message("assistant", synthesis)
+            suggested_actions = self._build_suggested_actions(user_message, synthesis, biz_lines)
+            metadata = {"suggested_actions": suggested_actions, "diagnosis_case": case_state}
+            session.add_message("assistant", synthesis, metadata=metadata)
             yield self._sse({"type": "done", "total_rounds": 0, "mode": "multi_agent"})
             return
 
@@ -2345,6 +2721,11 @@ class ChatService:
 
             for round_num in range(1, MAX_TOOL_ROUNDS + 1):
                 # Notify frontend: thinking
+                yield self._sse(self._stage_payload(
+                    case_state,
+                    self._round_stage(round_num),
+                    summary=f"第 {round_num} 轮正在{self._round_stage(round_num)}。",
+                ))
                 yield self._sse({"type": "thinking", "round": round_num, "content": f"第 {round_num}/{MAX_TOOL_ROUNDS} 轮推理..."})
 
                 # Call LLM with tools
@@ -2412,6 +2793,10 @@ class ChatService:
                             "summary": summary,
                             "evidence_label": evidence_label,
                         })
+                        structured_update = self._summarize_tool_result_structured(
+                            func_name, func_args, tool_result, evidence_label
+                        )
+                        yield self._sse(self._apply_hypothesis_update(case_state, structured_update))
 
                         # Add tool interaction to message context for next round
                         messages.append(ChatMessage(
@@ -2428,6 +2813,11 @@ class ChatService:
                         "type": "step_done", "round": round_num,
                         "total_rounds": MAX_TOOL_ROUNDS,
                     })
+                    yield self._sse(self._stage_payload(
+                        case_state,
+                        self._round_stage(min(round_num + 1, MAX_TOOL_ROUNDS)),
+                        summary="本轮证据已归档，继续收敛假设。",
+                    ))
 
                     # Continue to next round
                     continue
@@ -2435,9 +2825,14 @@ class ChatService:
                 else:
                     # No tool calls — LLM is ready to answer
                     final_content = response.content
-                    suggested_actions = self._build_suggested_actions(
-                        user_message, final_content, biz_lines
+                    yield self._sse(self._stage_payload(case_state, "结论", status="done", summary="证据足够，正在形成诊断结论。"))
+                    decision_actions = self._build_decision_actions(
+                        user_message, biz_lines, diagnosis_path, case_state, final_content
                     )
+                    case_state["actions"] = decision_actions
+                    yield self._sse({"type": "decision_actions", "actions": decision_actions})
+                    final_content = self._format_expert_answer(final_content, case_state, decision_actions)
+                    suggested_actions = self._build_suggested_actions(user_message, final_content, biz_lines)
 
                     # Stream the response token by token
                     chunk_size = 4
@@ -2451,7 +2846,7 @@ class ChatService:
                     session.add_message(
                         "assistant",
                         final_content,
-                        metadata={"suggested_actions": suggested_actions},
+                        metadata={"suggested_actions": suggested_actions, "diagnosis_case": case_state},
                     )
                     yield self._sse({"type": "done", "total_rounds": total_rounds})
                     return
@@ -2473,6 +2868,13 @@ class ChatService:
                 request=final_request,
             )
             final_content = final_response.content
+            yield self._sse(self._stage_payload(case_state, "结论", status="done", summary="已达到最大推理轮次，输出当前最可信结论。"))
+            decision_actions = self._build_decision_actions(
+                user_message, biz_lines, diagnosis_path, case_state, final_content
+            )
+            case_state["actions"] = decision_actions
+            yield self._sse({"type": "decision_actions", "actions": decision_actions})
+            final_content = self._format_expert_answer(final_content, case_state, decision_actions)
             suggested_actions = self._build_suggested_actions(user_message, final_content, biz_lines)
 
             chunk_size = 4
@@ -2486,7 +2888,7 @@ class ChatService:
             session.add_message(
                 "assistant",
                 final_content,
-                metadata={"suggested_actions": suggested_actions},
+                metadata={"suggested_actions": suggested_actions, "diagnosis_case": case_state},
             )
             yield self._sse({"type": "done", "total_rounds": total_rounds})
 
