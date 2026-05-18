@@ -78,7 +78,7 @@ async def share_standup(
     Share standup summary to configured notification channels.
     """
     from logmind.domain.dashboard.standup_generator import generate_standup_report
-    from logmind.domain.alert.channels.webhook import send_webhook
+    from logmind.domain.alert.channels.webhook import send_webhook_notification
     from logmind.core.database import get_db_context
     from logmind.domain.tenant.models import BusinessLine
     from sqlalchemy import select
@@ -108,15 +108,7 @@ async def share_standup(
 
     for url in set(rows):
         try:
-            # Try DingTalk markdown format first, fallback to text
-            body = {
-                "msgtype": "markdown",
-                "markdown": {
-                    "title": title,
-                    "text": f"# {title}\n\n{summary_text}",
-                },
-            }
-            await send_webhook(url, body)
+            await send_webhook_notification(summary_text, webhook_url=url)
             sent_count += 1
         except Exception as e:
             logger.warning("standup_share_failed", url=url[:30], error=str(e))
