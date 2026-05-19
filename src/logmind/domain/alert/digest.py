@@ -249,7 +249,7 @@ async def _send_digest_webhook(tenant_id: str, report: str, session):
     """Send digest report to all configured webhooks for the tenant."""
     from sqlalchemy import select
 
-    from logmind.domain.alert.channels.webhook import send_webhook
+    from logmind.domain.alert.channels.webhook import send_webhook_notification
     from logmind.domain.tenant.models import BusinessLine
 
     # Collect unique webhook URLs from all business lines
@@ -268,7 +268,7 @@ async def _send_digest_webhook(tenant_id: str, report: str, session):
     # Send to all unique webhooks (deduplicated)
     for url in webhook_urls:
         try:
-            await send_webhook(url=url, content=report)
+            await send_webhook_notification(report, webhook_url=url)
             logger.info("digest_webhook_sent", url=url[:50])
         except Exception as e:
             logger.warning("digest_webhook_failed", url=url[:50], error=str(e))
@@ -347,4 +347,3 @@ async def _generate_digest_ai_insight(
         logger.warning("digest_ai_insight_call_failed", error=str(e))
 
     return None
-

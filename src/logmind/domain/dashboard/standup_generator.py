@@ -5,8 +5,7 @@ Collects yesterday's alerts, analyses, trends, and SLA status,
 then uses LLM to generate a structured daily stand-up report.
 """
 
-import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 from logmind.core.logging import get_logger
 
@@ -26,13 +25,14 @@ async def generate_standup_report(tenant_id: str, target_date: datetime | None =
     Then calls LLM to produce structured markdown report.
     """
     from logmind.core.database import get_db_context
+    from logmind.domain.dashboard.standup_service import default_standup_target_date
     from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
     from logmind.domain.alert.models import AlertHistory
     from logmind.domain.tenant.models import BusinessLine
     from sqlalchemy import select, func, case
 
     if target_date is None:
-        target_date = datetime.now(timezone.utc) - timedelta(days=1)
+        target_date = default_standup_target_date()
 
     day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)

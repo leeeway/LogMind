@@ -34,6 +34,7 @@ celery_app.conf.update(
     task_routes={
         "logmind.domain.analysis.tasks.*": {"queue": "analysis"},
         "logmind.domain.alert.tasks.*": {"queue": "alert"},
+        "logmind.domain.dashboard.tasks.*": {"queue": "alert"},
         "logmind.domain.rag.tasks.*": {"queue": "rag"},
     },
 )
@@ -42,6 +43,7 @@ celery_app.conf.update(
 celery_app.autodiscover_tasks([
     "logmind.domain.analysis",
     "logmind.domain.alert",
+    "logmind.domain.dashboard",
     "logmind.domain.rag",
 ])
 
@@ -70,6 +72,12 @@ celery_app.conf.beat_schedule = {
     "weekly-digest": {
         "task": "logmind.domain.alert.tasks.send_weekly_digest",
         "schedule": crontab(hour=9, minute=0, day_of_week=1),
+        "options": {"queue": "alert"},
+    },
+    # Daily standup auto-share dispatcher — every 5 minutes
+    "daily-standup-auto-share": {
+        "task": "logmind.domain.dashboard.tasks.dispatch_daily_standup_auto_share",
+        "schedule": crontab(minute="*/5"),
         "options": {"queue": "alert"},
     },
 }
