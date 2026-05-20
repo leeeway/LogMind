@@ -40,6 +40,7 @@ const AlertList: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
   const [priorityFilter, setPriorityFilter] = useState<string | undefined>(undefined);
   const [bizLines, setBizLines] = useState<any[]>([]);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
   // Detail Drawer
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -107,6 +108,32 @@ const AlertList: React.FC = () => {
   const handleResolve = async (id: string) => {
     try { await alertsApi.resolveAlert(id); message.success('已解决'); fetchAlerts(); }
     catch { message.error('解决失败'); }
+  };
+
+  const handleBatchAck = async () => {
+    if (selectedRowKeys.length === 0) return;
+    try {
+      const ids = selectedRowKeys.map(key => String(key));
+      await alertsApi.batchAckAlerts(ids);
+      message.success(`成功确认 ${ids.length} 条告警记录`);
+      setSelectedRowKeys([]);
+      fetchAlerts();
+    } catch {
+      message.error('批量确认失败');
+    }
+  };
+
+  const handleBatchResolve = async () => {
+    if (selectedRowKeys.length === 0) return;
+    try {
+      const ids = selectedRowKeys.map(key => String(key));
+      await alertsApi.batchResolveAlerts(ids);
+      message.success(`成功解决 ${ids.length} 条告警记录`);
+      setSelectedRowKeys([]);
+      fetchAlerts();
+    } catch {
+      message.error('批量解决失败');
+    }
   };
 
   const handleCreateRule = async (values: any) => {
@@ -247,10 +274,10 @@ const AlertList: React.FC = () => {
             children: (
               <>
                 {/* Enhanced Filters */}
-                <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', width: '100%' }}>
                   <FilterOutlined style={{ color: 'var(--lm-text-tertiary)' }} />
                   <Select
-                    allowClear placeholder="状态" value={statusFilter} onChange={(v) => { setStatusFilter(v); setPage(1); }}
+                    allowClear placeholder="状态" value={statusFilter} onChange={(v) => { setStatusFilter(v); setPage(1); setSelectedRowKeys([]); }}
                     style={{ width: 120 }}
                     options={[
                       { value: 'fired', label: '触发中' },
@@ -259,7 +286,7 @@ const AlertList: React.FC = () => {
                     ]}
                   />
                   <Select
-                    allowClear placeholder="优先级" value={priorityFilter} onChange={(v) => { setPriorityFilter(v); setPage(1); }}
+                    allowClear placeholder="优先级" value={priorityFilter} onChange={(v) => { setPriorityFilter(v); setPage(1); setSelectedRowKeys([]); }}
                     style={{ width: 100 }}
                     options={[
                       { value: 'P0', label: '🔴 P0' },
@@ -267,9 +294,52 @@ const AlertList: React.FC = () => {
                       { value: 'P2', label: '🟢 P2' },
                     ]}
                   />
+
+                  {selectedRowKeys.length > 0 && (
+                    <Space className="lm-animate-in" style={{ marginLeft: 'auto', background: 'rgba(22,119,255,0.08)', padding: '2px 10px', borderRadius: 6, border: '1px solid rgba(22,119,255,0.2)' }}>
+                      <span style={{ fontSize: 12, color: 'var(--lm-text-secondary)' }}>
+                        已选择 <strong style={{ color: '#1677ff' }}>{selectedRowKeys.length}</strong> 项
+                      </span>
+                      <Button
+                        size="small"
+                        icon={<CheckOutlined />}
+                        onClick={handleBatchAck}
+                        style={{ color: '#fa8c16', borderColor: '#fa8c164d', background: 'transparent' }}
+                      >
+                        批量确认
+                      </Button>
+                      <Button
+                        type="primary"
+                        size="small"
+                        icon={<CheckCircleOutlined />}
+                        onClick={handleBatchResolve}
+                        style={{ background: '#52c41a', borderColor: '#52c41a' }}
+                      >
+                        批量解决
+                      </Button>
+                      <Button
+                        type="text"
+                        size="small"
+                        onClick={() => setSelectedRowKeys([])}
+                        style={{ color: 'var(--lm-text-tertiary)' }}
+                      >
+                        取消
+                      </Button>
+                    </Space>
+                  )}
                 </div>
-                <Table dataSource={alerts} columns={alertColumns} rowKey="id" size="small" loading={loading}
-                  pagination={{ current: page, total, pageSize: 15, onChange: setPage, showTotal: (t) => `共 ${t} 条` }} />
+                <Table
+                  dataSource={alerts}
+                  columns={alertColumns}
+                  rowKey="id"
+                  size="small"
+                  loading={loading}
+                  rowSelection={{
+                    selectedRowKeys,
+                    onChange: setSelectedRowKeys,
+                  }}
+                  pagination={{ current: page, total, pageSize: 15, onChange: (p) => { setPage(p); setSelectedRowKeys([]); }, showTotal: (t) => `共 ${t} 条` }}
+                />
               </>
             ),
           },

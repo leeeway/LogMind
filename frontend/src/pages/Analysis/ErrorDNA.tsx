@@ -30,12 +30,15 @@ const ErrorDNA: React.FC = () => {
     setLoading(true);
     try {
       const [pRes, mRes] = await Promise.all([
-        client.get('/error-dna/patterns', { params: { days: 7, min_count: 2 } }),
+        client.get('/error-dna/patterns', { params: { days: 7, min_count: 2 } }).catch(() => ({ data: { patterns: [], total_patterns: 0, total_occurrences: 0 } })),
         client.get('/error-dna/mutations').catch(() => ({ data: { mutations: [] } })),
       ]);
-      setPatterns(pRes.data.patterns || []);
-      setTotal({ patterns: pRes.data.total_patterns, occurrences: pRes.data.total_occurrences });
-      setMutations(mRes.data.mutations || []);
+      setPatterns(pRes?.data?.patterns || []);
+      setTotal({
+        patterns: pRes?.data?.total_patterns || 0,
+        occurrences: pRes?.data?.total_occurrences || 0,
+      });
+      setMutations(mRes?.data?.mutations || []);
     } catch { /* ignore */ }
     setLoading(false);
   }, []);

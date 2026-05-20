@@ -361,3 +361,65 @@ async def notify_pipeline_error(
         task_id=task_id,
     )
     return await send_webhook_notification(content, webhook_url=webhook_url)
+
+
+def _build_predictive_alert(
+    business_line: str,
+    severity: str,
+    priority: str,
+    predicted_errors_30m: float,
+    current_rate: float,
+    baseline_mean: float,
+    confidence_pct: int,
+    detail: str,
+) -> str:
+    """
+    Template: Predictive Alert — Early warning on upcoming threshold breach.
+    """
+    emoji_map = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
+    emoji = emoji_map.get(severity, "🟡")
+
+    lines = [
+        f"## {emoji} LogMind AI 预测告警",
+        f"",
+        f"**告警级别**: {severity.upper()} ({priority})",
+        f"**业务线**: {business_line}",
+        f"**当前错误率**: {current_rate:.0f} 条/h",
+        f"**基线均值**: {baseline_mean:.0f} 条/h",
+        f"**预测未来30分钟**: 约 {predicted_errors_30m:.0f} 条错误",
+        f"**置信度**: {confidence_pct}%",
+        f"",
+        f"---",
+        f"",
+        f"**趋势分析结论**:",
+        f"{detail}",
+        f"",
+        f"---",
+        f"> 趋势预测显示近期错误率可能有显著上升，请提前排查潜在隐患。登录 LogMind 平台查看监控大盘。"
+    ]
+    return "\n".join(lines)
+
+
+async def notify_predictive_alert(
+    business_line: str,
+    severity: str,
+    priority: str,
+    predicted_errors_30m: float,
+    current_rate: float,
+    baseline_mean: float,
+    confidence_pct: int,
+    detail: str,
+    webhook_url: str | None = None,
+) -> bool:
+    """Send a predictive early-warning alert notification."""
+    content = _build_predictive_alert(
+        business_line=business_line,
+        severity=severity,
+        priority=priority,
+        predicted_errors_30m=predicted_errors_30m,
+        current_rate=current_rate,
+        baseline_mean=baseline_mean,
+        confidence_pct=confidence_pct,
+        detail=detail,
+    )
+    return await send_webhook_notification(content, webhook_url=webhook_url)

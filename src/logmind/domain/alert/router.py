@@ -171,3 +171,75 @@ async def resolve_alert(
     await session.flush()
 
     return AlertHistoryResponse.model_validate(alert)
+
+
+class BatchAlertRequest(BaseModel):
+    alert_ids: list[str] = Field(..., description="List of alert IDs to operate on")
+
+
+@router.post("/history/batch-ack", response_model=MessageResponse)
+async def batch_acknowledge_alerts(
+    req: BatchAlertRequest, session: DBSession, user: CurrentUser
+):
+    """
+    Batch acknowledge alerts — marks multiple alerts as seen by on-call.
+    """
+    from sqlalchemy import select
+
+    if not req.alert_ids:
+        return MessageResponse(message="未提供告警 ID 列表")
+
+    stmt = select(AlertHistory).where(
+        AlertHistory.id.in_(req.alert_ids),
+        AlertHistory.tenant_id == user.tenant_id,
+        AlertHistory.status == "fired",
+    )
+    result = await session.execute(stmt)
+    alerts = result.scalars().all()
+
+    now = datetime.now(timezone.utc)
+    count = 0
+    for alert in alerts:
+        alert.status = "acknowledged"
+        alert.acked_at = now
+        alert.acked_by = user.sub
+        count += 1
+
+    await session.flush()
+    return MessageResponse(message=f"成功确认 {count} 条告警记录")
+
+
+@router.post("/history/batch-resolve", response_model=MessageResponse)
+async def batch_resolve_alerts(
+    req: BatchAlertRequest, session: DBSession, user: CurrentUser
+):
+    """
+    Batch resolve alerts — marks multiple alerts as fixed/resolved.
+    """
+    from sqlalchemy import select
+
+    if not req.alert_ids:
+        return MessageResponse(message="未提供告警 ID 列表")
+
+    stmt = select(AlertHistory).where(
+        AlertHistory.id.in_(req.alert_ids),
+        AlertHistory.tenant_id == user.tenant_id,
+        AlertHistory.status != "resolved",
+    )
+    result = await session.execute(stmt)
+    alerts = result.scalars().all()
+
+    now = datetime.now(timezone.utc)
+    count = 0
+    for alert in alerts:
+        alert.status = "resolved"
+        alert.resolved_at = now
+        alert.resolved_by = user.sub
+        # Auto-ack if not yet acknowledged
+        if not alert.acked_at:
+            alert.acked_at = now
+            alert.acked_by = user.sub
+        count += 1
+
+    await session.flush()
+    return MessageResponse(message=f"成功解决 {count} 条告警记录")

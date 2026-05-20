@@ -123,27 +123,58 @@ class BusinessLineResponse(BaseSchema):
     id: str
     tenant_id: str
     name: str
-    description: str
+    description: str = ""
     es_index_pattern: str
-    severity_threshold: str
+    severity_threshold: str = "error"
     language: str = "java"
     field_mapping: dict = Field(default_factory=dict)
     ai_enabled: bool = True
     webhook_url: str = ""
     noise_patterns: list[dict] = Field(default_factory=list)
     auto_remediation_config: str = "{}"
-    is_active: bool
+    is_active: bool = True
     created_at: datetime
 
-    @field_validator("field_mapping", "noise_patterns", mode="before")
+    @field_validator("description", "webhook_url", mode="before")
     @classmethod
-    def parse_json_field(cls, v):
-        """Auto-deserialize JSON string from DB into dict/list."""
+    def parse_str_fields(cls, v):
+        return v or ""
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def parse_language(cls, v):
+        return v or "java"
+
+    @field_validator("severity_threshold", mode="before")
+    @classmethod
+    def parse_severity(cls, v):
+        return v or "error"
+
+    @field_validator("auto_remediation_config", mode="before")
+    @classmethod
+    def parse_remediation(cls, v):
+        return v or "{}"
+
+    @field_validator("field_mapping", mode="before")
+    @classmethod
+    def parse_field_mapping(cls, v):
+        if v is None:
+            return {}
         if isinstance(v, str):
             try:
                 return json.loads(v)
             except (json.JSONDecodeError, TypeError):
-                if v.startswith("["):
-                    return []
                 return {}
+        return v
+
+    @field_validator("noise_patterns", mode="before")
+    @classmethod
+    def parse_noise_patterns(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return []
         return v

@@ -254,6 +254,27 @@ async def _fire_predictive_alert(biz, prediction, now, session):
         f"置信度 {confidence_pct}%。{prediction.detail}"
     )
 
+    # Send predictive webhook notification
+    notify_success = False
+    try:
+        from logmind.domain.alert.channels.webhook import notify_predictive_alert
+        notify_success = await notify_predictive_alert(
+            business_line=biz.name,
+            severity=severity,
+            priority=priority,
+            predicted_errors_30m=prediction.predicted_errors_30m,
+            current_rate=prediction.current_rate,
+            baseline_mean=prediction.baseline_mean,
+            confidence_pct=confidence_pct,
+            detail=prediction.detail,
+            webhook_url=biz.webhook_url,
+        )
+    except Exception as ne:
+        logger.error("predictive_alert_notification_failed", error=str(ne))
+
+    import json
+    notify_res = {"status": "sent" if notify_success else "failed"}
+
     alert_record = AlertHistory(
         alert_rule_id=None,
         analysis_task_id=None,
@@ -262,7 +283,7 @@ async def _fire_predictive_alert(biz, prediction, now, session):
         status="fired",
         severity=severity,
         message=message,
-        notify_result="{}",
+        notify_result=json.dumps(notify_res),
         fired_at=now,
         priority=priority,
         alert_type="predictive",
@@ -277,4 +298,5 @@ async def _fire_predictive_alert(biz, prediction, now, session):
         predicted_errors_30m=prediction.predicted_errors_30m,
         confidence=prediction.confidence,
         alert_id=alert_record.id,
+        notify_status=notify_res["status"],
     )

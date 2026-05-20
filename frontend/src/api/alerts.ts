@@ -10,6 +10,12 @@ export const alertsApi = {
   resolveAlert: (alertId: string) =>
     client.post(`/alerts/history/${alertId}/resolve`),
 
+  batchAckAlerts: (alertIds: string[]) =>
+    client.post('/alerts/history/batch-ack', { alert_ids: alertIds }),
+
+  batchResolveAlerts: (alertIds: string[]) =>
+    client.post('/alerts/history/batch-resolve', { alert_ids: alertIds }),
+
   listRules: () =>
     client.get('/alerts/rules'),
 
