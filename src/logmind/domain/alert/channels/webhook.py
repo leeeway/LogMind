@@ -29,6 +29,14 @@ _INLINE_TS_RE = re.compile(
 )
 
 
+def _is_wecom_webhook(url: str | None) -> bool:
+    """Return True when the webhook URL points to WeCom / WeChat Work."""
+    if not url:
+        return False
+    lowered = url.lower()
+    return "qyapi.weixin" in lowered or "wecom" in lowered
+
+
 def _to_display_timezone(dt: datetime | None) -> datetime | None:
     """Convert UTC/naive datetimes to the notification display timezone."""
     if dt is None:
@@ -238,7 +246,7 @@ async def send_webhook_notification(
         return False
 
     # Detect webhook type from URL and build payload accordingly
-    if "qyapi.weixin" in url or "wecom" in url:
+    if _is_wecom_webhook(url):
         # WeChat Work
         payload = {
             "msgtype": msg_type,
@@ -412,6 +420,10 @@ async def notify_predictive_alert(
     webhook_url: str | None = None,
 ) -> bool:
     """Send a predictive early-warning alert notification."""
+    if _is_wecom_webhook(webhook_url):
+        logger.info("predictive_alert_wecom_webhook_disabled")
+        return False
+
     content = _build_predictive_alert(
         business_line=business_line,
         severity=severity,
