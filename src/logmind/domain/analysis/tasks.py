@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from logmind.core.async_task import run_async
 from logmind.core.celery_app import celery_app
+from logmind.core.exceptions import PipelineError
 from logmind.core.logging import get_logger
 
 # Severity → confidence mapping for self-learning storage
@@ -69,6 +70,16 @@ def run_analysis_task(self, task_id: str):
         logger.error("celery_task_timeout", task_id=task_id)
         # Mark task as failed in DB
         run_async(_mark_task_timeout(task_id))
+    except Exception as exc:
+        if _is_retryable_analysis_error(exc):
+            logger.warning(
+                "analysis_task_retrying",
+                task_id=task_id,
+                retry=self.request.retries + 1,
+                error=str(exc),
+            )
+            raise self.retry(exc=exc)
+        raise
 
 
 # ── Cost Estimation ──────────────────────────────────────
@@ -143,6 +154,49 @@ def _is_meaningful_error_summary(summary: str) -> bool:
     if normalized.endswith(":") and len(normalized) < 80:
         return False
     return bool(_SUMMARY_WORD_RE.search(normalized))
+
+
+def _is_retryable_analysis_error(exc: Exception) -> bool:
+    """Return True for transient connection or transport failures."""
+    from elastic_transport import ConnectionError as ESConnectionError
+    from elastic_transport import ConnectionTimeout as ESConnectionTimeout
+    from elastic_transport import TransportError as ESTransportError
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    retryable_types = (
+        ConnectionResetError,
+        ConnectionError,
+        TimeoutError,
+        OSError,
+        DBAPIError,
+        OperationalError,
+        ESConnectionError,
+        ESConnectionTimeout,
+        ESTransportError,
+    )
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, retryable_types):
+            return True
+        if isinstance(current, PipelineError):
+            detail = getattr(current, "detail", {}) or {}
+            error_text = str(detail.get("error", "")).lower()
+            if any(
+                marker in error_text
+                for marker in (
+                    "connection reset by peer",
+                    "connection timed out",
+                    "timed out",
+                    "temporarily unavailable",
+                    "server disconnected",
+                )
+            ):
+                return True
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return False
 
 
 async def _execute_analysis(task_id: str):

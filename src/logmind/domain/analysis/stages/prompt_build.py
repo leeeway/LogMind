@@ -24,60 +24,72 @@ class PromptBuildStage(PipelineStage):
         from logmind.core.database import get_db_context
         from logmind.domain.prompt.models import PromptTemplate
 
-        async with get_db_context() as session:
-            target_category = "log_analysis"
-            if ctx.has_stack_traces:
-                target_category = "stack_trace_analysis"
+        template = None
+        try:
+            async with get_db_context() as session:
+                target_category = "log_analysis"
+                if ctx.has_stack_traces:
+                    target_category = "stack_trace_analysis"
 
-            if ctx.prompt_template_id:
-                template = await self.prompt_repo.get_by_id(
-                    session, ctx.prompt_template_id, tenant_id=ctx.tenant_id
-                )
-            else:
-                stmt = select(PromptTemplate).where(
-                    PromptTemplate.tenant_id == ctx.tenant_id,
-                    PromptTemplate.category == target_category,
-                    PromptTemplate.is_default == True,
-                    PromptTemplate.is_active == True,
-                ).limit(1)
-                result = await session.execute(stmt)
-                template = result.scalar_one_or_none()
-
-                if not template and target_category != "log_analysis":
+                if ctx.prompt_template_id:
+                    template = await self.prompt_repo.get_by_id(
+                        session, ctx.prompt_template_id, tenant_id=ctx.tenant_id
+                    )
+                else:
                     stmt = select(PromptTemplate).where(
                         PromptTemplate.tenant_id == ctx.tenant_id,
-                        PromptTemplate.category == "log_analysis",
+                        PromptTemplate.category == target_category,
                         PromptTemplate.is_default == True,
                         PromptTemplate.is_active == True,
                     ).limit(1)
                     result = await session.execute(stmt)
                     template = result.scalar_one_or_none()
 
-            if not template:
-                ctx.system_prompt = _fallback_system_prompt(ctx)
-                ctx.user_prompt = _fallback_user_prompt(ctx)
-                return ctx
+                    if not template and target_category != "log_analysis":
+                        stmt = select(PromptTemplate).where(
+                            PromptTemplate.tenant_id == ctx.tenant_id,
+                            PromptTemplate.category == "log_analysis",
+                            PromptTemplate.is_default == True,
+                            PromptTemplate.is_active == True,
+                        ).limit(1)
+                        result = await session.execute(stmt)
+                        template = result.scalar_one_or_none()
 
-            variables = {
-                "business_line": ctx.business_line_name,
-                "service_name": ctx.business_line_name,
-                "time_range": f"{ctx.time_from} ~ {ctx.time_to}",
-                "namespace": "",
-                "logs": ctx.processed_logs,
-                "log_count": ctx.log_count,
-                "rag_context": ctx.rag_context,
-                "domain": ctx.domain,
-                "branch": ctx.branch,
-                "image_version": ctx.image_version,
-                "host_name": ctx.host_name,
-                "language": ctx.language,
-                "has_stack_traces": ctx.has_stack_traces,
-            }
+                if template:
+                    variables = {
+                        "business_line": ctx.business_line_name,
+                        "service_name": ctx.business_line_name,
+                        "time_range": f"{ctx.time_from} ~ {ctx.time_to}",
+                        "namespace": "",
+                        "logs": ctx.processed_logs,
+                        "log_count": ctx.log_count,
+                        "rag_context": ctx.rag_context,
+                        "domain": ctx.domain,
+                        "branch": ctx.branch,
+                        "image_version": ctx.image_version,
+                        "host_name": ctx.host_name,
+                        "language": ctx.language,
+                        "has_stack_traces": ctx.has_stack_traces,
+                    }
 
-            ctx.system_prompt, ctx.user_prompt = self.prompt_engine.render(
-                template, variables
+                    ctx.system_prompt, ctx.user_prompt = self.prompt_engine.render(
+                        template, variables
+                    )
+                    ctx.prompt_template_id = template.id
+        except Exception as e:
+            logger.warning(
+                "prompt_template_build_failed",
+                task_id=ctx.task_id,
+                tenant_id=ctx.tenant_id,
+                prompt_template_id=ctx.prompt_template_id,
+                error=str(e),
             )
-            ctx.prompt_template_id = template.id
+
+        if not ctx.system_prompt or not ctx.user_prompt:
+            ctx.system_prompt = _fallback_system_prompt(ctx)
+            ctx.user_prompt = _fallback_user_prompt(ctx)
+            ctx.prompt_template_id = getattr(template, "id", "") or ""
+            logger.info("prompt_build_fallback_used", task_id=ctx.task_id)
 
         # Inject business line intelligence profile
         try:
