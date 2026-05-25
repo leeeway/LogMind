@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from logmind.core.async_task import run_async
 from logmind.core.celery_app import celery_app
-from logmind.core.exceptions import PipelineError
+from logmind.core.exceptions import AllProvidersFailedError, PipelineError
 from logmind.core.logging import get_logger
 
 # Severity → confidence mapping for self-learning storage
@@ -484,11 +484,10 @@ async def _execute_analysis(task_id: str):
             task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
             await session.flush()
 
-        # If AI was enabled but pipeline failed, send ONE pipeline error notification
-        # (rate-limited via aggregator). Do NOT also send the raw log fallback —
-        # that would cause duplicate/interleaved notifications every patrol cycle.
+        # If AI was enabled but pipeline failed, notify the AI/pipeline fault first.
         if ai_enabled:
             await _send_pipeline_error_notification(ctx, str(e), webhook_url)
+            await _maybe_send_plain_error_fallback(ctx, e, webhook_url)
     finally:
         await close_celery_es_client()
 
@@ -868,6 +867,74 @@ async def _send_pipeline_error_notification(ctx, error_message: str, webhook_url
         )
     except Exception as e:
         logger.error("pipeline_error_notification_failed", error=str(e))
+
+
+def _should_send_plain_error_fallback(ctx, exc: Exception) -> bool:
+    """
+    Decide whether an AI pipeline failure should degrade to a normal error alert.
+
+    Only do this when we already have usable preprocessed logs and the failure
+    happened in the AI/post-AI portion of the pipeline.
+    """
+    normalized_summary = _normalize_error_summary(ctx.processed_logs)
+    if ctx.log_count <= 0 or not _is_meaningful_error_summary(normalized_summary):
+        return False
+
+    if isinstance(exc, AllProvidersFailedError):
+        return True
+
+    if isinstance(exc, PipelineError):
+        detail = getattr(exc, "detail", {}) or {}
+        failed_stage = detail.get("stage", "")
+        if failed_stage in {"prompt_build", "ai_inference", "result_parse", "persist"}:
+            return True
+
+        error_text = str(detail.get("error", "")).lower()
+        if any(
+            marker in error_text
+            for marker in (
+                "all providers failed",
+                "server disconnected",
+                "chat/completions",
+                "400 bad request",
+            )
+        ):
+            return True
+
+    error_text = str(exc).lower()
+    return any(
+        marker in error_text
+        for marker in (
+            "all providers failed",
+            "server disconnected",
+            "chat/completions",
+            "400 bad request",
+        )
+    )
+
+
+async def _maybe_send_plain_error_fallback(ctx, exc: Exception, webhook_url: str) -> bool:
+    """Send a normal error-log alert when AI analysis fails but logs are available."""
+    if not _should_send_plain_error_fallback(ctx, exc):
+        return False
+
+    logger.warning(
+        "sending_plain_error_fallback_after_ai_failure",
+        task_id=ctx.task_id,
+        business_line_id=ctx.business_line_id,
+        error=str(exc)[:300],
+    )
+
+    try:
+        await _send_error_log_notification(ctx, webhook_url)
+        return True
+    except Exception as fallback_exc:
+        logger.error(
+            "plain_error_fallback_failed",
+            task_id=ctx.task_id,
+            error=str(fallback_exc),
+        )
+        return False
 
 
 @celery_app.task(name="logmind.domain.analysis.tasks.cleanup_old_tasks")

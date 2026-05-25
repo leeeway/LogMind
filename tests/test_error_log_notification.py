@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from logmind.core.exceptions import AllProvidersFailedError, PipelineError
 from logmind.domain.analysis.pipeline import PipelineContext
 from logmind.domain.analysis import tasks as analysis_tasks
 
@@ -109,3 +110,60 @@ async def test_send_error_log_notification_uses_normalized_summary(monkeypatch):
     notify_error_logs.assert_awaited_once()
     assert aggregator_should_send.await_args.kwargs["alert_summary"] == "[ERROR] Database timeout"
     assert notify_error_logs.await_args.kwargs["error_summary"] == "[ERROR] Database timeout"
+
+
+def test_should_send_plain_error_fallback_for_provider_failure():
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        business_line_name="Test Biz",
+        processed_logs="[ERROR] Database timeout while sending SMS",
+        log_count=3,
+    )
+
+    exc = AllProvidersFailedError("t1", errors=["subapi: Server disconnected without sending a response"])
+
+    assert analysis_tasks._should_send_plain_error_fallback(ctx, exc) is True
+
+
+def test_should_not_send_plain_error_fallback_without_meaningful_logs():
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        business_line_name="Test Biz",
+        processed_logs="... (truncated)",
+        log_count=3,
+    )
+
+    exc = PipelineError("ai_inference", RuntimeError("All providers failed"))
+
+    assert analysis_tasks._should_send_plain_error_fallback(ctx, exc) is False
+
+
+@pytest.mark.asyncio
+async def test_maybe_send_plain_error_fallback_dispatches_notification(monkeypatch):
+    send_error_log_notification = AsyncMock()
+    monkeypatch.setattr(
+        "logmind.domain.analysis.tasks._send_error_log_notification",
+        send_error_log_notification,
+    )
+
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        business_line_name="Test Biz",
+        processed_logs="[ERROR] Database timeout while sending SMS",
+        log_count=2,
+    )
+
+    sent = await analysis_tasks._maybe_send_plain_error_fallback(
+        ctx,
+        PipelineError("ai_inference", RuntimeError("All providers failed")),
+        webhook_url="",
+    )
+
+    assert sent is True
+    send_error_log_notification.assert_awaited_once_with(ctx, "")
