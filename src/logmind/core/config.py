@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     analysis_severity_threshold: str = "error"
     analysis_max_logs_per_task: int = 500
     analysis_daily_task_limit: int = 100
-    analysis_cooldown_minutes: int = 30
+    analysis_cooldown_minutes: int = 10
     pipeline_error_cooldown_minutes: int = 240
     analysis_fingerprint_enabled: bool = True
     analysis_fingerprint_ttl_hours: int = 6

@@ -825,7 +825,7 @@ async def _send_pipeline_error_notification(ctx, error_message: str, webhook_url
 
     Uses a dedicated 'pipeline_error' severity key so it doesn't interfere
     with the normal AI alert aggregation window. The window is aligned to
-    analysis_cooldown_minutes (default 30 min) to avoid notification flooding
+    analysis_cooldown_minutes (default 10 min) to avoid notification flooding
     when all providers are repeatedly unavailable.
     """
     from logmind.core.config import get_settings

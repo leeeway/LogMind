@@ -4,10 +4,24 @@ Prompt Build Stage — Assemble AI prompt from template + variables
 Stage 4 of the analysis pipeline.
 """
 
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
 
 logger = get_logger(__name__)
+
+_DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _fmt_beijing(dt: datetime | None) -> str:
+    """Format a datetime in Asia/Shanghai for prompt display."""
+    if dt is None:
+        return "未知"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class PromptBuildStage(PipelineStage):
@@ -59,7 +73,7 @@ class PromptBuildStage(PipelineStage):
                     variables = {
                         "business_line": ctx.business_line_name,
                         "service_name": ctx.business_line_name,
-                        "time_range": f"{ctx.time_from} ~ {ctx.time_to}",
+                        "time_range": f"{_fmt_beijing(ctx.time_from)} ~ {_fmt_beijing(ctx.time_to)}",
                         "namespace": "",
                         "logs": ctx.processed_logs,
                         "log_count": ctx.log_count,
@@ -224,7 +238,7 @@ def _fallback_user_prompt(ctx: PipelineContext) -> str:
     lang_names = {"java": "Java", "csharp": "C#/.NET", "python": "Python", "go": "Go"}
     context_lines = [
         f"- 业务线: {ctx.business_line_name}",
-        f"- 时间范围: {ctx.time_from} ~ {ctx.time_to}",
+        f"- 时间范围: {_fmt_beijing(ctx.time_from)} ~ {_fmt_beijing(ctx.time_to)}",
         f"- 日志数量: {ctx.log_count}",
     ]
     if ctx.language in lang_names:

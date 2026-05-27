@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     analysis_severity_threshold: str = "error"
     analysis_max_logs_per_task: int = 500
     analysis_daily_task_limit: int = 100
-    analysis_cooldown_minutes: int = 30
+    analysis_cooldown_minutes: int = 10
 
     @field_validator("analysis_severity_threshold")
     @classmethod
