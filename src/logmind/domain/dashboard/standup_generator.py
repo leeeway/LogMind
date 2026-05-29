@@ -46,8 +46,20 @@ async def generate_standup_report(tenant_id: str, target_date: datetime | None =
                 func.count().label("total"),
                 func.count(case((AlertHistory.severity == "critical", 1))).label("p0"),
                 func.count(case((AlertHistory.severity == "warning", 1))).label("p1"),
-                func.count(case((AlertHistory.status == "acknowledged", 1))).label("acked"),
-                func.count(case((AlertHistory.status == "resolved", 1))).label("resolved"),
+                func.count(
+                    case((
+                        (AlertHistory.status.in_(["acknowledged", "resolved"]))
+                        | (AlertHistory.acked_at != None),  # noqa: E711
+                        1,
+                    ))
+                ).label("acked"),
+                func.count(
+                    case((
+                        (AlertHistory.status == "resolved")
+                        | (AlertHistory.resolved_at != None),  # noqa: E711
+                        1,
+                    ))
+                ).label("resolved"),
             )
             .where(
                 AlertHistory.tenant_id == tenant_id,
