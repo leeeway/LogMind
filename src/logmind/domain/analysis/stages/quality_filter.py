@@ -32,15 +32,27 @@ _MSG_LEVEL_PATTERNS = [
 _NOISE_INDICATORS = [
     re.compile(r'"status"\s*:\s*true', re.IGNORECASE),
     re.compile(r'"success"\s*:\s*true', re.IGNORECASE),
+    re.compile(r'\bsuccess\s*=\s*true\b', re.IGNORECASE),
     re.compile(r'"errorcode"\s*:\s*0\b', re.IGNORECASE),
+    re.compile(r'\berrorcode\s*=\s*0\b', re.IGNORECASE),
     re.compile(r'ErrorCode="\s*0"', re.IGNORECASE),
     re.compile(r'QrCode login runtime successfully set', re.IGNORECASE),
+    re.compile(r'Account successfully charged', re.IGNORECASE),
     re.compile(r'notify\w*result.*(?:end|success)', re.IGNORECASE),
     re.compile(r'"errorMessage"\s*:\s*"[^"]*成功', re.IGNORECASE),
     re.compile(r'"message"\s*:\s*"[^"]*成功', re.IGNORECASE),
+    re.compile(r'\bdata\s*=\s*成功\b', re.IGNORECASE),
+    re.compile(r'\bdescription\s*=\s*[\'"][^\'"]*(?:success|successfully)[^\'"]*[\'"]',
+               re.IGNORECASE),
     re.compile(r'结果(?:为|结束)[：:]', re.IGNORECASE),
     re.compile(r'通知.*结果结束', re.IGNORECASE),
-    re.compile(r'处理成功|操作成功|调用成功|通知成功|返回成功', re.IGNORECASE),
+    re.compile(
+        r'处理成功|操作成功|调用成功|通知成功|返回成功|兑换成功|发放成功',
+        re.IGNORECASE,
+    ),
+    re.compile(r'游戏兑换结果.*成功', re.IGNORECASE),
+    re.compile(r'兑换.*结果.*(?:success|成功|errorcode\s*=\s*0)', re.IGNORECASE),
+    re.compile(r'调用游戏接口发.*结果.*(?:success|成功)', re.IGNORECASE),
     re.compile(r'获取成功', re.IGNORECASE),
 ]
 

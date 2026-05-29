@@ -121,6 +121,22 @@ STATIC_NOISE_PATTERNS: list[dict] = [
     {"pattern": "道具不足", "category": "game_flow", "reason": "道具校验属于正常业务逻辑"},
     {"pattern": "充值金额不正确", "category": "game_flow", "reason": "金额校验属于正常业务"},
 
+    # ── 成功业务流程日志 ──────────────────────────────────
+    {"pattern": "Account successfully charged", "category": "success_flow",
+     "reason": "游戏充值/兑换成功结果属于正常业务流程日志"},
+    {"pattern": r"\berrorCode\s*=\s*0\b", "category": "success_flow", "is_regex": True,
+     "reason": "errorCode=0 表示业务调用成功",
+     "requires_additional": ["successfully", "成功", "兑换", "发元宝", "charged"]},
+    {"pattern": r"\bsuccess\s*=\s*true\b", "category": "success_flow", "is_regex": True,
+     "reason": "success=true 表示业务调用成功",
+     "requires_additional": ["成功", "兑换", "发元宝", "ResultBean"]},
+    {"pattern": "游戏兑换结果", "category": "success_flow",
+     "reason": "游戏兑换成功结果属于正常业务流程日志",
+     "requires_additional": ["success=true", "data=成功"]},
+    {"pattern": "调用游戏接口发元宝", "category": "success_flow",
+     "reason": "发元宝成功回执属于正常业务流程日志",
+     "requires_additional": ["success=true", "data=成功"]},
+
     # ── 通用业务响应 JSON 模式 ──────────────────────────────
     # 匹配 {"success":false, "message":"xxx"} 形式的业务响应日志
     {"pattern": r'"success"\s*:\s*false', "category": "biz_response", "is_regex": True,

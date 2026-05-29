@@ -72,6 +72,17 @@ def run_analysis_task(self, task_id: str):
         run_async(_mark_task_timeout(task_id))
     except Exception as exc:
         if _is_retryable_analysis_error(exc):
+            max_retries = getattr(self, "max_retries", 2)
+            if self.request.retries >= max_retries:
+                logger.error(
+                    "analysis_task_retry_exhausted",
+                    task_id=task_id,
+                    retries=self.request.retries,
+                    error=str(exc),
+                )
+                run_async(_mark_task_failed(task_id, str(exc)))
+                raise
+
             logger.warning(
                 "analysis_task_retrying",
                 task_id=task_id,
@@ -154,6 +165,28 @@ def _is_meaningful_error_summary(summary: str) -> bool:
     if normalized.endswith(":") and len(normalized) < 80:
         return False
     return bool(_SUMMARY_WORD_RE.search(normalized))
+
+
+def _filter_direct_notification_noise(summary: str) -> tuple[str, int]:
+    """Remove known non-fault business lines before sending direct log alerts."""
+    from logmind.domain.log.business_noise import classify_line
+
+    kept_lines: list[str] = []
+    filtered_count = 0
+
+    for line in (summary or "").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        is_noise, _ = classify_line(stripped)
+        if is_noise:
+            filtered_count += 1
+            continue
+
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines).strip(), filtered_count
 
 
 def _is_retryable_analysis_error(exc: Exception) -> bool:
@@ -475,6 +508,14 @@ async def _execute_analysis(task_id: str):
     except Exception as e:
         logger.error("pipeline_failed", task_id=task_id, error=str(e))
 
+        if _is_retryable_analysis_error(e):
+            logger.warning(
+                "pipeline_failed_retryable",
+                task_id=task_id,
+                error=str(e),
+            )
+            raise
+
         async with get_db_context() as session:
             task = await session.get(LogAnalysisTask, task_id)
             task.status = "failed"
@@ -772,6 +813,15 @@ async def _send_error_log_notification(ctx, webhook_url: str):
     from logmind.domain.alert.channels.webhook import notify_error_logs
 
     normalized_summary = _normalize_error_summary(ctx.processed_logs)
+    normalized_summary, direct_noise_count = _filter_direct_notification_noise(normalized_summary)
+    if direct_noise_count:
+        logger.info(
+            "error_log_notification_noise_filtered",
+            biz=ctx.business_line_name,
+            task_id=ctx.task_id,
+            filtered=direct_noise_count,
+        )
+
     if not _is_meaningful_error_summary(normalized_summary) or ctx.log_count <= 0:
         logger.info(
             "error_log_notification_skipped_empty",
@@ -1002,6 +1052,24 @@ async def _mark_task_timeout(task_id: str):
                 logger.info("task_marked_timeout", task_id=task_id)
     except Exception as e:
         logger.error("mark_timeout_failed", task_id=task_id, error=str(e))
+
+
+async def _mark_task_failed(task_id: str, error_message: str):
+    """Mark a task as failed after retry attempts are exhausted."""
+    from logmind.core.database import get_db_context
+    from logmind.domain.analysis.models import LogAnalysisTask
+
+    try:
+        async with get_db_context() as session:
+            task = await session.get(LogAnalysisTask, task_id)
+            if task:
+                task.status = "failed"
+                task.error_message = error_message
+                task.completed_at = datetime.now(timezone.utc)
+                await session.flush()
+                logger.info("task_marked_failed", task_id=task_id)
+    except Exception as e:
+        logger.error("mark_task_failed_failed", task_id=task_id, error=str(e))
 
 
 async def _auto_create_incident(
