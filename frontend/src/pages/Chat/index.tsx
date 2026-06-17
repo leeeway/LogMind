@@ -339,7 +339,7 @@ const ChatPage: React.FC = () => {
 
   const loadBusinessLines = useCallback(async () => {
     try {
-      const { data } = await businessLineApi.list({ page_size: 100 });
+      const { data } = await businessLineApi.listAll();
       const items = Array.isArray(data?.items) ? data.items as BusinessLineOption[] : [];
       setBusinessLines(items.map((item) => ({
         id: item.id,

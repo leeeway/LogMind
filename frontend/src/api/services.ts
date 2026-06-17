@@ -1,5 +1,12 @@
 import client from './client';
 
+export interface BusinessLineListItem {
+  id: string;
+  name: string;
+  es_index_pattern: string;
+  [key: string]: unknown;
+}
+
 export const logsApi = {
   search: (data: { index_pattern?: string; business_line_id?: string; time_from: string; time_to: string; query?: string; severity?: string; size?: number }) =>
     client.post('/logs/search', data),
@@ -17,6 +24,29 @@ export const logsApi = {
 export const businessLineApi = {
   list: (params?: { page?: number; page_size?: number }) =>
     client.get('/business-lines', { params }),
+
+  listAll: async () => {
+    const pageSize = 100;
+    let page = 1;
+    let total = Number.POSITIVE_INFINITY;
+    const items: BusinessLineListItem[] = [];
+
+    while (items.length < total) {
+      const { data } = await client.get('/business-lines', {
+        params: { page, page_size: pageSize },
+      });
+      const pageItems = Array.isArray(data?.items)
+        ? data.items as BusinessLineListItem[]
+        : [];
+      items.push(...pageItems);
+      total = typeof data?.total === 'number' ? data.total : items.length;
+
+      if (pageItems.length < pageSize || page > 100) break;
+      page += 1;
+    }
+
+    return { data: { items, total: items.length } };
+  },
 
   create: (data: Record<string, unknown>) =>
     client.post('/business-lines', data),

@@ -96,6 +96,13 @@ _SEVERITY_MSG_KEYWORDS: dict[str, list[str]] = {
     "debug": ["DEBUG", "TRACE"],
 }
 
+_QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=&|><!(){}\[\]^"~*?:\\/])')
+
+
+def _escape_query_string(value: str) -> str:
+    """Escape ES query_string special chars while preserving CJK punctuation."""
+    return _QUERY_STRING_SPECIAL_RE.sub(r"\\\1", value)
+
 
 class LogService:
     """Elasticsearch log query and aggregation service."""
@@ -131,14 +138,24 @@ class LogService:
         # Free text search — use match_phrase for CJK reliability
         # multi_match with phrase_prefix is unreliable for Chinese text
         if request.query:
+            escaped_query = _escape_query_string(request.query)
             must_clauses.append({
                 "bool": {
                     "should": [
                         # Strategy 1: match_phrase on message (most reliable for CJK)
                         {"match_phrase": {"message": request.query}},
-                        # Strategy 2: query_string wildcard (catches partial matches)
+                        # Strategy 2: keyword wildcard when message.keyword exists
+                        {
+                            "wildcard": {
+                                "message.keyword": {
+                                    "value": f"*{request.query}*",
+                                    "case_insensitive": True,
+                                }
+                            }
+                        },
+                        # Strategy 3: escaped query_string wildcard (catches partial matches)
                         {"query_string": {
-                            "query": f"*{request.query}*",
+                            "query": f"*{escaped_query}*",
                             "fields": ["message"],
                             "analyze_wildcard": True,
                         }},

@@ -18,13 +18,10 @@ from logmind.core.logging import get_logger
 from logmind.domain.alert.models import AlertHistory
 from logmind.domain.analysis.models import LogAnalysisTask
 from logmind.domain.chat.service import chat_service, _persist_session
-from logmind.domain.tenant.models import BusinessLine
-from logmind.shared.base_repository import BaseRepository
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
-biz_repo = BaseRepository(BusinessLine)
 
 
 class CreateSessionRequest(BaseModel):
@@ -100,7 +97,7 @@ async def get_recommendations(
     limit = min(max(limit, 3), 8)
     since = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
 
-    biz_lines = await biz_repo.get_all(db, tenant_id=user.tenant_id, limit=100)
+    biz_lines = await chat_service._load_business_lines(user.tenant_id, db)
     biz_by_id = {b.id: b for b in biz_lines}
     cards: list[RecommendationCard] = []
 
@@ -286,7 +283,7 @@ async def send_message(
     )
 
     # Build service list context
-    biz_lines = await biz_repo.get_all(db, tenant_id=user.tenant_id)
+    biz_lines = await chat_service._load_business_lines(user.tenant_id, db)
     service_list_items = []
     for b in biz_lines:
         domain = ""

@@ -558,12 +558,61 @@ class ChatService:
             return None
         return domain.split(".gyyx.cn")[0] + ".gyyx.cn"
 
+    @staticmethod
+    def _service_lookup_keys(value: str | None) -> set[str]:
+        """Build normalized lookup keys for service names, domains and index patterns."""
+        if not value:
+            return set()
+
+        keys: set[str] = set()
+        for raw_part in str(value).split(","):
+            raw = raw_part.strip().lower()
+            if not raw:
+                continue
+
+            compact = raw.replace("*", "").strip()
+            keys.add(raw)
+            keys.add(compact)
+
+            normalized = compact
+            normalized = re.sub(r"^\.ds-", "", normalized)
+            normalized = re.sub(r"^(master|develop|prod|stage|release)-", "", normalized)
+            if ".gyyx.cn" in normalized:
+                normalized = normalized.split(".gyyx.cn", 1)[0] + ".gyyx.cn"
+            keys.add(normalized)
+
+            if ".gyyx.cn" in compact:
+                domain = compact.split(".gyyx.cn", 1)[0] + ".gyyx.cn"
+                keys.add(domain)
+
+        return {key for key in keys if key}
+
     async def _load_business_lines(self, tenant_id: str, db_session) -> list:
         from logmind.domain.tenant.models import BusinessLine
         from logmind.shared.base_repository import BaseRepository
 
         biz_repo = BaseRepository(BusinessLine)
-        return await biz_repo.get_all(db_session, tenant_id=tenant_id, limit=100)
+        items: list = []
+        offset = 0
+        page_size = 500
+
+        while True:
+            page = await biz_repo.get_all(
+                db_session,
+                tenant_id=tenant_id,
+                offset=offset,
+                limit=page_size,
+                filters={"is_active": True},
+            )
+            items.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+            if len(items) >= 5000:
+                logger.warning("business_line_load_capped", tenant_id=tenant_id, count=len(items))
+                break
+
+        return items
 
     def _resolve_business_line(self, biz_lines: list, service_name: str):
         if not service_name:
@@ -572,10 +621,25 @@ class ChatService:
         query = service_name.strip().lower()
         if not query:
             return None
+        query_keys = self._service_lookup_keys(query)
 
         for biz in biz_lines:
-            if query in (biz.name or "").lower():
+            name = (biz.name or "").lower()
+            if query in name:
                 return biz
+
+        for biz in biz_lines:
+            candidate_keys = set()
+            candidate_keys.update(self._service_lookup_keys(biz.es_index_pattern or ""))
+            candidate_keys.update(
+                self._service_lookup_keys(
+                    self._extract_domain_from_index_pattern(biz.es_index_pattern or "")
+                )
+            )
+            for query_key in query_keys or {query}:
+                for candidate_key in candidate_keys:
+                    if query_key in candidate_key or candidate_key in query_key:
+                        return biz
 
         for biz in biz_lines:
             domain = self._extract_domain_from_index_pattern(biz.es_index_pattern or "") or ""
@@ -703,6 +767,319 @@ class ChatService:
             context["scope"] = "all"
 
         return context
+
+    @staticmethod
+    def _extract_lookback_seconds(text: str) -> tuple[int, str]:
+        normalized = text or ""
+        match = re.search(
+            r"(?:最近|最新|近|过去)\s*(\d+)\s*(分钟|分|min|minute|m|小时|时|h|hour|天|日|d|day)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            if re.search(r"(?:最近|最新|近|过去)", normalized):
+                return 3600, "最近 1 小时"
+            return 3600, "最近 1 小时"
+
+        value = max(1, int(match.group(1)))
+        unit = match.group(2).lower()
+        if unit in {"分钟", "分", "min", "minute", "m"}:
+            return value * 60, f"最近 {value} 分钟"
+        if unit in {"天", "日", "d", "day"}:
+            return value * 86400, f"最近 {value} 天"
+        return value * 3600, f"最近 {value} 小时"
+
+    @staticmethod
+    def _strip_log_keyword(value: str) -> str:
+        cleaned = (value or "").strip().strip("\"'“”‘’`")
+        cleaned = re.sub(r"(?:的)?(?:数据|日志|记录|内容|结果)$", "", cleaned).strip()
+        cleaned = cleaned.strip("，,。；; ")
+        return cleaned
+
+    @classmethod
+    def _extract_log_keyword(cls, text: str) -> str:
+        normalized = text or ""
+        patterns = [
+            (
+                r"(?:所有日志|全部日志|日志|message|内容)?\s*"
+                r"(?:包含|含有|匹配|关键字|关键词)\s*[：:]?\s*[\"'“”‘’`]?"
+                r"(.+?)(?:[\"'“”‘’`]?"
+                r"(?:的?(?:数据|日志|记录|内容|结果)|[,，。；;]|\s+并|\s+然后|$))"
+            ),
+            (
+                r"(?:搜索|搜|查询|查找|查)\s*[\"'“”‘’`]?"
+                r"(.+?)(?:[\"'“”‘’`]?"
+                r"(?:的?(?:数据|日志|记录|内容|结果)|[,，。；;]|\s+并|\s+然后|$))"
+            ),
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                keyword = cls._strip_log_keyword(match.group(1))
+                if keyword and not re.search(r"^(最近|最新|业务线|所有|全部)$", keyword):
+                    return keyword
+        return ""
+
+    def _extract_service_query_from_text(self, text: str, biz_lines: list) -> str:
+        normalized = text or ""
+        domain_match = re.search(
+            r"((?:\.ds-)?(?:(?:master|develop|prod|stage|release)-)?[A-Za-z0-9_.-]+\.gyyx\.cn)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if domain_match:
+            return domain_match.group(1).strip()
+
+        business_line_match = re.search(r"业务线\s*[：:]?\s*([^\s，,。；;]+)", normalized)
+        if business_line_match:
+            candidate = business_line_match.group(1)
+            candidate = re.split(r"(?:所有日志|全部日志|日志|包含|关键字|关键词|最近|最新)", candidate)[0]
+            if candidate:
+                return candidate.strip()
+
+        for biz in biz_lines:
+            if biz.name and biz.name in normalized:
+                return biz.name
+        return ""
+
+    @staticmethod
+    def _extract_order_ids(message: str) -> list[str]:
+        ids: list[str] = []
+        patterns = [
+            (
+                r"(?:订单号|orderNo|orderId|order_no|order_id|交易号|transactionId|流水号)"
+                r"[=:\s：]+([A-Za-z0-9\-_]{6,64})"
+            ),
+            r"\b((?:AliQr|ORD|ORDER|PAY|TXN|TRADE)[A-Za-z0-9\-_]{6,64})\b",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, message or "", flags=re.IGNORECASE):
+                value = match.group(1).strip().strip("，,。；;")
+                if value and value not in ids:
+                    ids.append(value)
+        return ids
+
+    def _extract_direct_log_search_intent(self, text: str, biz_lines: list) -> dict | None:
+        normalized = text or ""
+        if not re.search(
+            r"(日志|log|数据|包含|关键字|关键词|导出|搜索|查询|查找)",
+            normalized,
+            re.IGNORECASE,
+        ):
+            return None
+
+        service_query = self._extract_service_query_from_text(normalized, biz_lines)
+        target = self._resolve_business_line(biz_lines, service_query) if service_query else None
+        keyword = self._extract_log_keyword(normalized)
+
+        if not target or not keyword:
+            return None
+
+        lookback_seconds, time_label = self._extract_lookback_seconds(normalized)
+        wants_export = bool(re.search(r"(导出|下载|csv|订单号|order)", normalized, re.IGNORECASE))
+        size = 1000 if wants_export else 100
+        size_match = re.search(r"(?:返回|显示|前)\s*(\d{1,5})\s*(?:条|行)?", normalized)
+        if size_match:
+            size = int(size_match.group(1))
+        size = min(max(size, 1), 5000)
+
+        severity = None
+        if "所有日志" not in normalized and "全部日志" not in normalized:
+            if re.search(r"(错误|异常|error|exception|失败)", normalized, re.IGNORECASE):
+                severity = "error"
+            elif re.search(r"(告警|警告|warning|warn)", normalized, re.IGNORECASE):
+                severity = "warning"
+
+        return {
+            "service_query": service_query,
+            "service_name": target.name,
+            "index_pattern": target.es_index_pattern,
+            "keyword": keyword,
+            "lookback_seconds": lookback_seconds,
+            "hours": max(1, (lookback_seconds + 3599) // 3600),
+            "time_label": time_label,
+            "size": size,
+            "severity": severity,
+            "wants_export": wants_export,
+        }
+
+    async def _execute_direct_log_search(
+        self,
+        intent: dict,
+        session: ChatSession,
+        db_session,
+    ) -> tuple[dict, str]:
+        from logmind.domain.log.schemas import LogQueryRequest
+        from logmind.domain.log.service import log_service
+        from logmind.domain.chat.models import DiagnosticEvidence
+        import uuid as _uuid
+
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(seconds=int(intent.get("lookback_seconds") or 3600))
+        request = LogQueryRequest(
+            index_pattern=intent["index_pattern"],
+            time_from=since,
+            time_to=now,
+            query=intent["keyword"],
+            severity=intent.get("severity"),
+            size=intent.get("size") or 100,
+            sort_order="desc",
+        )
+        result = await log_service.search_logs(request)
+
+        logs: list[dict] = []
+        order_rows: list[dict] = []
+        seen_order_ids: set[str] = set()
+        for log in result.logs:
+            host = log.host_name or (log.raw.get("host", {}) or {}).get("name", "")
+            entry = {
+                "id": log.id,
+                "timestamp": self._to_beijing_time(log.timestamp),
+                "level": log.level,
+                "message": log.message,
+                "domain": log.domain,
+                "filetype": log.filetype,
+                "host": host,
+            }
+            logs.append(entry)
+            for order_id in self._extract_order_ids(log.message):
+                if order_id in seen_order_ids:
+                    continue
+                seen_order_ids.add(order_id)
+                order_rows.append({
+                    "order_id": order_id,
+                    "timestamp": entry["timestamp"],
+                    "service": intent["service_name"],
+                    "domain": entry["domain"],
+                    "host": entry["host"],
+                    "filetype": entry["filetype"],
+                })
+
+        error_count = sum(
+            1 for item in logs if item.get("level", "").lower() in {"error", "critical"}
+        )
+        payload = {
+            "service": intent["service_name"],
+            "index_pattern": intent["index_pattern"],
+            "keyword": intent["keyword"],
+            "time_range": intent["time_label"],
+            "total_hits": result.total,
+            "returned": len(logs),
+            "error_count": error_count,
+            "logs": logs,
+            "order_ids": [row["order_id"] for row in order_rows],
+            "order_export_rows": order_rows,
+            "took_ms": result.took_ms,
+        }
+
+        evidence_label = session.next_evidence_label()
+        try:
+            evidence = DiagnosticEvidence(
+                id=str(_uuid.uuid4()),
+                conversation_id=session.id,
+                label=evidence_label,
+                tool_name="search_logs",
+                tool_args=json.dumps(intent, ensure_ascii=False)[:2000],
+                es_index_pattern=intent["index_pattern"],
+                source_service=intent["service_name"],
+                hit_count=result.total,
+                error_count=error_count,
+                result_preview=json.dumps(payload, ensure_ascii=False, default=str)[:1000],
+                evidence_type="tool_result",
+            )
+            db_session.add(evidence)
+        except Exception as e:
+            logger.warning("direct_log_evidence_failed", error=str(e))
+
+        return payload, evidence_label
+
+    @staticmethod
+    def _csv_escape(value: str) -> str:
+        text = "" if value is None else str(value)
+        if any(ch in text for ch in [",", "\"", "\n", "\r"]):
+            return "\"" + text.replace("\"", "\"\"") + "\""
+        return text
+
+    def _format_direct_log_search_answer(self, result: dict) -> str:
+        sample_logs = result.get("logs", [])[:5]
+        order_rows = result.get("order_export_rows", [])
+        order_preview = order_rows[:200]
+
+        lines = [
+            "## 查询结果",
+            (
+                f"已查询 `{result.get('service')}`（索引 `{result.get('index_pattern')}`）"
+                f"{result.get('time_range')}内包含 `{result.get('keyword')}` 的日志。"
+            ),
+            (
+                f"命中 {result.get('total_hits', 0)} 条，本次返回 "
+                f"{result.get('returned', 0)} 条，耗时 {result.get('took_ms', 0)}ms。"
+            ),
+        ]
+
+        if order_rows:
+            csv_lines = ["order_id,timestamp,service,domain,host,filetype"]
+            for row in order_preview:
+                csv_lines.append(",".join([
+                    self._csv_escape(row.get("order_id", "")),
+                    self._csv_escape(row.get("timestamp", "")),
+                    self._csv_escape(row.get("service", "")),
+                    self._csv_escape(row.get("domain", "")),
+                    self._csv_escape(row.get("host", "")),
+                    self._csv_escape(row.get("filetype", "")),
+                ]))
+            lines.extend([
+                "",
+                "## 订单号导出",
+                f"从返回日志中提取到 {len(order_rows)} 个唯一订单号。",
+                "```csv",
+                "\n".join(csv_lines),
+                "```",
+            ])
+            if len(order_rows) > len(order_preview):
+                lines.append(
+                    f"上面展示前 {len(order_preview)} 个订单号；"
+                    "可用跟进动作按相同条件继续生成更窄的 CSV。"
+                )
+        else:
+            lines.extend([
+                "",
+                "## 订单号导出",
+                "这批返回日志里没有提取到订单号字段。",
+            ])
+
+        if sample_logs:
+            log_lines = []
+            for item in sample_logs:
+                message = " ".join((item.get("message") or "").split())
+                if len(message) > 700:
+                    message = message[:700] + "..."
+                log_lines.append(
+                    f"[{item.get('timestamp')}] [{item.get('level')}] "
+                    f"{item.get('host') or item.get('domain') or '-'} {message}"
+                )
+            lines.extend([
+                "",
+                "## 样本日志",
+                "```text",
+                "\n".join(log_lines),
+                "```",
+            ])
+        else:
+            lines.extend([
+                "",
+                "## 样本日志",
+                "未查到匹配日志。建议确认业务线、时间窗口或关键词是否一致。",
+            ])
+
+        lines.extend([
+            "",
+            "---",
+            f"扩大时间窗口继续查 `{result.get('keyword')}`",
+            f"只导出 `{result.get('service')}` 的订单号 CSV",
+            "按 UserAgent 或主机维度聚合这批命中日志",
+        ])
+        return "\n".join(lines)
 
     @staticmethod
     def _looks_like_account_activity_request(text: str) -> bool:
@@ -1608,6 +1985,8 @@ class ChatService:
             logger.warning("evidence_creation_failed", tool=tool_name, error=str(e))
 
         return result, label
+
+    async def _tool_get_alerts(self, args: dict, tenant_id: str, db_session) -> str:
         """Get recent alerts."""
         from logmind.domain.alert.models import AlertHistory
         from logmind.shared.base_repository import BaseRepository
@@ -2523,7 +2902,143 @@ class ChatService:
             "impact_scope": "待确认",
             "missing_confirmations": ["等待第一批工具证据确认问题范围"],
         }
-        yield self._sse(self._stage_payload(case_state, "侦察", summary="开始收集问题上下文和可用证据。"))
+        yield self._sse(
+            self._stage_payload(case_state, "侦察", summary="开始收集问题上下文和可用证据。")
+        )
+
+        # ── Deterministic Log Retrieval Path ─────────────────
+        # Explicit requests like "最近1小时业务线X所有日志包含Y，导出订单号"
+        # should not depend on LLM tool-argument guessing.
+        direct_log_intent = self._extract_direct_log_search_intent(user_message, biz_lines)
+        if direct_log_intent:
+            tool_args = {
+                "service_name": direct_log_intent["service_name"],
+                "index_pattern": direct_log_intent["index_pattern"],
+                "query": direct_log_intent["keyword"],
+                "time_range": direct_log_intent["time_label"],
+                "severity": direct_log_intent.get("severity"),
+                "size": direct_log_intent["size"],
+            }
+            yield self._sse({
+                "type": "tool_call",
+                "round": 0,
+                "name": "search_logs",
+                "args": tool_args,
+            })
+
+            direct_result, evidence_label = await self._execute_direct_log_search(
+                direct_log_intent,
+                session=session,
+                db_session=db_session,
+            )
+            direct_result_json = json.dumps(direct_result, ensure_ascii=False, default=str)
+
+            yield self._sse({
+                "type": "tool_result",
+                "round": 0,
+                "name": "search_logs",
+                "result": direct_result_json[:2000],
+                "summary": (
+                    f"命中 {direct_result['total_hits']} 条，返回 {direct_result['returned']} 条，"
+                    f"提取订单号 {len(direct_result.get('order_ids', []))} 个。"
+                ),
+                "evidence_label": evidence_label,
+            })
+
+            direct_update = self._summarize_tool_result_structured(
+                "search_logs",
+                {
+                    "service_name": direct_log_intent["service_name"],
+                    "query": direct_log_intent["keyword"],
+                },
+                json.dumps(
+                    {
+                        "total_hits": direct_result["total_hits"],
+                        "error_count": direct_result["error_count"],
+                        "logs": direct_result["logs"][:10],
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                evidence_label,
+            )
+            yield self._sse(self._apply_hypothesis_update(case_state, direct_update))
+            yield self._sse(
+                self._stage_payload(
+                    case_state,
+                    "结论",
+                    status="done",
+                    summary="日志检索完成，输出可导出的结果。",
+                )
+            )
+
+            decision_actions = [
+                {
+                    "id": "export-order-ids",
+                    "label": "导出订单号",
+                    "prompt": (
+                        f"按相同条件继续导出 {direct_log_intent['service_name']} "
+                        f"{direct_log_intent['time_label']}包含 "
+                        f"{direct_log_intent['keyword']} 的订单号 CSV。"
+                    ),
+                    "kind": "follow_up",
+                    "description": "只保留订单号、时间、服务、主机等导出字段。",
+                },
+                {
+                    "id": "aggregate-user-agent",
+                    "label": "聚合 UserAgent",
+                    "prompt": (
+                        f"按 UserAgent 和主机聚合 {direct_log_intent['service_name']} "
+                        f"{direct_log_intent['time_label']}包含 "
+                        f"{direct_log_intent['keyword']} 的命中日志。"
+                    ),
+                    "kind": "diagnose",
+                    "description": "确认是否集中来自某类客户端或入口。",
+                },
+                {
+                    "id": "copy-report",
+                    "label": "复制诊断报告",
+                    "prompt": "",
+                    "kind": "copy",
+                    "description": "复制当前查询结论、样本日志和导出结果。",
+                },
+            ]
+            case_state["actions"] = decision_actions
+            yield self._sse({"type": "decision_actions", "actions": decision_actions})
+
+            final_content = self._format_direct_log_search_answer(direct_result)
+            suggested_actions = [
+                {
+                    "label": "扩大时间窗口",
+                    "prompt": (
+                        f"查询 {direct_log_intent['service_name']} "
+                        "最近 6 小时所有日志包含 "
+                        f"{direct_log_intent['keyword']} 的数据，并导出订单号。"
+                    ),
+                    "kind": "follow_up",
+                },
+                {
+                    "label": "按主机聚合",
+                    "prompt": (
+                        f"按 host.name 聚合 {direct_log_intent['service_name']} "
+                        f"{direct_log_intent['time_label']}包含 "
+                        f"{direct_log_intent['keyword']} 的日志。"
+                    ),
+                    "kind": "diagnose",
+                },
+            ]
+
+            for i in range(0, len(final_content), 4):
+                yield self._sse({"type": "token", "content": final_content[i:i + 4]})
+
+            yield self._sse({"type": "suggested_actions", "actions": suggested_actions})
+            session.add_message(
+                "assistant",
+                final_content,
+                metadata={"suggested_actions": suggested_actions, "diagnosis_case": case_state},
+            )
+            yield self._sse({"type": "done", "total_rounds": 0, "mode": "direct_log_search"})
+            return
 
         # ── Smart Search Path ────────────────────────────────
         if self._looks_like_smart_search(user_message):

@@ -20,6 +20,7 @@ Protocol:
 
 import json
 import asyncio
+import re
 from datetime import datetime, timezone, timedelta
 
 from fastapi import WebSocket, WebSocketDisconnect, Query
@@ -33,6 +34,11 @@ logger = get_logger(__name__)
 POLL_INTERVAL = 1.0  # seconds
 MAX_LOGS_PER_PUSH = 50
 MAX_IDLE_SECONDS = 300  # disconnect after 5 min idle
+_QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=&|><!(){}\[\]^"~*?:\\/])')
+
+
+def _escape_query_string(value: str) -> str:
+    return _QUERY_STRING_SPECIAL_RE.sub(r"\\\1", value)
 
 
 async def _fetch_latest_logs(
@@ -50,7 +56,30 @@ async def _fetch_latest_logs(
 
     if filters:
         if filters.get("keyword"):
-            must.append({"query_string": {"query": f"*{filters['keyword']}*", "default_field": "message"}})
+            keyword = str(filters["keyword"])
+            must.append({
+                "bool": {
+                    "should": [
+                        {"match_phrase": {"message": keyword}},
+                        {
+                            "wildcard": {
+                                "message.keyword": {
+                                    "value": f"*{keyword}*",
+                                    "case_insensitive": True,
+                                }
+                            }
+                        },
+                        {
+                            "query_string": {
+                                "query": f"*{_escape_query_string(keyword)}*",
+                                "default_field": "message",
+                                "analyze_wildcard": True,
+                            }
+                        },
+                    ],
+                    "minimum_should_match": 1,
+                }
+            })
         if filters.get("level"):
             lvl = filters["level"]
             must.append({"bool": {"should": [
@@ -95,7 +124,7 @@ async def _fetch_latest_logs(
 
 def _extract_level(src: dict) -> str:
     """Extract log level from source."""
-    filetype = src.get("gy", {}).get("filetype", "")
+    filetype = (src.get("gy", {}).get("filetype", "") or "").lower()
     if "error" in filetype:
         return "ERROR"
     if "warn" in filetype:
