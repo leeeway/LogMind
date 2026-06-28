@@ -336,3 +336,33 @@ class TestChangePointDetectionStage:
 
         assert result.change_points == []
         assert result.error_rate_trend == "stable"
+
+    @pytest.mark.asyncio
+    async def test_fetch_time_series_filters_error_signals(self):
+        """ES aggregation should count error-like logs, not all traffic."""
+        mock_service = MagicMock()
+        mock_service.es.search = AsyncMock(
+            return_value={"aggregations": {"error_rate": {"buckets": []}}}
+        )
+        stage = ChangePointDetectionStage(mock_service)
+
+        mock_biz = MagicMock()
+        mock_biz.es_index_pattern = "app-*"
+
+        with patch("logmind.core.database.get_db_context") as mock_db:
+            mock_session = AsyncMock()
+            mock_session.get = AsyncMock(return_value=mock_biz)
+            mock_db.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_db.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await stage._fetch_error_time_series(
+                business_line_id="biz-1",
+                time_from=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+                time_to=datetime(2026, 6, 28, 11, 0, tzinfo=timezone.utc),
+            )
+
+        query = mock_service.es.search.await_args.kwargs["query"]
+        query_text = json.dumps(query, ensure_ascii=False)
+        assert "ERROR" in query_text
+        assert "FATAL" in query_text
+        assert "Exception" in query_text

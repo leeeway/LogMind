@@ -344,6 +344,9 @@ async def execute_tool(
     es_index_pattern: str,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
+    tenant_id: str = "",
+    business_line_id: str = "",
+    related_services: dict | None = None,
 ) -> str:
     """
     Execute an agent tool and return the result as a string.
@@ -363,17 +366,28 @@ async def execute_tool(
         elif tool_name == "search_knowledge_base":
             return await _exec_search_knowledge_base(arguments)
         elif tool_name == "search_similar_incidents":
-            return await _exec_search_similar_incidents(arguments, es_index_pattern)
+            return await _exec_search_similar_incidents(
+                arguments, es_index_pattern, business_line_id=business_line_id
+            )
         elif tool_name == "search_cross_service_logs":
-            return await _exec_search_cross_service_logs(arguments, es_index_pattern)
+            related_patterns = await _load_related_index_patterns(related_services, tenant_id)
+            return await _exec_search_cross_service_logs(
+                arguments, es_index_pattern, related_index_patterns=related_patterns
+            )
         elif tool_name == "get_alerts":
-            return await _exec_get_alerts(arguments, es_index_pattern)
+            return await _exec_get_alerts(
+                arguments, tenant_id=tenant_id, business_line_id=business_line_id
+            )
         elif tool_name == "get_service_health":
             return await _exec_get_service_health(arguments, es_index_pattern, time_from, time_to)
         elif tool_name == "compare_time_windows":
             return await _exec_compare_time_windows(arguments, es_index_pattern, time_to)
         elif tool_name == "trace_error_chain":
-            return await _exec_trace_error_chain(arguments, es_index_pattern, time_to)
+            related_patterns = await _load_related_index_patterns(related_services, tenant_id)
+            return await _exec_trace_error_chain(
+                arguments, es_index_pattern, time_to,
+                related_index_patterns=related_patterns,
+            )
         elif tool_name == "create_analysis_task":
             return await _exec_create_analysis_task(arguments, es_index_pattern)
         else:
@@ -381,6 +395,66 @@ async def execute_tool(
     except Exception as e:
         logger.warning("agent_tool_error", tool=tool_name, error=str(e))
         return json.dumps({"error": str(e)})
+
+
+def _flatten_related_service_ids(related_services: dict | None) -> list[str]:
+    """Return configured upstream/downstream business-line IDs in stable order."""
+    if not isinstance(related_services, dict):
+        return []
+
+    ids: list[str] = []
+    for key in ("upstream", "downstream"):
+        values = related_services.get(key, [])
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if value and value not in ids:
+                ids.append(str(value))
+    return ids
+
+
+async def _load_related_index_patterns(
+    related_services: dict | None,
+    tenant_id: str = "",
+) -> list[str]:
+    """Load ES index patterns for explicitly configured related services only."""
+    related_ids = _flatten_related_service_ids(related_services)
+    if not related_ids:
+        return []
+
+    try:
+        from sqlalchemy import select
+
+        from logmind.core.database import get_db_context
+        from logmind.domain.tenant.models import BusinessLine
+
+        async with get_db_context() as session:
+            stmt = select(BusinessLine).where(
+                BusinessLine.id.in_(related_ids),
+                BusinessLine.is_active == True,  # noqa: E712
+            )
+            if tenant_id:
+                stmt = stmt.where(BusinessLine.tenant_id == tenant_id)
+            result = await session.execute(stmt)
+            patterns = []
+            for biz in result.scalars().all():
+                if biz.es_index_pattern and biz.es_index_pattern not in patterns:
+                    patterns.append(biz.es_index_pattern)
+            return patterns
+    except Exception as e:
+        logger.warning("related_index_patterns_load_failed", error=str(e))
+        return []
+
+
+def _join_index_patterns(patterns: list[str]) -> str:
+    """Join non-empty ES index patterns without duplicates."""
+    seen: list[str] = []
+    for pattern in patterns:
+        for part in str(pattern or "").split(","):
+            cleaned = part.strip()
+            if cleaned and cleaned not in seen:
+                seen.append(cleaned)
+    return ",".join(seen)
 
 
 async def _exec_search_logs(args: dict, index_pattern: str, default_from, default_to) -> str:
@@ -565,7 +639,11 @@ async def _exec_search_knowledge_base(args: dict) -> str:
         return json.dumps({"error": f"Search failed: {str(e)}"})
 
 
-async def _exec_search_similar_incidents(args: dict, index_pattern: str) -> str:
+async def _exec_search_similar_incidents(
+    args: dict,
+    index_pattern: str,
+    business_line_id: str = "",
+) -> str:
     """Execute search_similar_incidents tool — find historically similar analyses."""
     from logmind.domain.analysis.semantic_dedup import cached_embed
     from logmind.core.config import get_settings
@@ -587,9 +665,28 @@ async def _exec_search_similar_incidents(args: dict, index_pattern: str) -> str:
         if query_vector is None:
             return json.dumps({"error": "Embedding provider not available"})
 
-        # Search all business lines with a lower threshold for broader results
-        # Note: we search globally (no biz_id filter) since the agent may
-        # want to see incidents across services
+        if business_line_id:
+            matches = await log_service.knn_search_analysis_history(
+                business_line_id=business_line_id,
+                query_vector=query_vector,
+                k=3,
+                min_score=0.75,
+            )
+            if not matches:
+                return "未找到与当前错误模式相似的历史分析记录。"
+
+            formatted = []
+            for i, match in enumerate(matches):
+                formatted.append(
+                    f"--- 历史事件 {i + 1} (相似度: {match.get('score', 0):.2f}) ---\n"
+                    f"严重级别: {match.get('severity', 'unknown')}\n"
+                    f"分析时间: {match.get('created_at', '未知')}\n"
+                    f"错误签名: {match.get('error_signature', '')[:100]}\n"
+                    f"历史结论:\n{match.get('analysis_content', '无内容')[:800]}\n"
+                )
+            return "\n".join(formatted)
+
+        # Fallback for legacy/manual calls without business context.
         index_name = "logmind-analysis-vectors"
         exists = await log_service.es.indices.exists(index=index_name)
         if not exists:
@@ -635,7 +732,11 @@ async def _exec_search_similar_incidents(args: dict, index_pattern: str) -> str:
         return json.dumps({"error": f"Search failed: {str(e)}"})
 
 
-async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str) -> str:
+async def _exec_search_cross_service_logs(
+    args: dict,
+    current_index_pattern: str,
+    related_index_patterns: list[str] | None = None,
+) -> str:
     """Search error logs across other business lines in the same tenant."""
     from logmind.domain.log.schemas import LogQueryRequest
     from logmind.domain.log.service import log_service
@@ -644,41 +745,13 @@ async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str
     if not keyword:
         return json.dumps({"error": "keyword is required"})
 
-    service_name = args.get("service_name", "")
     minutes_back = args.get("minutes_back", 30)
+    related_index_patterns = related_index_patterns or []
 
     try:
-        # Discover all available indices (excluding current business line's)
-        all_indices = await log_service.list_indices("*")
-
-        # Filter out current business line's indices
-        current_patterns = [p.strip() for p in current_index_pattern.split(",")]
-        other_indices = []
-        for idx_info in all_indices:
-            # A2 fix: list_indices returns ESIndexInfo objects, use .name attribute
-            idx_name = idx_info.name
-            # Skip system/KB/vector indices
-            if idx_name.startswith(".") or idx_name.startswith("logmind-"):
-                continue
-            # Skip current business line indices
-            is_current = False
-            for pat in current_patterns:
-                pat_base = pat.replace("*", "")
-                if pat_base and idx_name.startswith(pat_base):
-                    is_current = True
-                    break
-            if not is_current:
-                # If service_name filter provided, only include matching indices
-                if service_name and service_name.lower() not in idx_name.lower():
-                    continue
-                other_indices.append(idx_name)
-
-        if not other_indices:
-            return "未找到其他可搜索的服务索引。"
-
-        # Search across other indices (limit to 5 indices to control cost)
-        search_indices = other_indices[:5]
-        index_str = ",".join(search_indices)
+        index_str = _join_index_patterns(related_index_patterns)
+        if not index_str:
+            return "未配置可搜索的关联服务索引。"
 
         time_from = datetime.now(timezone.utc) - timedelta(minutes=minutes_back)
         time_to = datetime.now(timezone.utc)
@@ -695,12 +768,12 @@ async def _exec_search_cross_service_logs(args: dict, current_index_pattern: str
         result = await log_service.search_logs(request)
 
         if not result.logs:
-            return f"在其他 {len(search_indices)} 个服务中未发现与 '{keyword}' 相关的错误日志。"
+            return f"在关联服务中未发现与 '{keyword}' 相关的错误日志。"
 
         # Format results — mask sensitive data before returning to Agent/LLM
         from logmind.domain.analysis.sensitive_masker import mask_sensitive
 
-        formatted = [f"跨服务搜索结果（关键词: {keyword}，搜索范围: {len(search_indices)} 个服务索引）：\n"]
+        formatted = [f"跨服务搜索结果（关键词: {keyword}，搜索范围: 已配置关联服务）：\n"]
         for i, log in enumerate(result.logs[:10]):
             formatted.append(
                 f"--- [{i+1}] 来源: {log.domain or '未知'} ---\n"
@@ -731,11 +804,16 @@ def _parse_time(value: str | None) -> datetime | None:
 
 # ── New Tool Implementations (v5.1) ─────────────────────
 
-async def _exec_get_alerts(args: dict, index_pattern: str) -> str:
+async def _exec_get_alerts(
+    args: dict,
+    tenant_id: str = "",
+    business_line_id: str = "",
+) -> str:
     """Query recent alert history from PostgreSQL."""
     from logmind.core.database import get_db_context
     from logmind.domain.alert.models import AlertHistory
-    from sqlalchemy import select
+    from logmind.domain.analysis.models import LogAnalysisTask
+    from sqlalchemy import or_, select
 
     hours_back = min(args.get("hours_back", 24), 72)
     severity_filter = args.get("severity")
@@ -744,10 +822,20 @@ async def _exec_get_alerts(args: dict, index_pattern: str) -> str:
     async with get_db_context() as session:
         stmt = (
             select(AlertHistory)
+            .outerjoin(LogAnalysisTask, AlertHistory.analysis_task_id == LogAnalysisTask.id)
             .where(AlertHistory.fired_at >= since)
             .order_by(AlertHistory.fired_at.desc())
             .limit(20)
         )
+        if tenant_id:
+            stmt = stmt.where(AlertHistory.tenant_id == tenant_id)
+        if business_line_id:
+            stmt = stmt.where(
+                or_(
+                    AlertHistory.business_line_id == business_line_id,
+                    LogAnalysisTask.business_line_id == business_line_id,
+                )
+            )
         if severity_filter:
             stmt = stmt.where(AlertHistory.severity == severity_filter)
 
@@ -892,9 +980,15 @@ async def _exec_compare_time_windows(args: dict, index_pattern: str, default_to)
         return json.dumps({"error": f"Compare failed: {str(e)}"})
 
 
-async def _exec_trace_error_chain(args: dict, index_pattern: str, default_to) -> str:
+async def _exec_trace_error_chain(
+    args: dict,
+    index_pattern: str,
+    default_to,
+    related_index_patterns: list[str] | None = None,
+) -> str:
     """Trace error chain across related services."""
     from logmind.core.elasticsearch import get_es_client
+    from logmind.domain.analysis.sensitive_masker import mask_sensitive
 
     keyword = args.get("error_keyword", "")
     if not keyword:
@@ -903,10 +997,13 @@ async def _exec_trace_error_chain(args: dict, index_pattern: str, default_to) ->
     minutes_back = min(args.get("minutes_back", 30), 120)
     now = default_to or datetime.now(timezone.utc)
     since = now - timedelta(minutes=minutes_back)
+    search_index = _join_index_patterns([index_pattern] + (related_index_patterns or []))
+    if not search_index:
+        return "未配置可搜索的服务索引。"
 
     es = await get_es_client()
 
-    # Search across all indices for this error
+    # Search only the current service and explicitly configured related services.
     body = {
         "size": 30,
         "query": {
@@ -921,7 +1018,7 @@ async def _exec_trace_error_chain(args: dict, index_pattern: str, default_to) ->
     }
 
     try:
-        resp = await es.search(index="*", body=body)
+        resp = await es.search(index=search_index, body=body)
         hits = resp.get("hits", {}).get("hits", [])
 
         if not hits:
@@ -935,7 +1032,7 @@ async def _exec_trace_error_chain(args: dict, index_pattern: str, default_to) ->
             by_service.setdefault(idx, []).append({
                 "time": src.get("@timestamp", "")[-12:-1],
                 "level": src.get("level", "?"),
-                "msg": src.get("message", "")[:150],
+                "msg": mask_sensitive(src.get("message", "")[:150]),
             })
 
         lines = [f"错误链追踪: '{keyword}' (最近 {minutes_back} 分钟, {len(hits)} 条)\n"]

@@ -680,7 +680,21 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
             hit_count = ctx.log_metadata["known_issue_hit_count"]
             issue_label = f"📋 [已知问题|第{hit_count}次] "
 
-        content = f"{priority_label} {issue_label}{content}"
+        reason = (ctx.priority_decision.get("reason") or "").strip()
+        reason_line = f"\n通知原因: {reason}" if reason else ""
+
+        log_refs_line = ""
+        raw_refs = alert.get("source_log_refs", "[]")
+        try:
+            parsed_refs = json.loads(raw_refs) if isinstance(raw_refs, str) else raw_refs
+        except Exception:
+            parsed_refs = []
+        if isinstance(parsed_refs, list):
+            log_refs = [str(ref)[:120] for ref in parsed_refs if ref][:3]
+            if log_refs:
+                log_refs_line = f"\n日志引用: {', '.join(log_refs)}"
+
+        content = f"{priority_label} {issue_label}{content}{reason_line}{log_refs_line}"
 
         # ── Storm Detection ──────────────────────────────────
         storm = alert_storm_detector.check_storm(

@@ -161,6 +161,9 @@ class AgentInferenceStage(PipelineStage):
                                 es_index_pattern=ctx.es_index_pattern,
                                 time_from=ctx.time_from,
                                 time_to=ctx.time_to,
+                                tenant_id=ctx.tenant_id,
+                                business_line_id=ctx.business_line_id,
+                                related_services=ctx.related_services,
                             )
                         except Exception as tool_exc:
                             result = json.dumps({"error": str(tool_exc)})
