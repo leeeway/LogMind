@@ -84,7 +84,11 @@ class PriorityDecisionStage(PipelineStage):
             logger.warning("regression_priority_upgrade",
                            original_priority=decision.priority, task_id=ctx.task_id)
 
-        if decision.actions.should_notify:
+        final_should_notify = ctx.priority_decision.get(
+            "should_notify", decision.actions.should_notify
+        )
+
+        if final_should_notify:
             alertable_results = [
                 r for r in ctx.analysis_results
                 if r.get("severity") in ("critical", "warning", "error")
@@ -94,9 +98,9 @@ class PriorityDecisionStage(PipelineStage):
                 alertable_results = ctx.analysis_results[:1]
             ctx.alerts_fired = alertable_results
 
-        logger.info("priority_decision_result", priority=decision.priority,
-                     score=decision.score, should_notify=decision.actions.should_notify,
-                     reason=decision.actions.reason, task_id=ctx.task_id)
+        logger.info("priority_decision_result", priority=ctx.priority_decision.get("priority"),
+                     score=ctx.priority_decision.get("score"), should_notify=final_should_notify,
+                     reason=ctx.priority_decision.get("reason"), task_id=ctx.task_id)
         return ctx
 
     @staticmethod

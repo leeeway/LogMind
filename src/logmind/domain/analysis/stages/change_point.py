@@ -162,16 +162,44 @@ class ChangePointDetectionStage(PipelineStage):
             index_pattern = biz.es_index_pattern
 
         try:
+            error_should = [
+                {"term": {"level.keyword": "ERROR"}},
+                {"term": {"level.keyword": "FATAL"}},
+                {"term": {"level": "error"}},
+                {"term": {"level": "fatal"}},
+                {"term": {"log.level": "error"}},
+                {"term": {"severity": "error"}},
+                {"term": {"loglevel": "ERROR"}},
+                {"term": {"loglevel": "FATAL"}},
+                {"match_phrase": {"message": "[ERROR]"}},
+                {"match_phrase": {"message": "[FATAL]"}},
+                {"match_phrase": {"message": "] ERROR "}},
+                {"match_phrase": {"message": "Exception"}},
+                {"match_phrase": {"message": "Error:"}},
+                {"match_phrase": {"message": "Traceback"}},
+                {"match_phrase": {"message": "panic:"}},
+            ]
+
             resp = await self.log_service.es.search(
                 index=index_pattern,
                 size=0,
                 query={
                     "bool": {
                         "filter": [
-                            {"range": {"@timestamp": {
-                                "gte": time_from.isoformat(),
-                                "lte": time_to.isoformat(),
-                            }}},
+                            {
+                                "range": {
+                                    "@timestamp": {
+                                        "gte": time_from.isoformat(),
+                                        "lte": time_to.isoformat(),
+                                    }
+                                }
+                            },
+                            {
+                                "bool": {
+                                    "should": error_should,
+                                    "minimum_should_match": 1,
+                                }
+                            },
                         ]
                     }
                 },
