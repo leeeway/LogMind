@@ -112,6 +112,41 @@ async def test_send_error_log_notification_uses_normalized_summary(monkeypatch):
     assert notify_error_logs.await_args.kwargs["error_summary"] == "[ERROR] Database timeout"
 
 
+@pytest.mark.asyncio
+async def test_send_error_log_notification_skips_success_business_noise(monkeypatch):
+    aggregator_should_send = AsyncMock(return_value=(True, 0))
+    notify_error_logs = AsyncMock()
+
+    monkeypatch.setattr(
+        "logmind.domain.alert.aggregator.alert_aggregator.should_send",
+        aggregator_should_send,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.alert.channels.webhook.notify_error_logs",
+        notify_error_logs,
+    )
+
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        business_line_name="社区计费系统-核心兑换服务",
+        processed_logs=(
+            "[INFO] WDGameCharge.charge - 问道兑换元宝[订单=R260529150936039315920247652]"
+            "结果ProcessResult[description='Account successfully charged', errorCode=0]\n"
+            "[INFO] ChangeService.changeGameNew - 调用游戏接口发元宝[changeGameNew]"
+            "游戏兑换结果ResultBean(success=true, message=, error=, data=成功)"
+        ),
+        log_count=2,
+        language="java",
+    )
+
+    await analysis_tasks._send_error_log_notification(ctx, webhook_url="")
+
+    aggregator_should_send.assert_not_awaited()
+    notify_error_logs.assert_not_awaited()
+
+
 def test_should_send_plain_error_fallback_for_provider_failure():
     ctx = PipelineContext(
         tenant_id="t1",

@@ -97,6 +97,30 @@ class TestBusinessNoise:
         )
         assert stage._is_business_noise(line) is True
 
+    def test_charge_success_process_result_is_noise(self):
+        stage = LogQualityFilterStage()
+        line = (
+            "[2026-05-29 15:09:56] [INFO] [domain:stage-billing-change.gyyx.cn] "
+            "2026-05-29 15:09:53.406 [http-nio-8081-exec-7] INFO "
+            "cn.gyyx.stage.billing.change.game.WDGameCharge [WDGameCharge.charge] - "
+            "问道兑换元宝[订单=R260529150936039315920247652]"
+            "结果ProcessResult[description='Account successfully charged', "
+            "errorCode=0, requestIndex=0]"
+        )
+        assert stage._is_business_noise(line) is True
+
+    def test_charge_success_result_bean_is_noise(self):
+        stage = LogQualityFilterStage()
+        line = (
+            "[2026-05-29 15:09:56] [INFO] [domain:stage-billing-change.gyyx.cn] "
+            "2026-05-29 15:09:53.406 [http-nio-8081-exec-7] INFO "
+            "cn.gyyx.stage.billing.change.service.ChangeService [ChangeService.changeGameNew] - "
+            "调用游戏接口发元宝[changeGameNew]账号=YH793999202|"
+            "兑换订单=R260529150936039315920247652"
+            "游戏兑换结果ResultBean(success=true, message=, error=, data=成功)"
+        )
+        assert stage._is_business_noise(line) is True
+
 
 class TestShallowError:
     """Tests for detecting misused log.error() calls."""

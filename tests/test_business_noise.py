@@ -136,6 +136,26 @@ class TestStaticNoisePatterns:
         if result:
             assert result["category"] != "biz_response"
 
+    def test_charge_success_process_result(self):
+        line = (
+            "[INFO] WDGameCharge.charge - 问道兑换元宝[订单=R260529150936039315920247652]"
+            "结果ProcessResult[description='Account successfully charged', "
+            "errorCode=0, requestIndex=0]"
+        )
+        result = match_static_noise(line)
+        assert result is not None
+        assert result["category"] == "success_flow"
+
+    def test_charge_success_result_bean(self):
+        line = (
+            "[INFO] ChangeService.changeGameNew - 调用游戏接口发元宝[changeGameNew]"
+            "账号=YH793999202|兑换订单=R260529150936039315920247652"
+            "游戏兑换结果ResultBean(success=true, message=, error=, data=成功)"
+        )
+        result = match_static_noise(line)
+        assert result is not None
+        assert result["category"] == "success_flow"
+
 
 # ══════════════════════════════════════════════════════════
 #  Fault Protection Tests (False Positive Prevention)
@@ -267,6 +287,16 @@ class TestClassifyLine:
                 "com.mysql.jdbc.ConnectionImpl.createNewIO(ConnectionImpl.java:2062)")
         is_noise, rule = classify_line(line)
         assert is_noise is False
+
+    def test_charge_success_noise_classified(self):
+        line = (
+            "[INFO] ChangeService.changeGameNew - 调用游戏接口发元宝[changeGameNew]"
+            "游戏兑换结果ResultBean(success=true, message=, error=, data=成功)"
+        )
+        is_noise, rule = classify_line(line)
+        assert is_noise is True
+        assert rule is not None
+        assert rule["category"] == "success_flow"
 
 
 # ══════════════════════════════════════════════════════════

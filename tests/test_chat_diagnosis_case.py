@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from logmind.domain.chat.service import ChatService
 
@@ -76,3 +77,49 @@ def test_decision_actions_include_postmortem_and_copy():
     labels = {item["label"] for item in actions}
     assert "生成复盘草稿" in labels
     assert "复制诊断报告" in labels
+
+
+def test_resolve_business_line_matches_branch_prefixed_domain():
+    service = ChatService()
+    biz = SimpleNamespace(
+        id="biz-1",
+        name="GPay",
+        es_index_pattern=".ds-master-gpay.gyyx.cn-2026.06.16-002650",
+        is_active=True,
+    )
+
+    assert service._resolve_business_line([biz], "master-gpay.gyyx.cn") is biz
+    assert service._resolve_business_line([biz], "gpay.gyyx.cn") is biz
+
+
+def test_direct_log_search_intent_extracts_csharp_keyword_and_export():
+    service = ChatService()
+    biz = SimpleNamespace(
+        id="biz-1",
+        name="GPay",
+        es_index_pattern=".ds-master-gpay.gyyx.cn-*",
+        is_active=True,
+    )
+
+    intent = service._extract_direct_log_search_intent(
+        "最新1小时业务线master-gpay.gyyx.cn所有日志包含限制访问：非支付宝客户端的数据，导出订单号",
+        [biz],
+    )
+
+    assert intent is not None
+    assert intent["service_name"] == "GPay"
+    assert intent["keyword"] == "限制访问：非支付宝客户端"
+    assert intent["lookback_seconds"] == 3600
+    assert intent["severity"] is None
+    assert intent["wants_export"] is True
+
+
+def test_extract_order_ids_from_csharp_log_message():
+    service = ChatService()
+
+    ids = service._extract_order_ids(
+        "调用/Recharge/AlipayPCQrcodeDesk/限制访问：非支付宝客户端，"
+        "订单号：AliQr26061716280437930612，UserAgent：Mozilla/5.0"
+    )
+
+    assert ids == ["AliQr26061716280437930612"]
