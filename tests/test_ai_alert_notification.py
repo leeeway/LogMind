@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -63,3 +64,40 @@ async def test_ai_alert_content_includes_priority_reason_and_limited_log_refs(mo
     assert "通知原因: P1: warning 级别错误，正常通知" in content
     assert "日志引用: log-1, log-2, log-3" in content
     assert "log-4" not in content
+
+
+@pytest.mark.asyncio
+async def test_ai_off_error_notification_aggregation_uses_summary_signature(monkeypatch):
+    from logmind.domain.analysis import tasks
+
+    captured = {}
+
+    async def fake_should_send(**kwargs):
+        captured.update(kwargs)
+        return True, 1
+
+    monkeypatch.setattr(
+        "logmind.domain.alert.aggregator.alert_aggregator.should_send",
+        fake_should_send,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.alert.channels.webhook.notify_error_logs",
+        AsyncMock(return_value=True),
+    )
+
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        business_line_name="Core Service",
+        log_count=1,
+    )
+    ctx.processed_logs = "2026-06-28 ERROR NullPointerException at PaymentService"
+    ctx.time_from = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)
+    ctx.time_to = datetime(2026, 6, 28, 10, 5, tzinfo=timezone.utc)
+
+    await tasks._send_error_log_notification(ctx, webhook_url="")
+
+    assert captured["error_signature"]
+    assert captured["error_signature"] != "error"
+    assert "NullPointerException" in captured["error_signature"]

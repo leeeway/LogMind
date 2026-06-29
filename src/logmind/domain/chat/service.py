@@ -1861,6 +1861,8 @@ class ChatService:
     async def execute_tool_call(
         self, tool_name: str, args: dict, tenant_id: str, db_session,
         es_index_pattern: str = "*",
+        business_line_id: str = "",
+        related_services: dict | None = None,
     ) -> str:
         """Execute a tool call using real Agent Tools or built-in tools."""
         try:
@@ -1894,6 +1896,9 @@ class ChatService:
                     es_index_pattern=es_index_pattern,
                     time_from=time_from,
                     time_to=time_to,
+                    tenant_id=tenant_id,
+                    business_line_id=business_line_id,
+                    related_services=related_services,
                 )
 
             # Built-in tools
@@ -1937,13 +1942,17 @@ class ChatService:
         db_session,
         session: "ChatSession",
         es_index_pattern: str = "*",
+        business_line_id: str = "",
+        related_services: dict | None = None,
     ) -> tuple[str, str]:
         """
         Execute tool call and create a DiagnosticEvidence record.
         Returns (tool_result, evidence_label).
         """
         result = await self.execute_tool_call(
-            tool_name, args, tenant_id, db_session, es_index_pattern
+            tool_name, args, tenant_id, db_session, es_index_pattern,
+            business_line_id=business_line_id,
+            related_services=related_services,
         )
 
         # Generate evidence record
@@ -3306,10 +3315,20 @@ class ChatService:
                         # Execute tool with real agent tools
                         # Resolve index pattern from service_name or domain arg
                         tool_index = default_index
+                        tool_business_line_id = ""
+                        tool_related_services = None
                         svc_name = func_args.get("service_name", "") or func_args.get("domain", "")
                         matched_biz = self._resolve_business_line(biz_lines, svc_name)
                         if matched_biz:
                             tool_index = matched_biz.es_index_pattern
+                            tool_business_line_id = matched_biz.id
+                            try:
+                                tool_related_services = (
+                                    json.loads(matched_biz.related_services)
+                                    if matched_biz.related_services else None
+                                )
+                            except json.JSONDecodeError:
+                                tool_related_services = None
 
                         # For search_logs: inject exact gy.domain if we matched a biz line
                         # AI often passes imprecise domain like "login" — resolve to exact value
@@ -3323,6 +3342,8 @@ class ChatService:
                         tool_result, evidence_label = await self.execute_tool_call_with_evidence(
                             func_name, func_args, session.tenant_id,
                             db_session, session=session, es_index_pattern=tool_index,
+                            business_line_id=tool_business_line_id,
+                            related_services=tool_related_services,
                         )
 
                         # Generate result summary (first 200 chars)

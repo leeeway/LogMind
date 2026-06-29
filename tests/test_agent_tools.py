@@ -122,3 +122,29 @@ async def test_search_cross_service_logs_only_uses_configured_related_indices(mo
     assert captured["index_pattern"] == "upstream-*,downstream-*"
     assert "current-*" not in captured["index_pattern"]
     assert "abc123456" not in result
+
+
+@pytest.mark.asyncio
+async def test_list_available_indices_is_bounded_to_current_index_pattern(monkeypatch):
+    from logmind.domain.analysis import agent_tools
+
+    captured = {}
+
+    async def fake_list_indices(pattern):
+        captured["pattern"] = pattern
+        return [
+            SimpleNamespace(name="current-2026", docs_count=10, size="1kb"),
+        ]
+
+    monkeypatch.setattr(agent_tools.log_service, "list_indices", fake_list_indices)
+
+    result = await agent_tools.execute_tool(
+        tool_name="list_available_indices",
+        arguments={"pattern": "*"},
+        es_index_pattern="current-*",
+        tenant_id="tenant-1",
+        business_line_id="biz-1",
+    )
+
+    assert captured["pattern"] == "current-*"
+    assert "current-2026" in result

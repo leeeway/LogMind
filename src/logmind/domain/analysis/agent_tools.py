@@ -356,13 +356,18 @@ async def execute_tool(
     """
     try:
         if tool_name == "search_logs":
-            return await _exec_search_logs(arguments, es_index_pattern, time_from, time_to)
+            return await _exec_search_logs(
+                arguments, es_index_pattern, time_from, time_to,
+                business_line_id=business_line_id,
+            )
         elif tool_name == "get_log_context":
-            return await _exec_get_log_context(arguments, es_index_pattern)
+            return await _exec_get_log_context(
+                arguments, es_index_pattern, business_line_id=business_line_id
+            )
         elif tool_name == "count_error_patterns":
             return await _exec_count_error_patterns(arguments, es_index_pattern, time_from, time_to)
         elif tool_name == "list_available_indices":
-            return await _exec_list_indices(arguments)
+            return await _exec_list_indices(arguments, es_index_pattern)
         elif tool_name == "search_knowledge_base":
             return await _exec_search_knowledge_base(arguments)
         elif tool_name == "search_similar_incidents":
@@ -457,7 +462,13 @@ def _join_index_patterns(patterns: list[str]) -> str:
     return ",".join(seen)
 
 
-async def _exec_search_logs(args: dict, index_pattern: str, default_from, default_to) -> str:
+async def _exec_search_logs(
+    args: dict,
+    index_pattern: str,
+    default_from,
+    default_to,
+    business_line_id: str = "",
+) -> str:
     """Execute search_logs tool."""
     from logmind.domain.log.schemas import LogQueryRequest
     from logmind.domain.analysis.sensitive_masker import mask_sensitive
@@ -478,6 +489,7 @@ async def _exec_search_logs(args: dict, index_pattern: str, default_from, defaul
         query=args.get("query", ""),
         severity=args.get("severity"),
         domain=args.get("domain"),
+        business_line_id=business_line_id or None,
         size=size,
     )
 
@@ -501,7 +513,11 @@ async def _exec_search_logs(args: dict, index_pattern: str, default_from, defaul
     }, ensure_ascii=False, default=str)
 
 
-async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
+async def _exec_get_log_context(
+    args: dict,
+    index_pattern: str,
+    business_line_id: str = "",
+) -> str:
     """Execute get_log_context tool."""
     from logmind.domain.log.schemas import LogQueryRequest
     from logmind.domain.analysis.sensitive_masker import mask_sensitive
@@ -521,6 +537,7 @@ async def _exec_get_log_context(args: dict, index_pattern: str) -> str:
         time_from=ts - timedelta(minutes=window),
         time_to=ts + timedelta(minutes=window),
         severity=severity,
+        business_line_id=business_line_id or None,
         size=size,
     )
 
@@ -577,9 +594,11 @@ async def _exec_count_error_patterns(args: dict, index_pattern: str, default_fro
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
-async def _exec_list_indices(args: dict) -> str:
+async def _exec_list_indices(args: dict, index_pattern: str) -> str:
     """Execute list_available_indices tool."""
-    pattern = args.get("pattern", "*")
+    pattern = index_pattern.strip() if index_pattern else ""
+    if not pattern:
+        return json.dumps({"error": "index pattern is required"})
 
     indices = await log_service.list_indices(pattern)
 

@@ -29,6 +29,9 @@ class LogQueryRequest(BaseModel):
         None, description="Business line language (java/csharp). "
         "When set, enables language-specific severity filtering on message content."
     )
+    business_line_id: str | None = Field(
+        None, description="Business line context for learned error-signal scoping."
+    )
     extra_filters: dict = Field(default_factory=dict)
     size: int = Field(5000, ge=1, le=10000)
     sort_order: str = Field("desc", pattern=r"^(asc|desc)$")

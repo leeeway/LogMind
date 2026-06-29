@@ -848,7 +848,7 @@ async def _send_error_log_notification(ctx, webhook_url: str):
     should_send, agg_count = await alert_aggregator.should_send(
         business_line_id=ctx.business_line_id,
         severity="error",
-        error_signature=None,  # No AI signature in AI-off mode
+        error_signature=normalized_summary[:200],
         alert_summary=normalized_summary[:200],
     )
 

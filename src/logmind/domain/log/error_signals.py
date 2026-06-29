@@ -146,8 +146,8 @@ _LEARNED_SIGNALS_INDEX = "logmind-learned-signals"
 
 # In-memory cache — avoids hitting ES on every search_logs call.
 # Celery workers and FastAPI processes both persist module-level state.
-_learned_cache: list[str] = []
-_cache_ts: float = 0.0
+_learned_cache: dict[str, list[str]] = {}
+_cache_ts: dict[str, float] = {}
 _CACHE_TTL = 300  # 5 minutes
 
 
@@ -235,13 +235,15 @@ async def store_learned_signal(
                 },
             },
         )
+        _learned_cache.pop(business_line_id, None)
+        _cache_ts.pop(business_line_id, None)
         logger.info("learned_signal_stored", signal=signal[:50], doc_id=doc_id[:8])
 
     except Exception as e:
         logger.warning("learned_signal_store_failed", signal=signal[:50], error=str(e))
 
 
-async def load_learned_signals() -> list[str]:
+async def load_learned_signals(business_line_id: str = "") -> list[str]:
     """
     Load learned signals from ES with in-memory cache (5-min TTL).
 
@@ -253,9 +255,18 @@ async def load_learned_signals() -> list[str]:
     """
     global _learned_cache, _cache_ts
 
+    if not business_line_id:
+        return []
+
+    if not isinstance(_learned_cache, dict):
+        _learned_cache = {}
+    if not isinstance(_cache_ts, dict):
+        _cache_ts = {}
+
     now = time.monotonic()
-    if (now - _cache_ts) < _CACHE_TTL:
-        return _learned_cache
+    cached_at = _cache_ts.get(business_line_id, 0.0)
+    if (now - cached_at) < _CACHE_TTL:
+        return _learned_cache.get(business_line_id, [])
 
     try:
         from logmind.domain.log.service import log_service
@@ -274,13 +285,13 @@ async def load_learned_signals() -> list[str]:
                 )
             else:
                 logger.warning("learned_signals_check_failed", error=err_str[:100])
-            _learned_cache = []
-            _cache_ts = now
+            _learned_cache[business_line_id] = []
+            _cache_ts[business_line_id] = now
             return []
 
         if not exists:
-            _learned_cache = []
-            _cache_ts = now
+            _learned_cache[business_line_id] = []
+            _cache_ts[business_line_id] = now
             return []
 
         result = await es.search(
@@ -290,6 +301,7 @@ async def load_learned_signals() -> list[str]:
                     "bool": {
                         "filter": [
                             {"range": {"confidence": {"gte": 0.7}}},
+                            {"term": {"business_line_id": business_line_id}},
                         ]
                     }
                 },
@@ -305,19 +317,23 @@ async def load_learned_signals() -> list[str]:
             if hit["_source"].get("signal")
         ]
 
-        _learned_cache = signals
-        _cache_ts = now
+        _learned_cache[business_line_id] = signals
+        _cache_ts[business_line_id] = now
 
         if signals:
-            logger.info("learned_signals_loaded", count=len(signals))
+            logger.info(
+                "learned_signals_loaded",
+                count=len(signals),
+                business_line_id=business_line_id,
+            )
 
         return signals
 
     except Exception as e:
         logger.warning("learned_signals_load_failed", error=str(e)[:100])
         # Cache the failure for TTL to avoid retrying too often
-        _cache_ts = now
-        return _learned_cache  # Return stale cache on error
+        _cache_ts[business_line_id] = now
+        return _learned_cache.get(business_line_id, [])  # Return stale cache on error
 
 
 # ══════════════════════════════════════════════════════════
@@ -328,14 +344,14 @@ async def load_learned_signals() -> list[str]:
 _static_set: set[str] = set(ALL_STATIC_SIGNALS)
 
 
-async def get_all_error_signals() -> list[str]:
+async def get_all_error_signals(business_line_id: str = "") -> list[str]:
     """
     Get combined static + learned error signals.
 
     Returns the full list of signals for ES query Channel B.
     Learned signals that duplicate static ones are excluded.
     """
-    learned = await load_learned_signals()
+    learned = await load_learned_signals(business_line_id)
 
     if not learned:
         return ALL_STATIC_SIGNALS
@@ -425,6 +441,6 @@ async def downgrade_learned_signals(source_task_id: str):
 
 def invalidate_signal_cache():
     """Force refresh of the learned signals cache on next query."""
-    global _cache_ts
-    _cache_ts = 0.0
-
+    global _learned_cache, _cache_ts
+    _learned_cache = {}
+    _cache_ts = {}

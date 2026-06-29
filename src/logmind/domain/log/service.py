@@ -215,7 +215,7 @@ class LogService:
             # Combines static hand-curated signals + AI-learned signals from past analyses.
             if request.severity and request.severity.lower() in ("error", "critical"):
                 from logmind.domain.log.error_signals import get_all_error_signals
-                all_signals = await get_all_error_signals()
+                all_signals = await get_all_error_signals(request.business_line_id or "")
                 for signal in all_signals:
                     severity_should.append({"match_phrase": {"message": signal}})
 

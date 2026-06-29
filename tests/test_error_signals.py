@@ -4,6 +4,8 @@ Unit Tests — Error Signals Module
 Tests signal registry, deduplication, and combined output.
 """
 
+import pytest
+
 from logmind.domain.log.error_signals import (
     ALL_STATIC_SIGNALS,
     INFRA_SIGNALS,
@@ -77,11 +79,17 @@ class TestSignalCoverage:
     """Test that key error patterns are covered."""
 
     def test_timeout_variants_covered(self):
-        timeout_signals = [s for s in ALL_STATIC_SIGNALS if "timeout" in s.lower() or "timed out" in s.lower()]
+        timeout_signals = [
+            s for s in ALL_STATIC_SIGNALS
+            if "timeout" in s.lower() or "timed out" in s.lower()
+        ]
         assert len(timeout_signals) >= 4, "Should cover multiple timeout patterns"
 
     def test_connection_failures_covered(self):
-        conn_signals = [s for s in ALL_STATIC_SIGNALS if "connection" in s.lower() or "connect" in s.lower()]
+        conn_signals = [
+            s for s in ALL_STATIC_SIGNALS
+            if "connection" in s.lower() or "connect" in s.lower()
+        ]
         assert len(conn_signals) >= 3
 
     def test_oom_covered(self):
@@ -111,3 +119,37 @@ class TestSignalCoverage:
     def test_csharp_exceptions_covered(self):
         assert "NullReferenceException" in _static_set
         assert "DataIntegrityViolationException" in _static_set
+
+
+@pytest.mark.asyncio
+async def test_get_all_error_signals_filters_learned_signals_by_business_line(monkeypatch):
+    from logmind.domain.log import error_signals
+
+    captured = {}
+
+    class FakeIndices:
+        async def exists(self, index):
+            return True
+
+    class FakeEs:
+        indices = FakeIndices()
+
+        async def search(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "hits": {
+                    "hits": [
+                        {"_source": {"signal": "BizOnlyFailure"}},
+                    ]
+                }
+            }
+
+    monkeypatch.setattr(error_signals, "_learned_cache", {})
+    monkeypatch.setattr(error_signals, "_cache_ts", {})
+    monkeypatch.setattr("logmind.core.elasticsearch.get_es_client", lambda: FakeEs())
+
+    signals = await error_signals.get_all_error_signals("biz-1")
+
+    query_filters = captured["body"]["query"]["bool"]["filter"]
+    assert {"term": {"business_line_id": "biz-1"}} in query_filters
+    assert "BizOnlyFailure" in signals

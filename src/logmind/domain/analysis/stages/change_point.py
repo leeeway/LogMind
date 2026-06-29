@@ -162,6 +162,9 @@ class ChangePointDetectionStage(PipelineStage):
             index_pattern = biz.es_index_pattern
 
         try:
+            from logmind.domain.log.error_signals import get_all_error_signals
+            from logmind.domain.log.service import _SEVERITY_FILETYPE_MAP
+
             error_should = [
                 {"term": {"level.keyword": "ERROR"}},
                 {"term": {"level.keyword": "FATAL"}},
@@ -179,6 +182,11 @@ class ChangePointDetectionStage(PipelineStage):
                 {"match_phrase": {"message": "Traceback"}},
                 {"match_phrase": {"message": "panic:"}},
             ]
+            for filetype in _SEVERITY_FILETYPE_MAP.get("error", []):
+                error_should.append({"term": {"gy.filetype.keyword": filetype}})
+
+            for signal in await get_all_error_signals(business_line_id):
+                error_should.append({"match_phrase": {"message": signal}})
 
             resp = await self.log_service.es.search(
                 index=index_pattern,

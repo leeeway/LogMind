@@ -28,6 +28,7 @@ class LogFetchStage(PipelineStage):
             query=ctx.query,
             severity=ctx.severity_threshold,
             language=ctx.language,
+            business_line_id=ctx.business_line_id,
             extra_filters=ctx.extra_filters,
             size=5000,  # Expand ES window so diversity sampler can see older rare errors
         )
