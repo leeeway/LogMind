@@ -820,6 +820,44 @@ class ChatService:
                     return keyword
         return ""
 
+    @classmethod
+    def _extract_compact_log_keyword(cls, text: str, service_query: str = "") -> str:
+        """
+        Extract keyword from compact search prompts like:
+        "查 auth-service 最近30分钟 timeout 返回200条".
+        """
+        cleaned = text or ""
+        cleaned = re.sub(r"^(?:搜索|搜|查询|查找|查|找)\s*", "", cleaned, flags=re.IGNORECASE)
+
+        if service_query:
+            cleaned = cleaned.replace(service_query, " ")
+
+        cleaned = re.sub(
+            r"((?:\.ds-)?(?:(?:master|develop|prod|stage|release)-)?[A-Za-z0-9_.-]+\.gyyx\.cn)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"业务线\s*[：:]?", " ", cleaned)
+        cleaned = re.sub(
+            r"(?:最近|最新|近|过去)\s*\d+\s*(?:分钟|分|min|minute|m|小时|时|h|hour|天|日|d|day)",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"(?:返回|显示|前)\s*\d{1,5}\s*(?:条|行)?", " ", cleaned)
+        cleaned = re.sub(
+            r"(?:所有|全部)?(?:错误|告警|警告)?(?:日志|log|记录|内容|结果|数据(?!库))",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"(?:包含|含有|匹配|关键字|关键词)\s*[：:]?", " ", cleaned)
+        cleaned = re.sub(r"(?:导出|下载|csv|订单号|order)", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = cls._strip_log_keyword(cleaned)
+        cleaned = " ".join(cleaned.split())
+        return cleaned[:80].strip()
+
     def _extract_service_query_from_text(self, text: str, biz_lines: list) -> str:
         normalized = text or ""
         domain_match = re.search(
@@ -862,7 +900,7 @@ class ChatService:
     def _extract_direct_log_search_intent(self, text: str, biz_lines: list) -> dict | None:
         normalized = text or ""
         if not re.search(
-            r"(日志|log|数据|包含|关键字|关键词|导出|搜索|查询|查找)",
+            r"(日志|log|数据|包含|关键字|关键词|导出|搜索|查询|查找|搜|查)",
             normalized,
             re.IGNORECASE,
         ):
@@ -871,6 +909,14 @@ class ChatService:
         service_query = self._extract_service_query_from_text(normalized, biz_lines)
         target = self._resolve_business_line(biz_lines, service_query) if service_query else None
         keyword = self._extract_log_keyword(normalized)
+        compact_keyword = self._extract_compact_log_keyword(normalized, service_query)
+        if compact_keyword and (
+            not keyword
+            or (service_query and service_query in keyword)
+            or re.search(r"(?:最近|最新|近|过去)\s*\d+", keyword)
+            or re.search(r"(?:返回|显示|前)\s*\d{1,5}", keyword)
+        ):
+            keyword = compact_keyword
 
         if not target or not keyword:
             return None

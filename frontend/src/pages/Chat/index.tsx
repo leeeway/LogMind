@@ -3,11 +3,12 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { Button, Input, Typography, Space, Tag, message, Tooltip, Select } from 'antd';
 import {
   SendOutlined, PlusOutlined, DeleteOutlined, RobotOutlined,
-  UserOutlined, ThunderboltOutlined, CopyOutlined,
+  UserOutlined, CopyOutlined,
   LoadingOutlined, BranchesOutlined, ExportOutlined,
   QuestionCircleOutlined, ClockCircleOutlined, RadarChartOutlined,
   AlertOutlined, CheckCircleOutlined, ExclamationCircleOutlined,
-  HistoryOutlined, FireOutlined, AppstoreOutlined,
+  HistoryOutlined,
+  SearchOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -113,6 +114,14 @@ interface TemplateValues {
   keyword: string;
 }
 
+interface ExactSearchValues {
+  serviceName: string;
+  timeRange: string;
+  keyword: string;
+  severity: 'all' | 'error' | 'warning';
+  size: string;
+}
+
 interface StreamEvent {
   type?: string;
   [key: string]: unknown;
@@ -148,6 +157,21 @@ const COMPOSER_PRESETS = [
     label: '下一步',
     prompt: '请把下一步排查动作拆成 3-5 个明确步骤，并说明每步要验证什么。',
   },
+];
+
+const SEARCH_TIME_OPTIONS = [
+  { value: '最近5分钟', label: '最近5分钟' },
+  { value: '最近30分钟', label: '最近30分钟' },
+  { value: '最近1小时', label: '最近1小时' },
+  { value: '最近3小时', label: '最近3小时' },
+  { value: '最近6小时', label: '最近6小时' },
+  { value: '最近24小时', label: '最近24小时' },
+];
+
+const SEARCH_SEVERITY_OPTIONS = [
+  { value: 'all', label: '所有日志' },
+  { value: 'error', label: '错误日志' },
+  { value: 'warning', label: '警告日志' },
 ];
 
 const priorityMeta: Record<LiveRecommendation['priority'], { color: string; label: string }> = {
@@ -245,6 +269,13 @@ const ChatPage: React.FC = () => {
     serviceNames: [],
     serviceScope: 'core',
     keyword: '',
+  });
+  const [exactSearch, setExactSearch] = useState<ExactSearchValues>({
+    serviceName: '',
+    timeRange: '最近30分钟',
+    keyword: '',
+    severity: 'all',
+    size: '200',
   });
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -437,6 +468,10 @@ const ChatPage: React.FC = () => {
 
   const updateTemplateValue = <K extends keyof TemplateValues>(key: K, value: TemplateValues[K]) => {
     setTemplateValues((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateExactSearchValue = <K extends keyof ExactSearchValues>(key: K, value: ExactSearchValues[K]) => {
+    setExactSearch((prev) => ({ ...prev, [key]: value }));
   };
 
   const applyTemplate = (templateId: string) => {
@@ -808,6 +843,28 @@ const ChatPage: React.FC = () => {
     sendMessage(builtPrompt);
   }, [activeTemplate, activeTemplateId, sendMessage, templateValues]);
 
+  const sendExactSearch = useCallback(() => {
+    const serviceName = exactSearch.serviceName.trim();
+    const keyword = exactSearch.keyword.trim();
+    if (!serviceName) {
+      message.warning('请选择要搜索的业务线');
+      return;
+    }
+    if (!keyword) {
+      message.warning('请输入日志关键词');
+      return;
+    }
+
+    const size = Math.max(1, Math.min(Number.parseInt(exactSearch.size, 10) || 200, 5000));
+    const logScope = exactSearch.severity === 'error'
+      ? '错误日志'
+      : exactSearch.severity === 'warning'
+        ? '警告日志'
+        : '所有日志';
+    const prompt = `${exactSearch.timeRange}业务线${serviceName}${logScope}包含${keyword}的数据，返回${size}条`;
+    sendMessage(prompt);
+  }, [exactSearch, sendMessage]);
+
   useEffect(() => {
     const state = (location.state || {}) as ChatRouteState;
     if (!state.prefill) return;
@@ -848,7 +905,6 @@ const ChatPage: React.FC = () => {
     }));
   }, [followUps, suggestedActions]);
 
-  const assistantMessageCount = messages.filter((item) => item.role === 'assistant').length;
   const showComposerSummary = !showRightRail && messages.length === 0 && (
     sessionStats.toolCount > 0 ||
     timelineEntries.length > 0 ||
@@ -916,40 +972,7 @@ const ChatPage: React.FC = () => {
           </Button>
         </div>
 
-        <div style={{ padding: '14px 16px 10px' }}>
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-              gap: 10,
-            }}
-          >
-            {[
-              { label: '会话数', value: sessionStats.totalSessions, icon: <HistoryOutlined />, color: '#1677ff' },
-              { label: '消息数', value: sessionStats.totalMessages, icon: <AppstoreOutlined />, color: '#722ed1' },
-            ].map((item) => (
-              <div
-                key={item.label}
-                style={{
-                  padding: 12,
-                  borderRadius: 14,
-                  background: 'var(--lm-bg-elevated)',
-                  border: '1px solid var(--lm-border-light)',
-                }}
-              >
-                <div style={{ color: item.color, marginBottom: 8 }}>{item.icon}</div>
-                <Text style={{ display: 'block', fontSize: 20, fontWeight: 700, color: 'var(--lm-text)' }}>
-                  {item.value}
-                </Text>
-                <Text style={{ fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-                  {item.label}
-                </Text>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ flex: 1, overflow: 'auto', padding: '0 10px 12px' }}>
+        <div style={{ flex: 1, overflow: 'auto', padding: '14px 10px 12px' }}>
           {sessions.length === 0 && (
             <div
               style={{
@@ -1079,32 +1102,6 @@ const ChatPage: React.FC = () => {
             </div>
 
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
-              <div style={{ ...sectionStyle, minWidth: 140, padding: '12px 14px' }}>
-                <Text style={{ display: 'block', fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-                  AI 回复
-                </Text>
-                <Text style={{ fontSize: 22, fontWeight: 700, color: 'var(--lm-text)' }}>
-                  {assistantMessageCount}
-                </Text>
-              </div>
-              <div style={{ ...sectionStyle, minWidth: 140, padding: '12px 14px' }}>
-                <Text style={{ display: 'block', fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-                  当前线索
-                </Text>
-                <Text style={{ fontSize: 22, fontWeight: 700, color: 'var(--lm-text)' }}>
-                  {sessionStats.clueCount}
-                </Text>
-              </div>
-              {messages.length > 0 && (
-                <div style={{ ...sectionStyle, minWidth: 140, padding: '12px 14px' }}>
-                  <Text style={{ display: 'block', fontSize: 11, color: 'var(--lm-text-tertiary)' }}>
-                    对话消息
-                  </Text>
-                  <Text style={{ fontSize: 22, fontWeight: 700, color: 'var(--lm-text)' }}>
-                    {messages.length}
-                  </Text>
-                </div>
-              )}
               {messages.length > 0 && (
                 <Tooltip title="复制当前会话为诊断报告">
                   <Button
@@ -1131,100 +1128,31 @@ const ChatPage: React.FC = () => {
               }}
             >
               <div style={{ ...sectionStyle, padding: 24 }}>
-                <div
-                  style={{
-                    width: 72,
-                    height: 72,
-                    borderRadius: 24,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    background: 'linear-gradient(135deg, rgba(22,119,255,0.14), rgba(114,46,209,0.16))',
-                    border: '1px solid rgba(22,119,255,0.14)',
-                    marginBottom: 18,
-                  }}
-                >
-                  <ThunderboltOutlined style={{ fontSize: 32, color: '#1677ff' }} />
-                </div>
-                <Title level={3} style={{ marginBottom: 8, color: 'var(--lm-text)' }}>
-                  一页完成搜索、诊断、追踪和追问
-                </Title>
-                <Text style={{ display: 'block', fontSize: 14, lineHeight: 1.8, color: 'var(--lm-text-secondary)' }}>
-                  你可以直接输入账号、订单号、traceId、报错关键词或者服务名。页面会在同一工作台里展示回复、推理链、时间线、链路和推荐动作，不需要来回切换。
+                <Text style={{ display: 'block', fontSize: 13, fontWeight: 700, color: 'var(--lm-text)' }}>
+                  常用问题
                 </Text>
-
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))',
-                    gap: 12,
-                    marginTop: 22,
-                  }}
-                >
-                  {[
-                    {
-                      title: '更强输入区',
-                      desc: '支持 Enter 发送、Shift+Enter 换行，底部始终保留快捷动作。',
-                      icon: <CheckCircleOutlined style={{ color: '#1677ff' }} />,
-                    },
-                    {
-                      title: '诊断副驾驶',
-                      desc: '右侧面板集中放推荐问题、模板和上下文摘要。',
-                      icon: <BranchesOutlined style={{ color: '#722ed1' }} />,
-                    },
-                    {
-                      title: '上下文深挖',
-                      desc: '自动接住工具链、时间线、链路图和线索卡片。',
-                      icon: <FireOutlined style={{ color: '#fa541c' }} />,
-                    },
-                  ].map((item) => (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 12 }}>
+                  {(liveRecommendations.length > 0
+                    ? liveRecommendations.slice(0, 4).map((item) => item.prompt)
+                    : WELCOME_SUGGESTIONS.slice(0, 4)
+                  ).map((prompt, index) => (
                     <div
-                      key={item.title}
+                      key={`${prompt}-${index}`}
+                      onClick={() => sendMessage(prompt)}
                       style={{
-                        padding: 16,
-                        borderRadius: 16,
-                        background: 'linear-gradient(180deg, var(--lm-bg-container), var(--lm-bg-elevated))',
-                        border: '1px solid var(--lm-border-light)',
+                        padding: '10px 14px',
+                        borderRadius: 999,
+                        border: '1px solid rgba(22,119,255,0.16)',
+                        background: 'rgba(22,119,255,0.10)',
+                        color: '#1677ff',
+                        cursor: 'pointer',
+                        fontSize: 12,
+                        fontWeight: 600,
                       }}
                     >
-                      <div style={{ marginBottom: 10 }}>{item.icon}</div>
-                      <Text style={{ display: 'block', fontSize: 14, fontWeight: 700, color: 'var(--lm-text)' }}>
-                        {item.title}
-                      </Text>
-                      <Text style={{ fontSize: 12, color: 'var(--lm-text-secondary)', lineHeight: 1.7 }}>
-                        {item.desc}
-                      </Text>
+                      {prompt}
                     </div>
                   ))}
-                </div>
-
-                <div style={{ marginTop: 24 }}>
-                  <Text style={{ display: 'block', fontSize: 12, fontWeight: 600, color: 'var(--lm-text)' }}>
-                    开场问题
-                  </Text>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
-                    {(liveRecommendations.length > 0
-                      ? liveRecommendations.slice(0, 4).map((item) => item.prompt)
-                      : WELCOME_SUGGESTIONS.slice(0, 4)
-                    ).map((prompt, index) => (
-                      <div
-                        key={`${prompt}-${index}`}
-                        onClick={() => sendMessage(prompt)}
-                        style={{
-                          padding: '10px 14px',
-                          borderRadius: 999,
-                          border: '1px solid rgba(22,119,255,0.16)',
-                          background: 'rgba(22,119,255,0.10)',
-                          color: '#1677ff',
-                          cursor: 'pointer',
-                          fontSize: 12,
-                          fontWeight: 600,
-                        }}
-                      >
-                        {prompt}
-                      </div>
-                    ))}
-                  </div>
                 </div>
               </div>
 
@@ -1619,6 +1547,84 @@ const ChatPage: React.FC = () => {
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div
+              style={{
+                borderRadius: 14,
+                border: '1px solid rgba(22,119,255,0.18)',
+                background: 'rgba(22,119,255,0.06)',
+                padding: 12,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <SearchOutlined style={{ color: '#1677ff' }} />
+                <Text style={{ fontSize: 13, fontWeight: 700, color: 'var(--lm-text)' }}>
+                  精确查日志
+                </Text>
+                <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>
+                  先按条件搜索，再让 AI 基于结果分析
+                </Text>
+              </div>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: isMobile
+                    ? '1fr'
+                    : 'minmax(180px, 1.2fr) 130px minmax(180px, 1.4fr) 120px 92px 104px',
+                  gap: 10,
+                  alignItems: 'center',
+                }}
+              >
+                <Select
+                  showSearch
+                  allowClear
+                  value={exactSearch.serviceName || undefined}
+                  onChange={(value) => updateExactSearchValue('serviceName', value || '')}
+                  placeholder="选择业务线"
+                  optionFilterProp="label"
+                  options={businessLines.map((item) => ({ value: item.name, label: item.name }))}
+                  disabled={sending}
+                />
+                <Select
+                  value={exactSearch.timeRange}
+                  onChange={(value) => updateExactSearchValue('timeRange', value)}
+                  options={SEARCH_TIME_OPTIONS}
+                  disabled={sending}
+                />
+                <Input
+                  value={exactSearch.keyword}
+                  onChange={(event) => updateExactSearchValue('keyword', event.target.value)}
+                  onPressEnter={(event) => {
+                    if (event.shiftKey) return;
+                    event.preventDefault();
+                    sendExactSearch();
+                  }}
+                  placeholder="关键词 / 订单号 / traceId"
+                  disabled={sending}
+                />
+                <Select
+                  value={exactSearch.severity}
+                  onChange={(value) => updateExactSearchValue('severity', value as ExactSearchValues['severity'])}
+                  options={SEARCH_SEVERITY_OPTIONS}
+                  disabled={sending}
+                />
+                <Input
+                  value={exactSearch.size}
+                  onChange={(event) => updateExactSearchValue('size', event.target.value.replace(/\D/g, '').slice(0, 4))}
+                  placeholder="条数"
+                  disabled={sending}
+                />
+                <Button
+                  type="primary"
+                  icon={<SearchOutlined />}
+                  onClick={sendExactSearch}
+                  disabled={sending}
+                  style={{ borderRadius: 10 }}
+                >
+                  查日志
+                </Button>
+              </div>
+            </div>
+
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {smartRecommendations.slice(0, 6).map((item) => (
                 <div

@@ -114,6 +114,46 @@ def test_direct_log_search_intent_extracts_csharp_keyword_and_export():
     assert intent["wants_export"] is True
 
 
+def test_direct_log_search_intent_extracts_compact_service_time_keyword_query():
+    service = ChatService()
+    biz = SimpleNamespace(
+        id="biz-1",
+        name="auth-service",
+        es_index_pattern=".ds-master-auth-service.gyyx.cn-*",
+        is_active=True,
+    )
+
+    intent = service._extract_direct_log_search_intent(
+        "查 auth-service 最近30分钟 timeout 返回200条",
+        [biz],
+    )
+
+    assert intent is not None
+    assert intent["service_name"] == "auth-service"
+    assert intent["keyword"] == "timeout"
+    assert intent["lookback_seconds"] == 1800
+    assert intent["size"] == 200
+
+
+def test_direct_log_search_intent_does_not_use_service_and_time_as_keyword():
+    service = ChatService()
+    biz = SimpleNamespace(
+        id="biz-1",
+        name="payment-core",
+        es_index_pattern=".ds-master-payment-core.gyyx.cn-*",
+        is_active=True,
+    )
+
+    intent = service._extract_direct_log_search_intent(
+        "查询 payment-core 最近3小时 数据库连接失败",
+        [biz],
+    )
+
+    assert intent is not None
+    assert intent["keyword"] == "数据库连接失败"
+    assert intent["lookback_seconds"] == 10800
+
+
 def test_extract_order_ids_from_csharp_log_message():
     service = ChatService()
 
