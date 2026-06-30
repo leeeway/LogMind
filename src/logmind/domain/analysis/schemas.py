@@ -32,6 +32,10 @@ class AnalysisResultResponse(BaseSchema):
     severity: str
     confidence_score: float
     structured_data: str
+    source_log_refs: str = "[]"
+    evidence_summary: list[dict] = Field(default_factory=list)
+    root_cause_candidates: list[dict] = Field(default_factory=list)
+    next_verifications: list[str] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -101,4 +105,3 @@ class TaskTraceResponse(BaseSchema):
     stages: list[StageMetric]
     tool_calls: list[ToolCallRecord]
     errors: list[str] = Field(default_factory=list)
-

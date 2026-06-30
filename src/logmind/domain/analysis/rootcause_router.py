@@ -6,12 +6,13 @@ and builds a directed acyclic graph for visualization.
 """
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
+from logmind.domain.analysis.evidence import build_root_cause_evidence
 
 logger = get_logger(__name__)
 
@@ -25,18 +26,131 @@ class GraphNode(BaseModel):
     service: str
     timestamp: str
     detail: str
+    node_type: str = "finding"
+    score: float = 0.0
+    evidence_count: int = 0
 
 
 class GraphEdge(BaseModel):
     source: str
     target: str
     relation: str  # 触发 / 导致 / 关联
+    confidence: float = 0.0
+
+
+class EvidenceItem(BaseModel):
+    id: str
+    kind: str
+    title: str
+    detail: str
+    service: str = ""
+    severity: str = "info"
+    timestamp: str = ""
+    score: float = 0.0
+    source: str = ""
+    log_refs: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
+
+
+class RootCauseCandidate(BaseModel):
+    id: str
+    title: str
+    service: str = ""
+    reason: str
+    severity: str = "info"
+    score: float = 0.0
+    confidence: float = 0.0
+    evidence_refs: list[str] = Field(default_factory=list)
+    next_verifications: list[str] = Field(default_factory=list)
 
 
 class RootCauseResponse(BaseModel):
     task_id: str
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    candidates: list[RootCauseCandidate] = Field(default_factory=list)
+    next_verifications: list[str] = Field(default_factory=list)
+
+
+def build_rootcause_graph(task_id: str, results: list[AnalysisResult]) -> RootCauseResponse:
+    """Build graph data from persisted analysis results and derived evidence."""
+    summary = build_root_cause_evidence(results)
+    evidence_items = [EvidenceItem(**item) for item in summary["evidence"]]
+    candidates = [RootCauseCandidate(**item) for item in summary["candidates"]]
+
+    nodes: list[GraphNode] = []
+    edges: list[GraphEdge] = []
+
+    for candidate in candidates:
+        nodes.append(GraphNode(
+            id=candidate.id,
+            label=candidate.title[:80],
+            severity=candidate.severity,
+            service=candidate.service,
+            timestamp="",
+            detail=candidate.reason,
+            node_type="candidate",
+            score=candidate.score,
+            evidence_count=len(candidate.evidence_refs),
+        ))
+
+    evidence_ids = {item.id for item in evidence_items}
+    for item in evidence_items:
+        nodes.append(GraphNode(
+            id=item.id,
+            label=item.title[:80],
+            severity=item.severity,
+            service=item.service,
+            timestamp=item.timestamp,
+            detail=item.detail,
+            node_type=item.kind,
+            score=item.score,
+            evidence_count=len(item.log_refs),
+        ))
+
+    for candidate in candidates:
+        for evidence_id in candidate.evidence_refs:
+            if evidence_id not in evidence_ids:
+                continue
+            edges.append(GraphEdge(
+                source=evidence_id,
+                target=candidate.id,
+                relation="支撑",
+                confidence=candidate.score,
+            ))
+
+    # Fallback for very old summary-only results with no candidates/evidence.
+    if not nodes:
+        node_ids: set[str] = set()
+        for i, result in enumerate(results):
+            node_id = f"result_{result.id[:8]}"
+            if node_id in node_ids:
+                continue
+            node_ids.add(node_id)
+            nodes.append(GraphNode(
+                id=node_id,
+                label=(result.content or "")[:80],
+                severity=result.severity or "info",
+                service=result.result_type or "",
+                timestamp=result.created_at.isoformat() if result.created_at else "",
+                detail=(result.content or "")[:200],
+                node_type="finding",
+                score=float(result.confidence_score or 0),
+            ))
+            if i > 0:
+                prev_id = f"result_{results[i - 1].id[:8]}"
+                if prev_id in node_ids:
+                    edges.append(GraphEdge(source=prev_id, target=node_id, relation="关联"))
+
+    return RootCauseResponse(
+        task_id=task_id,
+        nodes=nodes,
+        edges=edges,
+        evidence=evidence_items,
+        candidates=candidates,
+        next_verifications=summary["next_verifications"],
+    )
 
 
 @router.get("/{task_id}/rootcause-chain", response_model=RootCauseResponse)
@@ -70,62 +184,4 @@ async def get_rootcause_chain(
     result = await session.execute(stmt)
     results = result.scalars().all()
 
-    if not results:
-        return RootCauseResponse(task_id=task_id, nodes=[], edges=[])
-
-    # Build graph from analysis results
-    nodes: list[GraphNode] = []
-    edges: list[GraphEdge] = []
-    node_ids: set[str] = set()
-
-    for i, r in enumerate(results):
-        node_id = f"result_{r.id[:8]}"
-        if node_id in node_ids:
-            continue
-        node_ids.add(node_id)
-
-        # Parse structured_data for cause-effect hints
-        detail = ""
-        causes: list[str] = []
-        if isinstance(r.structured_data, dict):
-            detail = r.structured_data.get("root_cause", "")
-            # Extract mentioned services from cross-service analysis
-            upstream = r.structured_data.get("upstream_service", "")
-            if upstream:
-                causes.append(upstream)
-
-        nodes.append(GraphNode(
-            id=node_id,
-            label=(r.content or "")[:80],
-            severity=r.severity or "info",
-            service=r.result_type or "",
-            timestamp=r.created_at.isoformat() if r.created_at else "",
-            detail=detail or (r.content or "")[:200],
-        ))
-
-        # Link sequential results (temporal causation)
-        if i > 0:
-            prev_id = f"result_{results[i - 1].id[:8]}"
-            if prev_id in node_ids:
-                # Determine relation based on severity escalation
-                prev_sev = results[i - 1].severity or "info"
-                curr_sev = r.severity or "info"
-                sev_order = {"info": 0, "warning": 1, "critical": 2}
-                if sev_order.get(curr_sev, 0) > sev_order.get(prev_sev, 0):
-                    relation = "导致"
-                elif causes:
-                    relation = "触发"
-                else:
-                    relation = "关联"
-
-                edges.append(GraphEdge(
-                    source=prev_id,
-                    target=node_id,
-                    relation=relation,
-                ))
-
-    return RootCauseResponse(
-        task_id=task_id,
-        nodes=nodes,
-        edges=edges,
-    )
+    return build_rootcause_graph(task_id, list(results))

@@ -85,6 +85,27 @@ class AnalysisResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Relationships
     task = relationship("LogAnalysisTask", back_populates="results")
 
+    @property
+    def evidence_summary(self) -> list[dict]:
+        """Derived evidence items for API responses."""
+        from logmind.domain.analysis.evidence import build_root_cause_evidence
+
+        return build_root_cause_evidence([self])["evidence"]
+
+    @property
+    def root_cause_candidates(self) -> list[dict]:
+        """Derived root-cause candidates for API responses."""
+        from logmind.domain.analysis.evidence import build_root_cause_evidence
+
+        return build_root_cause_evidence([self])["candidates"]
+
+    @property
+    def next_verifications(self) -> list[str]:
+        """Suggested verification steps derived from structured analysis data."""
+        from logmind.domain.analysis.evidence import build_root_cause_evidence
+
+        return build_root_cause_evidence([self])["next_verifications"]
+
 
 class AgentToolCall(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
@@ -114,4 +135,3 @@ class AgentToolCall(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Relationships
     task = relationship("LogAnalysisTask", back_populates="tool_calls")
-

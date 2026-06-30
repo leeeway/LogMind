@@ -1,21 +1,62 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Card, Spin, Empty, Tag, Space, Typography, Tooltip } from 'antd';
-import { ApartmentOutlined } from '@ant-design/icons';
+import { Spin, Empty, Tag, Space, Typography, Tooltip } from 'antd';
+import { AimOutlined, LinkOutlined } from '@ant-design/icons';
 import client from '@/api/client';
 
 const { Text } = Typography;
 
-interface GNode { id: string; label: string; severity: string; service: string; timestamp: string; detail: string; }
-interface GEdge { source: string; target: string; relation: string; }
+interface GNode {
+  id: string;
+  label: string;
+  severity: string;
+  service: string;
+  timestamp: string;
+  detail: string;
+  node_type?: string;
+  score?: number;
+  evidence_count?: number;
+}
+interface GEdge { source: string; target: string; relation: string; confidence?: number; }
+interface Candidate {
+  id: string;
+  title: string;
+  service: string;
+  reason: string;
+  severity: string;
+  score: number;
+  evidence_refs: string[];
+  next_verifications: string[];
+}
+interface Evidence {
+  id: string;
+  kind: string;
+  title: string;
+  detail: string;
+  service: string;
+  severity: string;
+  log_refs: string[];
+}
 
 const sevColor: Record<string, string> = { critical: '#ff4d4f', warning: '#faad14', info: '#1677ff' };
-const relColor: Record<string, string> = { '触发': '#ff4d4f', '导致': '#faad14', '关联': '#1677ff' };
+const relColor: Record<string, string> = { '触发': '#ff4d4f', '导致': '#faad14', '关联': '#1677ff', '支撑': '#52c41a' };
+const nodeTypeLabels: Record<string, string> = {
+  candidate: '候选',
+  log_sample: '日志',
+  change_point: '变点',
+  cross_service: '跨服务',
+  history_match: '历史',
+  regression: '回归',
+  ai_finding: '发现',
+};
 
 interface Props { taskId: string; }
 
 const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
   const [nodes, setNodes] = useState<GNode[]>([]);
   const [edges, setEdges] = useState<GEdge[]>([]);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [evidence, setEvidence] = useState<Evidence[]>([]);
+  const [nextVerifications, setNextVerifications] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [hovered, setHovered] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -28,6 +69,9 @@ const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
         const res = await client.get(`/analysis/${taskId}/rootcause-chain`);
         setNodes(res.data?.nodes || []);
         setEdges(res.data?.edges || []);
+        setCandidates(res.data?.candidates || []);
+        setEvidence(res.data?.evidence || []);
+        setNextVerifications(res.data?.next_verifications || []);
       } catch { /* ignore */ }
       setLoading(false);
     };
@@ -50,7 +94,6 @@ const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
     // Calculate node positions (left-to-right timeline layout)
     const nodeMap: Record<string, { x: number; y: number; node: GNode }> = {};
     const paddingX = 100;
-    const paddingY = 50;
     const stepX = (W - paddingX * 2) / Math.max(nodes.length - 1, 1);
     const centerY = H / 2;
 
@@ -127,10 +170,11 @@ const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
 
       // Draw nodes
       Object.values(nodeMap).forEach(({ x, y, node }) => {
-        const color = sevColor[node.severity] || '#1677ff';
+        const isCandidate = node.node_type === 'candidate';
+        const color = isCandidate ? '#52c41a' : sevColor[node.severity] || '#1677ff';
         const isHov = hovered === node.id;
         const breathe = Math.sin(timeRef.current * 2) * 0.15 + 0.85;
-        const radius = isHov ? 28 : 22;
+        const radius = isCandidate ? (isHov ? 34 : 28) : (isHov ? 28 : 22);
 
         // Glow
         ctx.shadowColor = color;
@@ -139,7 +183,7 @@ const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
         // Circle
         ctx.beginPath();
         ctx.arc(x, y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = color + (isHov ? 'dd' : '88');
+        ctx.fillStyle = color + (isHov ? 'dd' : isCandidate ? 'aa' : '88');
         ctx.fill();
 
         // Border
@@ -154,11 +198,19 @@ const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = '#fff';
-        const label = node.label.length > 12 ? node.label.slice(0, 11) + '…' : node.label;
+        const label = node.label.length > (isCandidate ? 14 : 12)
+          ? node.label.slice(0, isCandidate ? 13 : 11) + '…'
+          : node.label;
         ctx.fillText(label, x, y);
 
+        if (isCandidate && node.score) {
+          ctx.font = '9px monospace';
+          ctx.fillStyle = 'rgba(255,255,255,0.75)';
+          ctx.fillText(`${Math.round(node.score * 100)}%`, x, y + radius + 14);
+        }
+
         // Timestamp below
-        if (node.timestamp) {
+        if (node.timestamp && !isCandidate) {
           ctx.font = '9px monospace';
           ctx.fillStyle = 'rgba(255,255,255,0.4)';
           ctx.fillText(
@@ -213,6 +265,7 @@ const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
         ))}
         <div style={{ flex: 1 }} />
         <Tag color="blue">{nodes.length} 节点 · {edges.length} 关系</Tag>
+        {candidates.length > 0 && <Tag color="green">{candidates.length} 候选</Tag>}
       </div>
       <canvas
         ref={canvasRef}
@@ -233,10 +286,73 @@ const RootCauseGraph: React.FC<Props> = ({ taskId }) => {
             animation: 'lm-fadeSlideIn 0.2s ease-out',
           }}>
             <Tag color={sevColor[n.severity]} style={{ borderRadius: 3 }}>{n.severity}</Tag>
+            <Tag style={{ borderRadius: 3 }}>{nodeTypeLabels[n.node_type || ''] || n.node_type || '发现'}</Tag>
+            {n.score != null && <Tag color="green" style={{ borderRadius: 3 }}>评分 {Math.round(n.score * 100)}%</Tag>}
             <Text style={{ color: 'var(--lm-text)' }}>{n.detail}</Text>
           </div>
         );
       })()}
+      {(candidates.length > 0 || evidence.length > 0) && (
+        <div style={{
+          marginTop: 12, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+          gap: 12,
+        }}>
+          <div style={{
+            padding: 12, borderRadius: 8,
+            background: 'var(--lm-bg-elevated)', border: '1px solid var(--lm-border-light)',
+          }}>
+            <Space size={6} style={{ marginBottom: 8 }}>
+              <AimOutlined style={{ color: '#52c41a' }} />
+              <Text style={{ color: 'var(--lm-text-secondary)', fontSize: 12, fontWeight: 600 }}>候选根因</Text>
+            </Space>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {candidates.slice(0, 4).map(candidate => (
+                <Tooltip key={candidate.id} title={candidate.reason}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                    <Tag color={sevColor[candidate.severity] || 'green'} style={{ borderRadius: 4, flexShrink: 0 }}>
+                      {Math.round(candidate.score * 100)}%
+                    </Tag>
+                    <Text style={{ color: 'var(--lm-text)', fontSize: 12 }} ellipsis>
+                      {candidate.service || candidate.title}
+                    </Text>
+                    <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 11, flexShrink: 0 }}>
+                      {candidate.evidence_refs?.length || 0} 证据
+                    </Text>
+                  </div>
+                </Tooltip>
+              ))}
+            </div>
+          </div>
+          <div style={{
+            padding: 12, borderRadius: 8,
+            background: 'var(--lm-bg-elevated)', border: '1px solid var(--lm-border-light)',
+          }}>
+            <Space size={6} style={{ marginBottom: 8 }}>
+              <LinkOutlined style={{ color: '#1677ff' }} />
+              <Text style={{ color: 'var(--lm-text-secondary)', fontSize: 12, fontWeight: 600 }}>证据与验证</Text>
+            </Space>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {evidence.slice(0, 8).map(item => (
+                <Tooltip key={item.id} title={item.detail}>
+                  <Tag style={{ borderRadius: 4 }}>
+                    {nodeTypeLabels[item.kind] || item.kind}
+                    {item.service ? ` · ${item.service}` : ''}
+                  </Tag>
+                </Tooltip>
+              ))}
+            </div>
+            {nextVerifications.length > 0 && (
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {nextVerifications.slice(0, 3).map(item => (
+                  <Text key={item} style={{ color: 'var(--lm-text-secondary)', fontSize: 12 }} ellipsis>
+                    {item}
+                  </Text>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Card, Tag, Typography, Space, Button, Spin, Descriptions, List, message, Tooltip, Tabs, Dropdown } from 'antd';
-import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined, FileTextOutlined, FilePdfOutlined, FieldTimeOutlined, ApartmentOutlined } from '@ant-design/icons';
+import { Card, Tag, Typography, Space, Button, Spin, Descriptions, List, message, Tooltip, Dropdown } from 'antd';
+import { ArrowLeftOutlined, LikeOutlined, DislikeOutlined, NodeIndexOutlined, ToolOutlined, CopyOutlined, DownloadOutlined, ReloadOutlined, LoadingOutlined, FileTextOutlined, FieldTimeOutlined, ApartmentOutlined, AimOutlined, LinkOutlined, CheckCircleOutlined } from '@ant-design/icons';
 import { analysisApi } from '@/api/analysis';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -9,10 +9,29 @@ import IncidentTimeline from '@/components/IncidentTimeline';
 import RootCauseGraph from '@/components/RootCauseGraph';
 import dayjs from 'dayjs';
 
-const { Title, Text, Paragraph } = Typography;
+const { Title, Text } = Typography;
 
 const severityColors: Record<string, string> = { critical: '#ff4d4f', warning: '#faad14', info: '#1677ff' };
 const statusColors: Record<string, string> = { completed: '#52c41a', running: '#1677ff', failed: '#ff4d4f', pending: '#8c8c8c' };
+const evidenceKindLabels: Record<string, string> = {
+  log_sample: '日志证据',
+  change_point: '变点',
+  cross_service: '跨服务',
+  history_match: '历史命中',
+  regression: '回归',
+  ai_finding: 'AI 发现',
+};
+
+const parseJsonList = (value: any): any[] => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
 
 const TaskDetail: React.FC = () => {
   const { taskId } = useParams();
@@ -20,6 +39,7 @@ const TaskDetail: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [task, setTask] = useState<any>(null);
   const [trace, setTrace] = useState<any>(null);
+  const [rootCause, setRootCause] = useState<any>(null);
   const [activeResultTab, setActiveResultTab] = useState('all');
 
   const load = useCallback(async () => {
@@ -32,6 +52,8 @@ const TaskDetail: React.FC = () => {
       ]);
       setTask(taskRes.data);
       setTrace(traceRes.data);
+      const rootCauseRes = await analysisApi.getRootcauseChain(taskId).catch(() => ({ data: null }));
+      setRootCause(rootCauseRes.data);
     } catch (err) {
       console.error(err);
     } finally {
@@ -248,61 +270,183 @@ const TaskDetail: React.FC = () => {
       >
         <List
           dataSource={filteredResults}
-          renderItem={(result: any, idx: number) => (
-            <List.Item
-              style={{ padding: '16px 0', borderBottom: '1px solid var(--lm-border-light)' }}
-              actions={[
-                <Tooltip title="复制内容">
-                  <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(result.content)} />
-                </Tooltip>,
-                <Tooltip title="分析准确">
-                  <Button size="small" icon={<LikeOutlined />} onClick={() => handleFeedback(result.id, 1)} />
-                </Tooltip>,
-                <Tooltip title="分析不准">
-                  <Button size="small" icon={<DislikeOutlined />} onClick={() => handleFeedback(result.id, -1)} />
-                </Tooltip>,
-              ]}
-            >
-              <List.Item.Meta
-                title={
-                  <Space>
-                    <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 12 }}>#{idx + 1}</Text>
-                    <Tag color={severityColors[result.severity]} style={{ borderRadius: 4 }}>{result.severity}</Tag>
-                    <Tag style={{ borderRadius: 4 }}>{result.result_type}</Tag>
-                    <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>
-                      置信度: <span style={{ color: result.confidence_score >= 0.8 ? '#52c41a' : result.confidence_score >= 0.5 ? '#faad14' : '#ff4d4f' }}>
-                        {(result.confidence_score * 100).toFixed(0)}%
-                      </span>
-                    </Text>
-                  </Space>
-                }
-                description={
-                  <>
-                    <div className="lm-markdown-content" style={{ margin: '8px 0 0', fontSize: 13, lineHeight: 1.7 }}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.content}</ReactMarkdown>
-                    </div>
-                    {result.structured_data && result.structured_data !== '{}' && (
-                      <details style={{ marginTop: 8 }}>
-                        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--lm-text-tertiary)' }}>结构化数据</summary>
-                        <pre style={{
-                          marginTop: 6, padding: 10, fontSize: 11,
-                          background: 'var(--lm-bg-layout)', borderRadius: 6,
-                          color: 'var(--lm-text-secondary)', overflow: 'auto', maxHeight: 200,
+          renderItem={(result: any, idx: number) => {
+            const sourceRefs = parseJsonList(result.source_log_refs);
+            const evidence = result.evidence_summary || [];
+            const candidates = result.root_cause_candidates || [];
+            const verifications = result.next_verifications || [];
+            return (
+              <List.Item
+                style={{ padding: '16px 0', borderBottom: '1px solid var(--lm-border-light)' }}
+                actions={[
+                  <Tooltip title="复制内容">
+                    <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(result.content)} />
+                  </Tooltip>,
+                  <Tooltip title="分析准确">
+                    <Button size="small" icon={<LikeOutlined />} onClick={() => handleFeedback(result.id, 1)} />
+                  </Tooltip>,
+                  <Tooltip title="分析不准">
+                    <Button size="small" icon={<DislikeOutlined />} onClick={() => handleFeedback(result.id, -1)} />
+                  </Tooltip>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <Space wrap>
+                      <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 12 }}>#{idx + 1}</Text>
+                      <Tag color={severityColors[result.severity]} style={{ borderRadius: 4 }}>{result.severity}</Tag>
+                      <Tag style={{ borderRadius: 4 }}>{result.result_type}</Tag>
+                      <Text style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>
+                        置信度: <span style={{ color: result.confidence_score >= 0.8 ? '#52c41a' : result.confidence_score >= 0.5 ? '#faad14' : '#ff4d4f' }}>
+                          {(result.confidence_score * 100).toFixed(0)}%
+                        </span>
+                      </Text>
+                      {sourceRefs.length > 0 && <Tag icon={<LinkOutlined />} color="processing" style={{ borderRadius: 4 }}>日志 {sourceRefs.length}</Tag>}
+                    </Space>
+                  }
+                  description={
+                    <>
+                      <div className="lm-markdown-content" style={{ margin: '8px 0 0', fontSize: 13, lineHeight: 1.7 }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.content}</ReactMarkdown>
+                      </div>
+
+                      {(candidates.length > 0 || evidence.length > 0 || verifications.length > 0) && (
+                        <div style={{
+                          marginTop: 10, padding: 10, borderRadius: 8,
+                          background: 'var(--lm-bg-elevated)', border: '1px solid var(--lm-border-light)',
                         }}>
-                          {typeof result.structured_data === 'string'
-                            ? JSON.stringify(JSON.parse(result.structured_data), null, 2)
-                            : JSON.stringify(result.structured_data, null, 2)}
-                        </pre>
-                      </details>
-                    )}
-                  </>
-                }
-              />
-            </List.Item>
-          )}
+                          {candidates.length > 0 && (
+                            <div style={{ marginBottom: 8 }}>
+                              <Text style={{ fontSize: 12, color: 'var(--lm-text-secondary)', fontWeight: 600 }}>
+                                <AimOutlined /> 根因候选
+                              </Text>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                                {candidates.slice(0, 3).map((item: any) => (
+                                  <Tooltip key={item.id || item.title} title={item.reason}>
+                                    <Tag color={severityColors[item.severity] || 'blue'} style={{ borderRadius: 4 }}>
+                                      {item.service || item.title} · {(item.score * 100).toFixed(0)}%
+                                    </Tag>
+                                  </Tooltip>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {evidence.length > 0 && (
+                            <div style={{ marginBottom: 8 }}>
+                              <Text style={{ fontSize: 12, color: 'var(--lm-text-secondary)', fontWeight: 600 }}>
+                                <LinkOutlined /> 证据摘要
+                              </Text>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                                {evidence.slice(0, 5).map((item: any) => (
+                                  <Tooltip key={item.id || item.title} title={item.detail}>
+                                    <Tag style={{ borderRadius: 4 }}>
+                                      {evidenceKindLabels[item.kind] || item.kind}
+                                      {item.service ? ` · ${item.service}` : ''}
+                                    </Tag>
+                                  </Tooltip>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {verifications.length > 0 && (
+                            <div>
+                              <Text style={{ fontSize: 12, color: 'var(--lm-text-secondary)', fontWeight: 600 }}>
+                                <CheckCircleOutlined /> 下一步验证
+                              </Text>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                                {verifications.slice(0, 4).map((item: string) => (
+                                  <Tag key={item} color="green" style={{ borderRadius: 4 }}>{item}</Tag>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {sourceRefs.length > 0 && (
+                        <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {sourceRefs.slice(0, 8).map((ref: string) => (
+                            <Tag key={ref} style={{ borderRadius: 4, fontFamily: 'monospace', fontSize: 11 }}>{ref}</Tag>
+                          ))}
+                        </div>
+                      )}
+
+                      {result.structured_data && result.structured_data !== '{}' && (
+                        <details style={{ marginTop: 8 }}>
+                          <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--lm-text-tertiary)' }}>结构化数据</summary>
+                          <pre style={{
+                            marginTop: 6, padding: 10, fontSize: 11,
+                            background: 'var(--lm-bg-layout)', borderRadius: 6,
+                            color: 'var(--lm-text-secondary)', overflow: 'auto', maxHeight: 200,
+                          }}>
+                            {typeof result.structured_data === 'string'
+                              ? JSON.stringify(JSON.parse(result.structured_data), null, 2)
+                              : JSON.stringify(result.structured_data, null, 2)}
+                          </pre>
+                        </details>
+                      )}
+                    </>
+                  }
+                />
+              </List.Item>
+            );
+          }}
           locale={{ emptyText: '暂无分析结果' }}
         />
       </Card>
+
+      {task.status === 'completed' && rootCause && (rootCause.candidates?.length > 0 || rootCause.evidence?.length > 0) && (
+        <Card
+          title={<Space><AimOutlined /> 定位证据</Space>}
+          size="small"
+          style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12, marginTop: 16 }}
+          styles={{ header: { borderBottom: '1px solid var(--lm-border-light)' } }}
+        >
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 0.9fr)', gap: 16 }}>
+            <div>
+              <Text style={{ color: 'var(--lm-text-secondary)', fontSize: 12, fontWeight: 600 }}>候选根因</Text>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+                {rootCause.candidates?.slice(0, 5).map((candidate: any) => (
+                  <div key={candidate.id} style={{
+                    padding: '10px 12px', borderRadius: 8,
+                    background: 'var(--lm-bg-elevated)', border: '1px solid var(--lm-border-light)',
+                  }}>
+                    <Space wrap style={{ marginBottom: 4 }}>
+                      <Tag color={severityColors[candidate.severity] || 'blue'} style={{ borderRadius: 4 }}>{candidate.severity}</Tag>
+                      <Text strong style={{ color: 'var(--lm-text)', fontSize: 13 }}>{candidate.title}</Text>
+                      <Tag style={{ borderRadius: 4 }}>评分 {(candidate.score * 100).toFixed(0)}%</Tag>
+                      <Tag style={{ borderRadius: 4 }}>证据 {candidate.evidence_refs?.length || 0}</Tag>
+                    </Space>
+                    <div style={{ color: 'var(--lm-text-secondary)', fontSize: 12, lineHeight: 1.6 }}>{candidate.reason}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Text style={{ color: 'var(--lm-text-secondary)', fontSize: 12, fontWeight: 600 }}>证据与验证</Text>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                {rootCause.evidence?.slice(0, 10).map((item: any) => (
+                  <Tooltip key={item.id} title={item.detail}>
+                    <Tag color={item.kind === 'change_point' ? 'orange' : item.kind === 'cross_service' ? 'purple' : undefined} style={{ borderRadius: 4 }}>
+                      {evidenceKindLabels[item.kind] || item.kind}{item.service ? ` · ${item.service}` : ''}
+                    </Tag>
+                  </Tooltip>
+                ))}
+              </div>
+              {rootCause.next_verifications?.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 12 }}>
+                  {rootCause.next_verifications.slice(0, 5).map((item: string) => (
+                    <div key={item} style={{ color: 'var(--lm-text-secondary)', fontSize: 12, lineHeight: 1.5 }}>
+                      <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 6 }} />
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Running State — Agent Reasoning Animation */}
       {task.status === 'running' && (

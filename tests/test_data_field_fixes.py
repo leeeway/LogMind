@@ -10,6 +10,7 @@ Tests for _estimate_cost_usd and ResultParseStage source_log_refs.
 import json
 import pytest
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
 
 
 # ── Cost Estimation Tests ────────────────────────────────
@@ -130,6 +131,34 @@ class TestSourceLogRefs:
         result = await ResultParseStage().execute(ctx)
         refs = json.loads(result.analysis_results[0]["source_log_refs"])
         assert refs == []
+
+    def test_analysis_response_exposes_refs_and_evidence_fields(self):
+        """AnalysisResultResponse should expose log refs and derived evidence fields."""
+        from logmind.domain.analysis.models import AnalysisResult
+        from logmind.domain.analysis.schemas import AnalysisResultResponse
+
+        result = AnalysisResult(
+            id="result-001",
+            task_id="task-001",
+            result_type="root_cause",
+            content="Redis 连接池耗尽导致 AuthService 超时",
+            severity="critical",
+            confidence_score=0.92,
+            structured_data=json.dumps({
+                "root_cause": "Redis 连接池耗尽",
+                "upstream_service": "RedisCluster",
+                "next_verifications": ["检查 Redis 当前连接数"],
+            }, ensure_ascii=False),
+            source_log_refs=json.dumps(["log-1", "log-2"]),
+            created_at=datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc),
+        )
+
+        response = AnalysisResultResponse.model_validate(result)
+
+        assert json.loads(response.source_log_refs) == ["log-1", "log-2"]
+        assert response.evidence_summary[0]["kind"] == "log_sample"
+        assert response.root_cause_candidates[0]["service"] == "RedisCluster"
+        assert response.next_verifications == ["检查 Redis 当前连接数"]
 
     @pytest.mark.asyncio
     async def test_refs_normalized_and_capped(self):
