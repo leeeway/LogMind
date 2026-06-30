@@ -888,9 +888,7 @@ async def _send_pipeline_error_notification(ctx, error_message: str, webhook_url
     Send pipeline/model error notification, rate-limited via aggregator.
 
     Uses a dedicated 'pipeline_error' severity key so it doesn't interfere
-    with the normal AI alert aggregation window. The window is aligned to
-    analysis_cooldown_minutes (default 10 min) to avoid notification flooding
-    when all providers are repeatedly unavailable.
+    with the normal AI alert aggregation window.
     """
     from logmind.core.config import get_settings
     from logmind.domain.alert.aggregator import alert_aggregator

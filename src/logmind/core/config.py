@@ -44,6 +44,18 @@ class Settings(BaseSettings):
             return "mysql"
         return "postgresql"
 
+    @property
+    def effective_patrol_interval_minutes(self) -> int:
+        return self.analysis_patrol_interval_minutes
+
+    @property
+    def effective_anomaly_window_minutes(self) -> int:
+        return self.analysis_anomaly_window_minutes
+
+    @property
+    def effective_lookback_minutes(self) -> int:
+        return self.analysis_lookback_minutes
+
     # ── Redis ────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
 
@@ -85,7 +97,10 @@ class Settings(BaseSettings):
     analysis_severity_threshold: str = "error"
     analysis_max_logs_per_task: int = 500
     analysis_daily_task_limit: int = 100
-    analysis_cooldown_minutes: int = 10
+    analysis_cooldown_minutes: int = 5  # Legacy name; use analysis_patrol_interval_minutes
+    analysis_patrol_interval_minutes: int = 5
+    analysis_anomaly_window_minutes: int = 5
+    analysis_lookback_minutes: int = 10
     pipeline_error_cooldown_minutes: int = 240
     analysis_fingerprint_enabled: bool = True
     analysis_fingerprint_ttl_hours: int = 6
@@ -122,6 +137,18 @@ class Settings(BaseSettings):
         if v.lower() not in allowed:
             raise ValueError(f"severity must be one of {allowed}")
         return v.lower()
+
+    @field_validator(
+        "analysis_cooldown_minutes",
+        "analysis_patrol_interval_minutes",
+        "analysis_anomaly_window_minutes",
+        "analysis_lookback_minutes",
+    )
+    @classmethod
+    def validate_positive_minutes(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("minute settings must be greater than 0")
+        return v
 
     @field_validator("secret_key", "jwt_secret_key", "encryption_key")
     @classmethod

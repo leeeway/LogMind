@@ -50,7 +50,7 @@ async def _dispatch_patrols():
 
     settings = get_settings()
     now = datetime.now(timezone.utc)
-    cooldown = timedelta(minutes=settings.analysis_cooldown_minutes)
+    cooldown = timedelta(minutes=settings.effective_patrol_interval_minutes)
 
     dispatched = 0
     skipped = 0
@@ -141,7 +141,7 @@ async def _patrol_single(business_line_id: str):
         # ── Anomaly Detection Pre-filter ─────────────────
         anomaly = await anomaly_detector.detect(
             index_pattern=biz.es_index_pattern,
-            window_minutes=settings.analysis_cooldown_minutes,
+            window_minutes=settings.effective_anomaly_window_minutes,
             severity_threshold=biz.severity_threshold,
         )
 
@@ -161,7 +161,7 @@ async def _patrol_single(business_line_id: str):
                 business_line_id=biz.id,
                 task_type="scheduled",
                 status="pending",
-                time_from=now - timedelta(minutes=settings.analysis_cooldown_minutes),
+                time_from=now - timedelta(minutes=settings.effective_lookback_minutes),
                 time_to=now,
                 query_params="{}",
             )

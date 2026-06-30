@@ -41,6 +41,18 @@ class Settings(BaseSettings):
             return "mysql"
         return "postgresql"
 
+    @property
+    def effective_patrol_interval_minutes(self) -> int:
+        return self.analysis_patrol_interval_minutes
+
+    @property
+    def effective_anomaly_window_minutes(self) -> int:
+        return self.analysis_anomaly_window_minutes
+
+    @property
+    def effective_lookback_minutes(self) -> int:
+        return self.analysis_lookback_minutes
+
     # ── Redis ────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
 
@@ -82,7 +94,10 @@ class Settings(BaseSettings):
     analysis_severity_threshold: str = "error"
     analysis_max_logs_per_task: int = 500
     analysis_daily_task_limit: int = 100
-    analysis_cooldown_minutes: int = 10
+    analysis_cooldown_minutes: int = 5  # Legacy name; use analysis_patrol_interval_minutes
+    analysis_patrol_interval_minutes: int = 5
+    analysis_anomaly_window_minutes: int = 5
+    analysis_lookback_minutes: int = 10
 
     @field_validator("analysis_severity_threshold")
     @classmethod

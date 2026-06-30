@@ -49,11 +49,11 @@ celery_app.autodiscover_tasks([
 
 # ── Beat Schedule (定时任务) ──────────────────────────────
 celery_app.conf.beat_schedule = {
-    # Scheduled log patrol — runs every 10 minutes by default
+    # Scheduled log patrol — runs every 5 minutes by default
     # Only analyzes ERROR/CRITICAL severity to control AI costs
     "scheduled-log-patrol": {
         "task": "logmind.domain.alert.tasks.scheduled_log_patrol",
-        "schedule": crontab(minute=f"*/{settings.analysis_cooldown_minutes}"),
+        "schedule": crontab(minute=f"*/{settings.effective_patrol_interval_minutes}"),
         "options": {"queue": "alert"},
     },
     # Cleanup old analysis tasks — daily at 3 AM

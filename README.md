@@ -543,7 +543,10 @@ LogMind 内置多层 Token 消耗控制机制，通过 `.env` 配置：
 | 环境变量 | 默认值 | 说明 |
 |---------|--------|------|
 | `ANALYSIS_MAX_LOGS_PER_TASK` | `500` | 单次分析最大抓取日志数 |
-| `ANALYSIS_COOLDOWN_MINUTES` | `30` | 同一业务线两次自动巡检最小间隔（分钟） |
+| `ANALYSIS_PATROL_INTERVAL_MINUTES` | `5` | 同一业务线自动巡检最小间隔（分钟） |
+| `ANALYSIS_ANOMALY_WINDOW_MINUTES` | `5` | Z-Score 异常检测的实时窗口（分钟） |
+| `ANALYSIS_LOOKBACK_MINUTES` | `10` | 触发分析后抓取日志的回看窗口（分钟） |
+| `ANALYSIS_COOLDOWN_MINUTES` | `5` | 旧配置名保留项，巡检窗口请使用上面 3 个拆分配置 |
 | `ANALYSIS_FINGERPRINT_ENABLED` | `true` | 是否启用 Layer 1 MD5 指纹去重 |
 | `ANALYSIS_FINGERPRINT_TTL_HOURS` | `6` | MD5 指纹缓存 TTL（小时） |
 | `ANALYSIS_SEMANTIC_DEDUP_ENABLED` | `true` | 🆕 是否启用 Layer 2 向量语义去重 |
