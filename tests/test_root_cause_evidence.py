@@ -79,3 +79,70 @@ def test_rootcause_graph_parses_persisted_structured_json():
     assert "数据库连接池耗尽" in graph.nodes[0].detail
     assert graph.evidence[0].log_refs == ["log-db-1"]
     assert graph.next_verifications == ["查看数据库连接池活跃连接"]
+
+
+async def test_timeline_expands_change_point_and_cross_service_evidence(monkeypatch):
+    from logmind.domain.analysis import timeline_router
+
+    task = SimpleNamespace(
+        id="task-001",
+        tenant_id="tenant-1",
+        task_type="manual",
+        log_count=10,
+        token_usage=0,
+        cost_usd=0,
+        created_at=datetime(2026, 7, 1, 6, 0, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 7, 1, 6, 2, tzinfo=timezone.utc),
+        stage_metrics="[]",
+    )
+    result = _result(
+        structured_data=json.dumps({
+            "root_cause": "Redis 连接池耗尽",
+            "upstream_service": "RedisCluster",
+            "change_points": [{
+                "timestamp": "2026-07-01T06:01:00+00:00",
+                "before_rate": 1,
+                "after_rate": 80,
+                "z_score": 6.8,
+                "bucket_count": 80,
+            }],
+            "correlated_errors": [{
+                "service_name": "RedisCluster",
+                "direction": "upstream",
+                "error_count": 12,
+                "error_samples": ["ERR max number of clients reached"],
+            }],
+        }, ensure_ascii=False),
+        source_log_refs=json.dumps(["log-a"]),
+    )
+
+    async def fake_get_task(*_args, **_kwargs):
+        return task
+
+    async def fake_get_results(*_args, **_kwargs):
+        return [result]
+
+    class FakeScalars:
+        def all(self):
+            return []
+
+    class FakeResult:
+        def scalars(self):
+            return FakeScalars()
+
+    class FakeSession:
+        async def execute(self, _stmt):
+            return FakeResult()
+
+    monkeypatch.setattr(timeline_router.task_repo, "get_by_id", fake_get_task)
+    monkeypatch.setattr(timeline_router.result_repo, "get_all", fake_get_results)
+
+    response = await timeline_router.get_incident_timeline(
+        "task-001",
+        FakeSession(),
+        SimpleNamespace(tenant_id="tenant-1"),
+    )
+
+    event_types = {event.event_type for event in response.events}
+    assert "change_point" in event_types
+    assert "correlation" in event_types

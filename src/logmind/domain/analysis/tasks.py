@@ -42,6 +42,8 @@ _EMPTY_LOG_SUMMARY_MARKERS = (
     "... (更多日志请登录平台查看)",
 )
 _SUMMARY_WORD_RE = re.compile(r"[A-Za-z\u4e00-\u9fff]{3,}")
+_MAX_ALERT_LOCATION_SUMMARY_CHARS = 1600
+_MAX_INCIDENT_LOCATION_SUMMARY_CHARS = 1200
 
 
 @celery_app.task(
@@ -230,6 +232,130 @@ def _is_retryable_analysis_error(exc: Exception) -> bool:
                 return True
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
     return False
+
+
+def _compact_text(text: str, max_chars: int) -> str:
+    """Collapse markdown-ish text into one line and trim to a notification-safe size."""
+    compacted = re.sub(r"\s+", " ", (text or "").strip())
+    if len(compacted) <= max_chars:
+        return compacted
+    return compacted[: max_chars - 1].rstrip() + "…"
+
+
+def _analysis_entry_text(task_id: str) -> str:
+    """Return a human-facing analysis entry link, or a task id when no public URL exists."""
+    try:
+        from logmind.core.config import get_settings
+
+        base_url = (get_settings().public_app_url or "").strip().rstrip("/")
+    except Exception:
+        base_url = ""
+    if base_url:
+        return f"{base_url}/analysis/{task_id}"
+    return f"任务 {task_id}"
+
+
+def _format_evidence_item(item: dict) -> str:
+    kind = item.get("kind", "")
+    if kind == "log_sample":
+        refs = [str(ref)[:120] for ref in item.get("log_refs", []) if ref][:3]
+        if refs:
+            return f"日志引用: {', '.join(refs)}"
+    if kind == "change_point":
+        return _compact_text(f"错误率变点: {item.get('detail', '')}", 180)
+    if kind == "cross_service":
+        service = item.get("service") or item.get("title") or "关联服务"
+        return _compact_text(f"跨服务: {service} - {item.get('detail', '')}", 180)
+    if kind == "regression":
+        return _compact_text(f"回归: {item.get('detail', '')}", 180)
+    if kind == "history_match":
+        return _compact_text(f"历史命中: {item.get('detail', '')}", 180)
+    title = item.get("title") or kind or "证据"
+    detail = item.get("detail") or ""
+    return _compact_text(f"{title}: {detail}", 180)
+
+
+def _build_alert_location_summary(
+    ctx,
+    alert: dict,
+    *,
+    priority_label: str,
+    issue_label: str,
+    reason: str,
+) -> str:
+    """
+    Build a short operator-facing summary for chat/webhook alerts.
+
+    The full AI analysis remains in the task detail page; this message only keeps
+    the key facts needed for first-response triage.
+    """
+    from logmind.domain.analysis.evidence import build_root_cause_evidence
+
+    content = _compact_text(str(alert.get("content", "")), 180)
+    if not content:
+        content = "检测到日志异常，请查看分析详情。"
+
+    summary = build_root_cause_evidence([alert])
+    candidates = summary.get("candidates", [])
+    evidence = summary.get("evidence", [])
+    verifications = summary.get("next_verifications", [])
+
+    if candidates:
+        top = candidates[0]
+        service = top.get("service") or ""
+        cause_text = top.get("reason") or top.get("title") or content
+        score = top.get("score")
+        score_text = f" (评分 {float(score) * 100:.0f}%)" if isinstance(score, (int, float)) else ""
+        cause = _compact_text(
+            f"{service} - {cause_text}{score_text}" if service else f"{cause_text}{score_text}",
+            220,
+        )
+        candidate_steps = top.get("next_verifications") or []
+        if not verifications and isinstance(candidate_steps, list):
+            verifications = candidate_steps
+    else:
+        cause = _compact_text(str(alert.get("content", "")) or "待进一步确认", 220)
+
+    evidence_lines: list[str] = []
+    for item in evidence:
+        rendered = _format_evidence_item(item)
+        if rendered and rendered not in evidence_lines:
+            evidence_lines.append(rendered)
+        if len(evidence_lines) >= 3:
+            break
+    if not evidence_lines:
+        raw_refs = alert.get("source_log_refs", "[]")
+        try:
+            parsed_refs = json.loads(raw_refs) if isinstance(raw_refs, str) else raw_refs
+        except Exception:
+            parsed_refs = []
+        refs = [str(ref)[:120] for ref in parsed_refs if ref][:3] if isinstance(parsed_refs, list) else []
+        if refs:
+            evidence_lines.append(f"日志引用: {', '.join(refs)}")
+    if not evidence_lines:
+        evidence_lines.append("暂无结构化证据，建议打开分析详情查看完整上下文")
+
+    verification_lines = [_compact_text(str(step), 140) for step in verifications if step][:2]
+    if not verification_lines:
+        verification_lines.append("打开分析详情，核对原始日志、变点和关联服务上下文")
+
+    lines = [
+        f"{priority_label} {issue_label}".rstrip(),
+        f"问题: {content}",
+        f"疑似原因: {cause}",
+        "证据:",
+        *[f"- {line}" for line in evidence_lines],
+        "下一步:",
+        *[f"- {line}" for line in verification_lines],
+    ]
+    if reason:
+        lines.append(f"通知原因: {reason}")
+    lines.append(f"分析入口: {_analysis_entry_text(ctx.task_id)}")
+
+    notification = "\n".join(lines)
+    if len(notification) <= _MAX_ALERT_LOCATION_SUMMARY_CHARS:
+        return notification
+    return notification[: _MAX_ALERT_LOCATION_SUMMARY_CHARS - 1].rstrip() + "…"
 
 
 async def _execute_analysis(task_id: str):
@@ -661,7 +787,6 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
 
     for alert in ctx.alerts_fired:
         severity = alert.get("severity", "warning")
-        content = alert.get("content", "")
 
         # Prepend priority + issue status labels to alert content
         priority = ctx.priority_decision.get("priority", "P1")
@@ -681,20 +806,13 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
             issue_label = f"📋 [已知问题|第{hit_count}次] "
 
         reason = (ctx.priority_decision.get("reason") or "").strip()
-        reason_line = f"\n通知原因: {reason}" if reason else ""
-
-        log_refs_line = ""
-        raw_refs = alert.get("source_log_refs", "[]")
-        try:
-            parsed_refs = json.loads(raw_refs) if isinstance(raw_refs, str) else raw_refs
-        except Exception:
-            parsed_refs = []
-        if isinstance(parsed_refs, list):
-            log_refs = [str(ref)[:120] for ref in parsed_refs if ref][:3]
-            if log_refs:
-                log_refs_line = f"\n日志引用: {', '.join(log_refs)}"
-
-        content = f"{priority_label} {issue_label}{content}{reason_line}{log_refs_line}"
+        content = _build_alert_location_summary(
+            ctx,
+            alert,
+            priority_label=priority_label,
+            issue_label=issue_label,
+            reason=reason,
+        )
 
         # ── Storm Detection ──────────────────────────────────
         storm = alert_storm_detector.check_storm(
@@ -1121,7 +1239,10 @@ async def _auto_create_incident(
             id=str(uuid.uuid4()),
             incident_id=incident.id,
             event_type="alert",
-            content=f"🤖 AI 自动创建故障 — P0 告警触发\n\n{description[:300]}",
+            content=(
+                "🤖 AI 自动创建故障 — P0 告警触发\n\n"
+                f"{description[:_MAX_INCIDENT_LOCATION_SUMMARY_CHARS]}"
+            ),
             user="LogMind AI",
         )
         session.add(event)

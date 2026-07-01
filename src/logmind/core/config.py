@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production"] = "development"
     debug: bool = True
     secret_key: str = "change-me-in-production"
+    public_app_url: str = ""
 
     # ── Database ─────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://logmind:logmind@localhost:5432/logmind"

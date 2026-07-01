@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
+from logmind.domain.analysis.evidence import build_root_cause_evidence
 from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
 from logmind.domain.alert.models import AlertHistory
 from logmind.shared.base_repository import BaseRepository
@@ -93,7 +94,7 @@ async def get_incident_timeline(
             pass
 
     # 3. Analysis results as timeline events
-    results = await result_repo.get_all(session, filters={"task_id": task_id})
+    results = list(await result_repo.get_all(session, filters={"task_id": task_id}))
     for r in results:
         events.append(TimelineEvent(
             timestamp=r.created_at.isoformat() if hasattr(r, 'created_at') and r.created_at else "",
@@ -103,6 +104,32 @@ async def get_incident_timeline(
             description=(r.content or "")[:200],
             source="ai",
             metadata={"confidence": r.confidence_score, "result_type": r.result_type},
+        ))
+
+    task_created_at = (
+        task.created_at.isoformat()
+        if getattr(task, "created_at", None) and hasattr(task.created_at, "isoformat")
+        else ""
+    )
+    evidence_summary = build_root_cause_evidence(results)
+    for item in evidence_summary.get("evidence", []):
+        kind = item.get("kind", "")
+        if kind not in {"change_point", "cross_service"}:
+            continue
+        events.append(TimelineEvent(
+            timestamp=item.get("timestamp") or task_created_at,
+            event_type="change_point" if kind == "change_point" else "correlation",
+            severity=item.get("severity") or "info",
+            title=item.get("title") or ("错误率变点" if kind == "change_point" else "跨服务关联"),
+            description=item.get("detail") or "",
+            source=item.get("source") or kind,
+            metadata={
+                "evidence_id": item.get("id"),
+                "kind": kind,
+                "score": item.get("score", 0),
+                "service": item.get("service", ""),
+                "log_refs": item.get("log_refs", []),
+            },
         ))
 
     # 4. Related alerts in the same time window
