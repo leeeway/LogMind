@@ -122,6 +122,9 @@ class LogService:
         Compatible with both kubernetes.* and gy.* field formats.
         Language-aware severity filtering for Java and C# log formats.
         """
+        if not request.index_pattern:
+            raise ValueError("index_pattern is required")
+
         must_clauses = []
         filter_clauses = []
 

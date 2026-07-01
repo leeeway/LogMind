@@ -122,6 +122,22 @@ async def _fetch_latest_logs(
         return [], since
 
 
+async def _resolve_live_tail_index(tenant_id: str, business_line_id: str | None) -> str:
+    """Resolve a live-tail subscription to a tenant-owned business line index."""
+    from logmind.core.database import get_db_context
+    from logmind.domain.tenant.access import get_active_business_line_or_404
+
+    async with get_db_context() as session:
+        biz = await get_active_business_line_or_404(
+            session,
+            tenant_id,
+            business_line_id,
+        )
+        if not biz.es_index_pattern:
+            raise ValueError("Business line has no ES index pattern")
+        return biz.es_index_pattern
+
+
 def _extract_level(src: dict) -> str:
     """Extract log level from source."""
     filetype = (src.get("gy", {}).get("filetype", "") or "").lower()
@@ -165,9 +181,9 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
     logger.info("live_tail_connected", tenant_id=tenant_id)
 
     # State
-    index_pattern = "*"
+    index_pattern = ""
     filters: dict = {}
-    paused = False
+    paused = True
     cursor = datetime.now(timezone.utc) - timedelta(seconds=60)  # 60s lookback for Filebeat ingestion delay
     log_count = 0
     rate_window: list[int] = []
@@ -190,7 +206,19 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
                 action = msg.get("action", "")
 
                 if action == "subscribe":
-                    index_pattern = msg.get("index_pattern", "*")
+                    try:
+                        index_pattern = await _resolve_live_tail_index(
+                            tenant_id,
+                            msg.get("business_line_id"),
+                        )
+                    except Exception as e:
+                        paused = True
+                        await websocket.send_text(json.dumps({
+                            "type": "error",
+                            "message": str(e),
+                        }, ensure_ascii=False))
+                        continue
+
                     filters = msg.get("filters", {})
                     cursor = datetime.now(timezone.utc) - timedelta(seconds=60)  # 60s lookback for Filebeat delay
                     paused = False
@@ -208,11 +236,12 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
                     }))
 
                 elif action == "resume":
-                    paused = False
-                    cursor = datetime.now(timezone.utc) - timedelta(seconds=30)  # 30s for Filebeat delay
-                    await websocket.send_text(json.dumps({
-                        "type": "status", "state": "streaming", "rate": 0,
-                    }))
+                    if index_pattern:
+                        paused = False
+                        cursor = datetime.now(timezone.utc) - timedelta(seconds=30)  # 30s for Filebeat delay
+                        await websocket.send_text(json.dumps({
+                            "type": "status", "state": "streaming", "rate": 0,
+                        }))
 
             except asyncio.TimeoutError:
                 pass

@@ -100,7 +100,10 @@ async def list_tenants(
 @router.get("/{tenant_id}", response_model=TenantResponse)
 async def get_tenant(tenant_id: str, session: DBSession, user: CurrentUser):
     """Get tenant details."""
-    tenant = await tenant_repo.get_by_id(session, tenant_id)
+    if tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    tenant = await session.get(Tenant, tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return TenantResponse.model_validate(tenant)
@@ -112,6 +115,9 @@ async def create_user(
     tenant_id: str, req: UserCreate, session: DBSession, user: AdminUser
 ):
     """Create a user within a tenant (admin only)."""
+    if tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
     new_user = User(
         tenant_id=tenant_id,
         username=req.username,

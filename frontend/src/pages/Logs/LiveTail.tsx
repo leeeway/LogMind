@@ -31,7 +31,6 @@ const MAX_VISIBLE_LINES = 500;
 const LiveTail: React.FC = () => {
   const [bizLines, setBizLines] = useState<any[]>([]);
   const [selectedBiz, setSelectedBiz] = useState<string>('');
-  const [selectedIndex, setSelectedIndex] = useState<string>('*');
   const [keyword, setKeyword] = useState('');
   const [levelFilter, setLevelFilter] = useState<string>('');
   const [connected, setConnected] = useState(false);
@@ -53,7 +52,6 @@ const LiveTail: React.FC = () => {
       setBizLines(items);
       if (items.length > 0) {
         setSelectedBiz(items[0].id);
-        setSelectedIndex(items[0].es_index_pattern);
       }
     }).catch(() => {});
   }, []);
@@ -91,7 +89,7 @@ const LiveTail: React.FC = () => {
       // Subscribe to logs
       ws.send(JSON.stringify({
         action: 'subscribe',
-        index_pattern: selectedIndex,
+        business_line_id: selectedBiz,
         filters: {
           keyword: keyword || undefined,
           level: levelFilter || undefined,
@@ -130,7 +128,7 @@ const LiveTail: React.FC = () => {
     };
 
     wsRef.current = ws;
-  }, [token, selectedIndex, keyword, levelFilter]);
+  }, [token, selectedBiz, keyword, levelFilter]);
 
   // Disconnect
   const disconnect = useCallback(() => {
@@ -192,11 +190,7 @@ const LiveTail: React.FC = () => {
 
         <Select
           value={selectedBiz}
-          onChange={(v) => {
-            setSelectedBiz(v);
-            const biz = bizLines.find(b => b.id === v);
-            if (biz) setSelectedIndex(biz.es_index_pattern);
-          }}
+          onChange={setSelectedBiz}
           style={{ width: 180 }}
           size="small"
           placeholder="选择服务"

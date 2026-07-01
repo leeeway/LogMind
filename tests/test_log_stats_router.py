@@ -19,18 +19,19 @@ class DummySession:
 
 
 @pytest.mark.asyncio
-async def test_resolve_index_pattern_prefers_direct_index_pattern():
+async def test_resolve_index_pattern_rejects_direct_index_pattern_without_business_line():
     session = DummySession()
     user = TokenPayload(sub="u1", tenant_id="t1", role="viewer")
 
-    index_pattern = await _resolve_index_pattern(
-        session=session,
-        user=user,
-        index_pattern="logs-*",
-        business_line_id=None,
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        await _resolve_index_pattern(
+            session=session,
+            user=user,
+            index_pattern="logs-*",
+            business_line_id=None,
+        )
 
-    assert index_pattern == "logs-*"
+    assert exc_info.value.status_code == 422
 
 
 @pytest.mark.asyncio

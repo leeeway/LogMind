@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Card, Typography, Select, DatePicker, Button, Input, Table, Tag, Space, Statistic, Row, Col, message, Tooltip, Segmented, Spin } from 'antd';
+import { Card, Typography, Select, DatePicker, Button, Input, Table, Tag, Space, Statistic, Row, Col, message, Tooltip, Segmented } from 'antd';
 import { SearchOutlined, BarChartOutlined, CopyOutlined, DownloadOutlined, ClockCircleOutlined, FileSearchOutlined, RobotOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { logsApi, businessLineApi } from '@/api/services';
 import { useQuickDiagnose } from '@/components/QuickDiagnose';
@@ -54,15 +54,8 @@ const LogSearch: React.FC = () => {
     setLoading(true);
     const start = Date.now();
     try {
-      // Resolve the ES index pattern from the selected business line
-      const selectedBiz = bizLines.find(b => b.id === bizId);
-      if (!selectedBiz?.es_index_pattern) {
-        message.warning('该业务线未配置 ES 索引');
-        setLoading(false);
-        return;
-      }
       const { data } = await logsApi.search({
-        index_pattern: selectedBiz.es_index_pattern,
+        business_line_id: bizId,
         time_from: timeRange[0].toISOString(),
         time_to: timeRange[1].toISOString(),
         query,
@@ -79,7 +72,7 @@ const LogSearch: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [bizId, bizLines, timeRange, query, severity]);
+  }, [bizId, timeRange, query, severity]);
 
   const loadStats = async () => {
     if (!bizId) return;

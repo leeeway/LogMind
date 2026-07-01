@@ -201,8 +201,12 @@ class ProviderManager:
         if config.api_key_encrypted:
             try:
                 api_key = decrypt_value(config.api_key_encrypted)
-            except Exception:
-                api_key = config.api_key_encrypted  # Fallback: use as-is
+            except Exception as e:
+                raise ProviderError(
+                    config.provider_type,
+                    "Failed to decrypt API key for provider config",
+                    detail={"provider_config_id": config.id},
+                ) from e
 
         # Parse model params
         model_params = {}

@@ -18,6 +18,7 @@ from logmind.domain.analysis.schemas import (
     ToolCallRecord,
 )
 from logmind.domain.analysis.tasks import run_analysis_task
+from logmind.domain.tenant.access import get_active_business_line_or_404
 from logmind.shared.base_repository import BaseRepository
 from logmind.shared.base_schema import MessageResponse, PaginatedResponse
 from logmind.shared.pagination import PaginationParams, get_pagination
@@ -39,6 +40,11 @@ async def create_analysis_task(
         "severity": req.severity,
         "extra_filters": req.extra_filters,
     }
+    await get_active_business_line_or_404(
+        session,
+        user.tenant_id,
+        req.business_line_id,
+    )
 
     task = LogAnalysisTask(
         tenant_id=user.tenant_id,

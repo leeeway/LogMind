@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from logmind.core.logging import get_logger
+from logmind.core.security import decode_access_token
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,34 @@ def _get_rate_limit(path: str) -> tuple[int, int] | None:
         if path.startswith(prefix):
             return limit
     return None
+
+
+def _get_rate_limit_identity(scope: Scope) -> str:
+    """Resolve rate-limit identity from request state, JWT tenant, then client IP."""
+    state = scope.get("state") or {}
+    tenant_id = state.get("tenant_id") if isinstance(state, dict) else getattr(state, "tenant_id", None)
+    if tenant_id:
+        return str(tenant_id)
+
+    for name, value in scope.get("headers", []):
+        if name.lower() != b"authorization":
+            continue
+        auth_value = value.decode("latin1")
+        scheme, _, token = auth_value.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            continue
+        try:
+            payload = decode_access_token(token)
+            jwt_tenant_id = payload.get("tenant_id")
+            if jwt_tenant_id:
+                return str(jwt_tenant_id)
+        except Exception:
+            break
+
+    client = scope.get("client")
+    if client:
+        return str(client[0])
+    return "anonymous"
 
 
 class RateLimitMiddleware:
@@ -75,11 +104,8 @@ class RateLimitMiddleware:
 
         max_requests, window_seconds = limit_config
 
-        # Extract tenant identity (from JWT or API key)
-        # Fall back to client IP if no tenant context
-        tenant_id = getattr(request.state, "tenant_id", None)
-        if not tenant_id:
-            tenant_id = request.client.host if request.client else "anonymous"
+        # Extract tenant identity from state/JWT, then fall back to client IP.
+        tenant_id = _get_rate_limit_identity(scope)
 
         # Determine rate limit bucket key
         # Use the matched prefix, not the full path

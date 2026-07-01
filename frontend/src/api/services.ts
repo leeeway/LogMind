@@ -8,7 +8,7 @@ export interface BusinessLineListItem {
 }
 
 export const logsApi = {
-  search: (data: { index_pattern?: string; business_line_id?: string; time_from: string; time_to: string; query?: string; severity?: string; size?: number }) =>
+  search: (data: { business_line_id: string; time_from: string; time_to: string; query?: string; severity?: string; size?: number }) =>
     client.post('/logs/search', data),
 
   naturalQuery: (question: string) =>

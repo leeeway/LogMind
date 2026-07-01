@@ -11,7 +11,7 @@ from logmind.shared.base_schema import BaseSchema
 
 class LogQueryRequest(BaseModel):
     """ES log query parameters."""
-    index_pattern: str = Field(..., description="ES index pattern(s)")
+    index_pattern: str | None = Field(None, description="ES index pattern(s)")
     time_from: datetime
     time_to: datetime
     query: str = Field("", description="Free text search query")

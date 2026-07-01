@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.domain.alert.models import AlertHistory, AlertRule
+from logmind.domain.tenant.access import get_active_business_line_or_404
 from logmind.shared.base_repository import BaseRepository
 from logmind.shared.base_schema import MessageResponse, PaginatedResponse
 from logmind.shared.pagination import PaginationParams, get_pagination
@@ -68,6 +69,12 @@ async def create_alert_rule(
     req: AlertRuleCreate, session: DBSession, user: CurrentUser
 ):
     """Create an alert rule."""
+    await get_active_business_line_or_404(
+        session,
+        user.tenant_id,
+        req.business_line_id,
+    )
+
     rule = AlertRule(
         tenant_id=user.tenant_id,
         business_line_id=req.business_line_id,
