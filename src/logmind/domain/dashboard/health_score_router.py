@@ -64,6 +64,15 @@ def _grade(score: float) -> str:
     return "F"
 
 
+def _business_weight_score(biz: BusinessLine) -> tuple[int, bool, int, str]:
+    raw_weight = biz.business_weight if biz.business_weight is not None else 5
+    weight = max(1, min(int(raw_weight), 10))
+    is_core_path = bool(biz.is_core_path)
+    score = min(100, weight * 10 + (20 if is_core_path else 0))
+    detail = f"权重 {weight}/10" + (" 核心路径" if is_core_path else "")
+    return weight, is_core_path, score, detail
+
+
 @router.get("/health-scores", response_model=HealthScoreResponse)
 async def get_health_scores(
     session: DBSession,
@@ -209,8 +218,7 @@ async def get_health_scores(
             risk_detail = "→ 稳定"
 
         # 5. Business Weight (15%) — based on config
-        biz_weight_score = min(100, biz.business_weight * 10 + (20 if biz.is_core_path else 0))
-        weight_detail = f"权重 {biz.business_weight}/10" + (" 核心路径" if biz.is_core_path else "")
+        _, _, biz_weight_score, weight_detail = _business_weight_score(biz)
 
         # Composite
         score = (

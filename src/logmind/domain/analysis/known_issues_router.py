@@ -16,6 +16,7 @@ This router provides human visibility and control:
 """
 
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -35,6 +36,52 @@ router = APIRouter(prefix="/known-issues", tags=["Known Issues"])
 
 # ES index name (must match log/service.py and analysis_indexer.py)
 _INDEX_NAME = "logmind-analysis-vectors"
+
+
+def _empty_list_response(page: int, page_size: int) -> KnownIssueListResponse:
+    return KnownIssueListResponse(items=[], total=0, page=page, page_size=page_size)
+
+
+def _es_total_value(total: Any) -> int:
+    if isinstance(total, dict):
+        return int(total.get("value") or 0)
+    return int(total or 0)
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _hit_count(value: Any) -> int:
+    if value is None:
+        return 1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _known_issue_response(hit: dict, source: dict) -> KnownIssueResponse:
+    return KnownIssueResponse(
+        id=str(hit.get("_id", "")),
+        business_line_id=str(source.get("business_line_id") or ""),
+        error_signature=str(source.get("error_signature") or ""),
+        analysis_content=str(source.get("analysis_content") or ""),
+        severity=str(source.get("severity") or "info"),
+        task_id=str(source.get("task_id") or ""),
+        status=str(source.get("status") or "open"),
+        hit_count=_hit_count(source.get("hit_count")),
+        first_seen=_optional_str(source.get("first_seen")),
+        last_seen=_optional_str(source.get("last_seen")),
+        resolved_at=_optional_str(source.get("resolved_at")),
+        feedback_quality=_optional_str(source.get("feedback_quality")),
+        created_at=_optional_str(source.get("created_at")),
+        ttl_expire_at=_optional_str(source.get("ttl_expire_at")),
+    )
 
 
 # ── List Known Issues ────────────────────────────────────
@@ -61,9 +108,14 @@ async def list_known_issues(
     from logmind.domain.log.service import log_service
 
     es = log_service.es
-    exists = await es.indices.exists(index=_INDEX_NAME)
+    try:
+        exists = await es.indices.exists(index=_INDEX_NAME)
+    except Exception as e:
+        logger.error("known_issues_index_check_failed", error=str(e))
+        return _empty_list_response(page, page_size)
+
     if not exists:
-        return KnownIssueListResponse(items=[], total=0, page=page, page_size=page_size)
+        return _empty_list_response(page, page_size)
 
     # Build query
     must_clauses = []
@@ -72,7 +124,7 @@ async def list_known_issues(
     # Tenant isolation: only show issues from business lines belonging to this tenant
     tenant_biz_ids = await _get_tenant_business_line_ids(session, user.tenant_id)
     if not tenant_biz_ids:
-        return KnownIssueListResponse(items=[], total=0, page=page, page_size=page_size)
+        return _empty_list_response(page, page_size)
 
     if business_line_id:
         # Validate access
@@ -124,28 +176,13 @@ async def list_known_issues(
         result = await es.search(index=_INDEX_NAME, body=body)
     except Exception as e:
         logger.error("known_issues_list_failed", error=str(e))
-        return KnownIssueListResponse(items=[], total=0, page=page, page_size=page_size)
+        return _empty_list_response(page, page_size)
 
-    total = result["hits"]["total"]["value"]
+    hits = result.get("hits", {})
+    total = _es_total_value(hits.get("total"))
     items = []
-    for hit in result["hits"]["hits"]:
-        source = hit["_source"]
-        items.append(KnownIssueResponse(
-            id=hit["_id"],
-            business_line_id=source.get("business_line_id", ""),
-            error_signature=source.get("error_signature", ""),
-            analysis_content=source.get("analysis_content", ""),
-            severity=source.get("severity", "info"),
-            task_id=source.get("task_id", ""),
-            status=source.get("status", "open"),
-            hit_count=source.get("hit_count", 1),
-            first_seen=source.get("first_seen"),
-            last_seen=source.get("last_seen"),
-            resolved_at=source.get("resolved_at"),
-            feedback_quality=source.get("feedback_quality"),
-            created_at=source.get("created_at"),
-            ttl_expire_at=source.get("ttl_expire_at"),
-        ))
+    for hit in hits.get("hits", []):
+        items.append(_known_issue_response(hit, hit.get("_source") or {}))
 
     return KnownIssueListResponse(
         items=items,
@@ -193,22 +230,23 @@ async def get_known_issue(
         if biz:
             biz_name = biz.name
 
+    issue = _known_issue_response(result, source)
     return KnownIssueDetail(
-        id=result["_id"],
+        id=issue.id,
         business_line_id=biz_id,
         business_line_name=biz_name,
-        error_signature=source.get("error_signature", ""),
-        analysis_content=source.get("analysis_content", ""),
-        severity=source.get("severity", "info"),
-        task_id=source.get("task_id", ""),
-        status=source.get("status", "open"),
-        hit_count=source.get("hit_count", 1),
-        first_seen=source.get("first_seen"),
-        last_seen=source.get("last_seen"),
-        resolved_at=source.get("resolved_at"),
-        feedback_quality=source.get("feedback_quality"),
-        created_at=source.get("created_at"),
-        ttl_expire_at=source.get("ttl_expire_at"),
+        error_signature=issue.error_signature,
+        analysis_content=issue.analysis_content,
+        severity=issue.severity,
+        task_id=issue.task_id,
+        status=issue.status,
+        hit_count=issue.hit_count,
+        first_seen=issue.first_seen,
+        last_seen=issue.last_seen,
+        resolved_at=issue.resolved_at,
+        feedback_quality=issue.feedback_quality,
+        created_at=issue.created_at,
+        ttl_expire_at=issue.ttl_expire_at,
     )
 
 
@@ -279,7 +317,7 @@ async def update_known_issue_status(
         issue_id=issue_id,
         old_status=old_status,
         new_status=new_status,
-        user=user.username,
+        user=getattr(user, "username", user.sub),
     )
 
     transition_msg = f"状态已更新: {old_status} → {new_status}"
@@ -326,7 +364,7 @@ async def delete_known_issue(
         logger.error("known_issue_delete_failed", issue_id=issue_id, error=str(e))
         raise HTTPException(status_code=500, detail="Failed to delete issue")
 
-    logger.info("known_issue_deleted", issue_id=issue_id, user=user.username)
+    logger.info("known_issue_deleted", issue_id=issue_id, user=getattr(user, "username", user.sub))
     return MessageResponse(message=f"已知问题 {issue_id[:8]}... 已永久删除")
 
 
