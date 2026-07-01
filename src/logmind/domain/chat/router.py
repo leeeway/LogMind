@@ -69,6 +69,7 @@ async def create_session(session: DBSession, user: CurrentUser):
         user_id=user.sub,
         db_session=session,
     )
+    await session.commit()
     return SessionResponse(
         id=chat_session.id,
         title=chat_session.title,

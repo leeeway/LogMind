@@ -1,5 +1,8 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from logmind.domain.chat.service import ChatService
 
@@ -163,3 +166,30 @@ def test_extract_order_ids_from_csharp_log_message():
     )
 
     assert ids == ["AliQr26061716280437930612"]
+
+
+@pytest.mark.asyncio
+async def test_create_session_commits_before_returning(monkeypatch):
+    from logmind.domain.chat import router as chat_router
+
+    class FakeChatService:
+        async def get_or_create_session_persistent(
+            self, session_id: str, tenant_id: str, user_id: str, db_session
+        ):
+            return SimpleNamespace(
+                id=session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                title="新对话",
+                created_at="2026-07-01T00:00:00+00:00",
+                updated_at="2026-07-01T00:00:00+00:00",
+            )
+
+    db = SimpleNamespace(commit=AsyncMock())
+    user = SimpleNamespace(tenant_id="tenant-1", sub="user-1")
+    monkeypatch.setattr(chat_router, "chat_service", FakeChatService())
+
+    response = await chat_router.create_session(db, user)
+
+    assert response.id
+    db.commit.assert_awaited_once()
