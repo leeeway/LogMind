@@ -73,14 +73,14 @@ export const promptApi = {
 };
 
 export const ragApi = {
-  listKBs: () => client.get('/knowledge-bases'),
-  getKB: (id: string) => client.get(`/knowledge-bases/${id}`),
-  createKB: (data: Record<string, unknown>) => client.post('/knowledge-bases', data),
-  updateKB: (id: string, data: Record<string, unknown>) => client.put(`/knowledge-bases/${id}`, data),
-  deleteKB: (id: string) => client.delete(`/knowledge-bases/${id}`),
-  listDocs: (kbId: string) => client.get(`/knowledge-bases/${kbId}/documents`),
-  uploadDoc: (kbId: string, data: Record<string, unknown>) => client.post(`/knowledge-bases/${kbId}/documents`, data),
-  deleteDoc: (kbId: string, docId: string) => client.delete(`/knowledge-bases/${kbId}/documents/${docId}`),
+  listKBs: () => client.get('/knowledge-base'),
+  getKB: (id: string) => client.get(`/knowledge-base/${id}`),
+  createKB: (data: Record<string, unknown>) => client.post('/knowledge-base', data),
+  updateKB: (id: string, data: Record<string, unknown>) => client.put(`/knowledge-base/${id}`, data),
+  deleteKB: (id: string) => client.delete(`/knowledge-base/${id}`),
+  listDocs: (kbId: string) => client.get(`/knowledge-base/${kbId}/documents`),
+  uploadDoc: (kbId: string, data: Record<string, unknown>) => client.post(`/knowledge-base/${kbId}/documents`, data),
+  deleteDoc: (kbId: string, docId: string) => client.delete(`/knowledge-base/${kbId}/documents/${docId}`),
 };
 
 export const systemApi = {

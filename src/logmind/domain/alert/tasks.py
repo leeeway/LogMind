@@ -167,6 +167,7 @@ async def _patrol_single(business_line_id: str):
             )
             session.add(task)
             await session.flush()
+            await session.commit()
 
             run_analysis_task.delay(task.id)
             logger.info(

@@ -96,6 +96,8 @@ async def cached_embed(
     text: str,
     redis_url: str = "",
     cache_ttl: int = 3600,
+    tenant_id: str = "",
+    provider_config_id: str | None = None,
 ) -> list[float] | None:
     """
     Embed text using OpenAI, with Redis caching to avoid repeated API calls.
@@ -105,7 +107,10 @@ async def cached_embed(
     """
     from logmind.core.redis import get_redis_client
 
-    cache_key = f"logmind:emb_cache:{hashlib.md5(text.encode()).hexdigest()}"
+    cache_scope = tenant_id or "global"
+    provider_scope = provider_config_id or "default"
+    cache_raw = f"{cache_scope}:{provider_scope}:{text}"
+    cache_key = f"logmind:emb_cache:{hashlib.md5(cache_raw.encode()).hexdigest()}"
     r = None
 
     try:
@@ -130,24 +135,43 @@ async def cached_embed(
             from sqlalchemy import select
             from logmind.domain.provider.models import ProviderConfig
 
-            # Find any active provider that supports embeddings (prefer openai)
-            stmt = (
-                select(ProviderConfig)
-                .where(
-                    ProviderConfig.is_active == True,
-                    ProviderConfig.provider_type.in_(["openai", "subapi", "deepseek"]),
-                )
-                .order_by(ProviderConfig.priority.desc())
-                .limit(1)
-            )
-            result = await session.execute(stmt)
-            config = result.scalar_one_or_none()
-
-            if not config:
-                logger.warning("no_embedding_provider_found")
+            if provider_config_id and not tenant_id:
+                logger.warning("embedding_provider_id_without_tenant")
                 return None
 
-            provider = provider_manager._create_or_get_cached(config)
+            if provider_config_id:
+                provider = await provider_manager.get_provider(
+                    session,
+                    tenant_id,
+                    provider_config_id,
+                )
+            else:
+                # Find an active tenant-owned provider that supports embeddings.
+                # Legacy callers without tenant_id keep the old global fallback,
+                # but all production pipeline/tool paths should pass tenant_id.
+                conditions = [
+                    ProviderConfig.is_active == True,
+                    ProviderConfig.provider_type.in_(["openai", "subapi", "deepseek"]),
+                ]
+                if tenant_id:
+                    conditions.append(ProviderConfig.tenant_id == tenant_id)
+                else:
+                    logger.warning("embedding_provider_lookup_without_tenant")
+
+                stmt = (
+                    select(ProviderConfig)
+                    .where(*conditions)
+                    .order_by(ProviderConfig.priority.desc())
+                    .limit(1)
+                )
+                result = await session.execute(stmt)
+                config = result.scalar_one_or_none()
+
+                if not config:
+                    logger.warning("no_embedding_provider_found", tenant_id=tenant_id)
+                    return None
+
+                provider = provider_manager._create_or_get_cached(config)
 
         req = EmbeddingRequest(texts=[text])
         resp = await provider.embed(req)
@@ -224,6 +248,7 @@ class SemanticDedupStage(PipelineStage):
                 text=error_sig,
                 redis_url=settings.redis_url,
                 cache_ttl=settings.analysis_embedding_cache_ttl_seconds,
+                tenant_id=ctx.tenant_id,
             )
             if vector is None:
                 logger.warning("semantic_dedup_embed_failed", task_id=ctx.task_id)
@@ -340,4 +365,3 @@ class SemanticDedupStage(PipelineStage):
             logger.warning("semantic_dedup_error", error=str(e), task_id=ctx.task_id)
 
         return ctx
-

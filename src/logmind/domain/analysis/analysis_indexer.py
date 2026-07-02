@@ -28,6 +28,7 @@ async def _async_index_analysis(
     error_signature: str,
     analysis_content: str,
     severity: str,
+    tenant_id: str = "",
 ):
     """Index an analysis result into the vector store for future dedup."""
     from logmind.core.config import get_settings
@@ -38,11 +39,23 @@ async def _async_index_analysis(
     settings = get_settings()
 
     try:
+        if not tenant_id:
+            from sqlalchemy import select
+            from logmind.core.database import get_db_context
+            from logmind.domain.tenant.models import BusinessLine
+
+            async with get_db_context() as session:
+                result = await session.execute(
+                    select(BusinessLine.tenant_id).where(BusinessLine.id == business_line_id)
+                )
+                tenant_id = result.scalar_one_or_none() or ""
+
         # 1. Embed the error signature
         vector = await cached_embed(
             text=error_signature,
             redis_url=settings.redis_url,
             cache_ttl=settings.analysis_embedding_cache_ttl_seconds,
+            tenant_id=tenant_id,
         )
         if vector is None:
             logger.warning("analysis_index_embed_failed", task_id=task_id)
@@ -112,6 +125,7 @@ def index_analysis_result(
     error_signature: str,
     analysis_content: str,
     severity: str = "warning",
+    tenant_id: str = "",
 ):
     """
     Celery task: Index analysis result for semantic dedup.
@@ -128,5 +142,6 @@ def index_analysis_result(
             error_signature=error_signature,
             analysis_content=analysis_content,
             severity=severity,
+            tenant_id=tenant_id,
         )
     )

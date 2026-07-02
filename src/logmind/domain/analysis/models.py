@@ -135,3 +135,17 @@ class AgentToolCall(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Relationships
     task = relationship("LogAnalysisTask", back_populates="tool_calls")
+
+
+class ChangeEvent(Base, UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin):
+    """Deployment/configuration change event used for impact correlation."""
+
+    __tablename__ = "change_event"
+
+    service_name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    change_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    version: Mapped[str] = mapped_column(String(200), default="")
+    operator: Mapped[str] = mapped_column(String(100), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    correlated_spikes: Mapped[int] = mapped_column(Integer, default=0)

@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     wechat_webhook_url: str = ""
     wechat_enabled: bool = False
 
+    # ── CI/CD Webhook ───────────────────────────────────────
+    # HMAC-SHA256 secret for /api/v1/changes/webhook/{tenant_id}.
+    # Production rejects unsigned CI webhook requests when this is empty.
+    ci_webhook_secret: str = ""
+
     # ── MinIO ────────────────────────────────────────────
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "logmind"

@@ -284,6 +284,7 @@ async def upload_document(
     session.add(doc)
     await session.flush()
     await session.refresh(doc)
+    await session.commit()
 
     # Dispatch async indexing task
     from logmind.domain.rag.tasks import index_document

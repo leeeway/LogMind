@@ -77,8 +77,8 @@ const LiveTail: React.FC = () => {
       wsRef.current.close();
     }
 
-    const isDev = window.location.port === '3000';
-    const wsBase = isDev ? 'ws://localhost:8000' : `ws://${window.location.host}`;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsBase = `${protocol}//${window.location.host}`;
     const ws = new WebSocket(`${wsBase}/ws/logs/live?token=${token}`);
 
     ws.onopen = () => {

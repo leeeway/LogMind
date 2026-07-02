@@ -719,6 +719,7 @@ async def _run_learning_hooks(ctx, task_id: str):
                         top_severity = "warning"
                 index_analysis_result.delay(
                     task_id=task_id,
+                    tenant_id=ctx.tenant_id,
                     business_line_id=ctx.business_line_id,
                     error_signature=error_sig,
                     analysis_content=combined_content[:3000],

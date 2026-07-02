@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { Card, Table, Button, Space, Typography, Modal, Form, Input, message, Tag, Descriptions, Upload, Empty } from 'antd';
+import { Card, Table, Button, Space, Typography, Modal, Form, Input, message, Tag, Descriptions, Upload } from 'antd';
 import { PlusOutlined, DeleteOutlined, EyeOutlined, UploadOutlined, ReloadOutlined, BookOutlined } from '@ant-design/icons';
 import { ragApi } from '@/api/services';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
 
 const KnowledgeBase: React.FC = () => {
   const [kbs, setKbs] = useState<any[]>([]);
@@ -11,6 +11,7 @@ const KnowledgeBase: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [detailKB, setDetailKB] = useState<any>(null);
   const [docs, setDocs] = useState<any[]>([]);
+  const [uploading, setUploading] = useState(false);
 
   const fetchKBs = async () => {
     setLoading(true);
@@ -46,6 +47,26 @@ const KnowledgeBase: React.FC = () => {
       const { data } = await ragApi.listDocs(kb.id);
       setDocs(data || []);
     } catch { setDocs([]); }
+  };
+
+  const handleUpload = async (file: File) => {
+    if (!detailKB?.id) return false;
+    setUploading(true);
+    try {
+      const content = await file.text();
+      await ragApi.uploadDoc(detailKB.id, {
+        filename: file.name,
+        content,
+        metadata: { source: 'ui_upload' },
+      });
+      message.success('文档已上传，正在索引');
+      await openDetail(detailKB);
+    } catch (err: any) {
+      message.error(err.response?.data?.detail || '上传失败');
+    } finally {
+      setUploading(false);
+    }
+    return false;
   };
 
   const columns = [
@@ -104,7 +125,16 @@ const KnowledgeBase: React.FC = () => {
               <Descriptions.Item label="嵌入模型">{detailKB.embedding_model}</Descriptions.Item>
               <Descriptions.Item label="描述" span={2}>{detailKB.description || '-'}</Descriptions.Item>
             </Descriptions>
-            <Title level={5}>文档列表</Title>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <Title level={5} style={{ margin: 0 }}>文档列表</Title>
+              <Upload
+                showUploadList={false}
+                beforeUpload={(file) => handleUpload(file)}
+                accept=".txt,.md,.log,.json,.yaml,.yml"
+              >
+                <Button size="small" icon={<UploadOutlined />} loading={uploading}>上传文档</Button>
+              </Upload>
+            </div>
             <Table dataSource={docs} columns={docColumns} rowKey="id" size="small" pagination={false} />
           </>
         )}

@@ -369,10 +369,13 @@ async def execute_tool(
         elif tool_name == "list_available_indices":
             return await _exec_list_indices(arguments, es_index_pattern)
         elif tool_name == "search_knowledge_base":
-            return await _exec_search_knowledge_base(arguments)
+            return await _exec_search_knowledge_base(arguments, tenant_id=tenant_id)
         elif tool_name == "search_similar_incidents":
             return await _exec_search_similar_incidents(
-                arguments, es_index_pattern, business_line_id=business_line_id
+                arguments,
+                es_index_pattern,
+                tenant_id=tenant_id,
+                business_line_id=business_line_id,
             )
         elif tool_name == "search_cross_service_logs":
             related_patterns = await _load_related_index_patterns(related_services, tenant_id)
@@ -611,7 +614,37 @@ async def _exec_list_indices(args: dict, index_pattern: str) -> str:
     }, ensure_ascii=False, default=str)
 
 
-async def _exec_search_knowledge_base(args: dict) -> str:
+async def _resolve_knowledge_base_id(tenant_id: str, requested_kb_id: str) -> str | None:
+    """Resolve and authorize a tenant-owned knowledge base for Agent search."""
+    if not tenant_id:
+        return None
+
+    from sqlalchemy import select
+
+    from logmind.core.database import get_db_context
+    from logmind.domain.rag.models import KnowledgeBase
+
+    async with get_db_context() as session:
+        if requested_kb_id and requested_kb_id != "default":
+            kb = await session.get(KnowledgeBase, requested_kb_id)
+            if kb and kb.tenant_id == tenant_id and kb.is_active:
+                return kb.id
+            return None
+
+        result = await session.execute(
+            select(KnowledgeBase)
+            .where(
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.is_active == True,  # noqa: E712
+            )
+            .order_by(KnowledgeBase.created_at.desc())
+            .limit(1)
+        )
+        kb = result.scalar_one_or_none()
+        return kb.id if kb else None
+
+
+async def _exec_search_knowledge_base(args: dict, tenant_id: str = "") -> str:
     """Execute search_knowledge_base tool (with Embedding Redis cache)."""
     from logmind.domain.analysis.semantic_dedup import cached_embed
     from logmind.core.config import get_settings
@@ -625,11 +658,16 @@ async def _exec_search_knowledge_base(args: dict) -> str:
     settings = get_settings()
 
     try:
+        kb_id = await _resolve_knowledge_base_id(tenant_id, str(kb_id or "default"))
+        if not kb_id:
+            return "未找到当前租户可用的知识库。"
+
         # Embed the query (with Redis cache — avoids repeated API calls)
         query_vector = await cached_embed(
             text=query,
             redis_url=settings.redis_url,
             cache_ttl=settings.analysis_embedding_cache_ttl_seconds,
+            tenant_id=tenant_id,
         )
         if query_vector is None:
             return json.dumps({"error": "Embedding provider not available"})
@@ -661,6 +699,7 @@ async def _exec_search_knowledge_base(args: dict) -> str:
 async def _exec_search_similar_incidents(
     args: dict,
     index_pattern: str,
+    tenant_id: str = "",
     business_line_id: str = "",
 ) -> str:
     """Execute search_similar_incidents tool — find historically similar analyses."""
@@ -680,6 +719,7 @@ async def _exec_search_similar_incidents(
             text=error_pattern,
             redis_url=settings.redis_url,
             cache_ttl=settings.analysis_embedding_cache_ttl_seconds,
+            tenant_id=tenant_id,
         )
         if query_vector is None:
             return json.dumps({"error": "Embedding provider not available"})

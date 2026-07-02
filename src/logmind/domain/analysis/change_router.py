@@ -10,25 +10,61 @@ Correlation:
   When Z-Score change-point is detected, auto-search for changes within ±30min window.
 """
 
+import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 
+from logmind.core.config import get_settings
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.core.logging import get_logger
+from logmind.domain.analysis.models import ChangeEvent
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/changes", tags=["Changes"])
 
 
-# ── In-memory store (production would use DB) ────────────
-# For simplicity, using tenant-scoped in-memory list.
-# In production, this would be a database table.
-_change_store: dict[str, list[dict]] = {}  # tenant_id -> [change_events]
+def _parse_change_timestamp(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid timestamp format")
+
+
+def _change_response(event: ChangeEvent) -> "ChangeEventResponse":
+    return ChangeEventResponse(
+        id=event.id,
+        tenant_id=event.tenant_id,
+        service_name=event.service_name,
+        change_type=event.change_type,
+        version=event.version or "",
+        operator=event.operator or "",
+        description=event.description or "",
+        timestamp=event.timestamp.isoformat(),
+        correlated_spikes=event.correlated_spikes or 0,
+    )
+
+
+def verify_ci_webhook_signature(body: bytes, signature: str | None, secret: str) -> bool:
+    """Validate a CI webhook HMAC-SHA256 signature."""
+    if not secret or not signature:
+        return False
+    expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    expected_header = f"sha256={expected}"
+    return hmac.compare_digest(signature, expected_header) or hmac.compare_digest(
+        signature,
+        expected,
+    )
 
 
 class ChangeEventCreate(BaseModel):
@@ -72,21 +108,22 @@ async def create_change_event(
     user: CurrentUser,
 ):
     """Record a deployment/config change event."""
-    ts = req.timestamp or datetime.now(timezone.utc).isoformat()
-    event = {
-        "id": str(uuid.uuid4()),
-        "tenant_id": user.tenant_id,
-        "service_name": req.service_name,
-        "change_type": req.change_type,
-        "version": req.version,
-        "operator": req.operator or user.sub,
-        "description": req.description,
-        "timestamp": ts,
-        "correlated_spikes": 0,
-    }
-    _change_store.setdefault(user.tenant_id, []).append(event)
+    event = ChangeEvent(
+        id=str(uuid.uuid4()),
+        tenant_id=user.tenant_id,
+        service_name=req.service_name,
+        change_type=req.change_type,
+        version=req.version,
+        operator=req.operator or user.sub,
+        description=req.description,
+        timestamp=_parse_change_timestamp(req.timestamp),
+        correlated_spikes=0,
+    )
+    session.add(event)
+    await session.flush()
+    await session.refresh(event)
     logger.info("change_recorded", service=req.service_name, type=req.change_type, version=req.version)
-    return ChangeEventResponse(**event)
+    return _change_response(event)
 
 
 @router.get("/timeline", response_model=ChangeTimelineResponse)
@@ -98,25 +135,23 @@ async def get_change_timeline(
 ):
     """Get change event timeline."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    events = _change_store.get(user.tenant_id, [])
-
-    filtered = []
-    for e in events:
-        try:
-            ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
-        except Exception:
-            continue
-        if ts < since:
-            continue
-        if service and e["service_name"] != service:
-            continue
-        filtered.append(e)
+    stmt = (
+        select(ChangeEvent)
+        .where(
+            ChangeEvent.tenant_id == user.tenant_id,
+            ChangeEvent.timestamp >= since,
+        )
+        .order_by(ChangeEvent.timestamp.desc())
+    )
+    if service:
+        stmt = stmt.where(ChangeEvent.service_name == service)
+    filtered = list((await session.execute(stmt)).scalars().all())
 
     # Also correlate with analysis spikes
     from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
     for e in filtered:
         try:
-            ts = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00"))
+            ts = e.timestamp
             window_start = ts - timedelta(minutes=30)
             window_end = ts + timedelta(minutes=60)
 
@@ -132,14 +167,12 @@ async def get_change_timeline(
                 )
             )
             spike_count = (await session.execute(stmt)).scalar() or 0
-            e["correlated_spikes"] = spike_count
+            e.correlated_spikes = spike_count
         except Exception:
             pass
 
-    filtered.sort(key=lambda x: x["timestamp"], reverse=True)
-
     return ChangeTimelineResponse(
-        changes=[ChangeEventResponse(**e) for e in filtered],
+        changes=[_change_response(e) for e in filtered],
         total=len(filtered),
     )
 
@@ -151,16 +184,15 @@ async def get_change_impact(
     user: CurrentUser,
 ):
     """Analyze blast radius of a specific change event."""
-    events = _change_store.get(user.tenant_id, [])
-    event = next((e for e in events if e["id"] == change_id), None)
-    if not event:
+    event = await session.get(ChangeEvent, change_id)
+    if not event or event.tenant_id != user.tenant_id:
         raise HTTPException(404, "Change event not found")
 
     from logmind.domain.analysis.models import LogAnalysisTask, AnalysisResult
     from logmind.domain.alert.models import AlertHistory
     from logmind.domain.tenant.models import BusinessLine
 
-    ts = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+    ts = event.timestamp
     before_start = ts - timedelta(hours=1)
     after_end = ts + timedelta(hours=2)
 
@@ -223,7 +255,7 @@ async def get_change_impact(
 
     # Risk score
     high_impact = [b for b in blast_radius if b["impact_pct"] > 50]
-    risk_score = min(100, len(high_impact) * 25 + alert_count * 10 + event.get("correlated_spikes", 0) * 15)
+    risk_score = min(100, len(high_impact) * 25 + alert_count * 10 + (event.correlated_spikes or 0) * 15)
 
     # AI assessment
     if risk_score > 60:
@@ -236,7 +268,7 @@ async def get_change_impact(
         assessment = "✅ 安全变更: 未检测到异常影响"
 
     return ChangeImpactResponse(
-        change=ChangeEventResponse(**event),
+        change=_change_response(event),
         blast_radius=blast_radius[:10],
         correlated_alerts=alert_count,
         risk_score=risk_score,
@@ -256,26 +288,47 @@ class CIWebhookPayload(BaseModel):
 
 
 @router.post("/webhook/{tenant_id}")
-async def ci_webhook(tenant_id: str, payload: CIWebhookPayload):
+async def ci_webhook(
+    tenant_id: str,
+    payload: CIWebhookPayload,
+    request: Request,
+    session: DBSession,
+    x_logmind_signature: str | None = Header(default=None),
+):
     """
     Receive CI/CD webhook from GitLab/GitHub.
     Auto-creates a change event when deployment succeeds.
     """
+    settings = get_settings()
+    if settings.ci_webhook_secret:
+        body = await request.body()
+        if not verify_ci_webhook_signature(body, x_logmind_signature, settings.ci_webhook_secret):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    elif settings.app_env == "production":
+        raise HTTPException(status_code=401, detail="CI webhook secret is required in production")
+
+    from logmind.domain.tenant.models import Tenant
+
+    tenant = await session.get(Tenant, tenant_id)
+    if not tenant or not tenant.is_active:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
     if payload.status and payload.status != "success":
         return {"ok": True, "skipped": True, "reason": f"status={payload.status}"}
 
-    service = payload.project_name or payload.ref.split("/")[-1] if payload.ref else "unknown"
-    event = {
-        "id": str(uuid.uuid4()),
-        "tenant_id": tenant_id,
-        "service_name": service,
-        "change_type": "deploy",
-        "version": payload.ref,
-        "operator": payload.user_name or "CI/CD",
-        "description": (payload.commit_message or "")[:200],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "correlated_spikes": 0,
-    }
-    _change_store.setdefault(tenant_id, []).append(event)
+    service = payload.project_name or (payload.ref.split("/")[-1] if payload.ref else "unknown")
+    event = ChangeEvent(
+        id=str(uuid.uuid4()),
+        tenant_id=tenant_id,
+        service_name=service,
+        change_type="deploy",
+        version=payload.ref,
+        operator=payload.user_name or "CI/CD",
+        description=(payload.commit_message or "")[:200],
+        timestamp=datetime.now(timezone.utc),
+        correlated_spikes=0,
+    )
+    session.add(event)
+    await session.flush()
     logger.info("ci_webhook_change", service=service, ref=payload.ref)
-    return {"ok": True, "change_id": event["id"]}
+    return {"ok": True, "change_id": event.id}

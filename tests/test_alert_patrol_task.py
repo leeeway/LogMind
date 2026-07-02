@@ -41,6 +41,9 @@ class _FakeSession:
     async def flush(self):
         return None
 
+    async def commit(self):
+        return None
+
 
 class _FakeAnomalyDetector:
     def __init__(self):
