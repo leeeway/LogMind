@@ -79,6 +79,46 @@ def test_ai_alert_location_summary_omits_duplicate_ai_finding_evidence(monkeypat
     assert content.count(alert_content) == 1
 
 
+def test_ai_alert_location_summary_omits_truncated_duplicate_ai_finding_evidence(monkeypatch):
+    from logmind.domain.analysis import tasks
+
+    monkeypatch.setattr(
+        "logmind.core.config.get_settings",
+        lambda: SimpleNamespace(public_app_url="https://logmind.example.com"),
+    )
+
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="task-truncated-duplicate-evidence",
+        business_line_id="biz-1",
+        business_line_name="validation2",
+        log_count=109,
+    )
+    alert_content = (
+        "在给定时间窗内仅发现 1 条 ERROR，主要模式为 Tomcat 在生成验证码图片并写回响应时发生 "
+        "java.io.IOException: Broken pipe ，伴随 ClientAbortException 。同窗内其余日志均为验证码校验失败/通过的 WARN，"
+        "未见数据库、核心业务写入或数据一致性相关的致命异常。该错误更像是客户端在服务端响应生成完成前主动断开连接，"
+        "常见于浏览器刷新、页面跳转、网络中断或爬虫/探测流量提前关闭连接。"
+    )
+
+    content = tasks._build_alert_location_summary(
+        ctx,
+        {
+            "result_type": "summary",
+            "severity": "warning",
+            "content": alert_content,
+        },
+        priority_label="🟡 [P1|56.8分]",
+        issue_label="",
+        reason="🟡 P1: warning 级别错误，正常通知",
+    )
+
+    assert "问题: 在给定时间窗内仅发现 1 条 ERROR" in content
+    assert "AI 分析发现:" not in content
+    assert "Broken pipe" in content
+    assert content.count("Broken pipe") == 1
+
+
 def test_ai_alert_template_uses_compact_summary_heading():
     from logmind.domain.alert.channels.webhook import _build_ai_analysis_alert
 

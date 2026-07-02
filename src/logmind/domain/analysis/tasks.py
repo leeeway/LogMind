@@ -335,7 +335,13 @@ def _build_alert_location_summary(
     evidence_lines: list[str] = []
     for item in evidence:
         rendered = _format_evidence_item(item)
-        if _is_redundant_alert_text(rendered, content) or _is_redundant_alert_text(rendered, cause):
+        detail = str(item.get("detail") or "")
+        if (
+            _is_redundant_alert_text(rendered, content)
+            or _is_redundant_alert_text(rendered, cause)
+            or _is_redundant_alert_text(detail, content)
+            or _is_redundant_alert_text(detail, cause)
+        ):
             continue
         if rendered and rendered not in evidence_lines:
             evidence_lines.append(rendered)
