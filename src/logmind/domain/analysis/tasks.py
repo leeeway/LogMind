@@ -42,6 +42,7 @@ _EMPTY_LOG_SUMMARY_MARKERS = (
     "... (更多日志请登录平台查看)",
 )
 _SUMMARY_WORD_RE = re.compile(r"[A-Za-z\u4e00-\u9fff]{3,}")
+_MAX_ALERT_ISSUE_CHARS = 600
 _MAX_ALERT_LOCATION_SUMMARY_CHARS = 1600
 _MAX_INCIDENT_LOCATION_SUMMARY_CHARS = 1200
 
@@ -307,7 +308,7 @@ def _build_alert_location_summary(
     """
     from logmind.domain.analysis.evidence import build_root_cause_evidence
 
-    content = _compact_text(str(alert.get("content", "")), 180)
+    content = _compact_text(str(alert.get("content", "")), _MAX_ALERT_ISSUE_CHARS)
     if not content:
         content = "检测到日志异常，请查看分析详情。"
 

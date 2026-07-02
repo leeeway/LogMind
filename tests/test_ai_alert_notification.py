@@ -119,6 +119,48 @@ def test_ai_alert_location_summary_omits_truncated_duplicate_ai_finding_evidence
     assert content.count("Broken pipe") == 1
 
 
+def test_ai_alert_location_summary_keeps_more_issue_detail(monkeypatch):
+    from logmind.domain.analysis import tasks
+
+    monkeypatch.setattr(
+        "logmind.core.config.get_settings",
+        lambda: SimpleNamespace(public_app_url="https://logmind.example.com"),
+    )
+
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="task-expanded-issue-detail",
+        business_line_id="biz-1",
+        business_line_name="游戏社区-论坛dao.forum",
+        log_count=149,
+    )
+    alert_content = (
+        "在 2026-07-02 21:49 左右出现明显错误率突增，且错误集中在主贴详情页相关请求链路。"
+        "日志样本在同一分钟内跨多个接口、多个来源持续重复，说明不是单条偶发请求，"
+        "需要把主贴详情页入口、服务端异常堆栈、全局异常处理链路一起看。"
+        "日志中可归并为两类严重异常：1）cn.gyyx.forumwd.ui.ThreadController.getThread "
+        "发生 java.lang.NullPointerException；2）全局异常处理器 "
+        "FailedExceptionResolver.handleException 在处理异常响应时再次抛错。"
+    )
+
+    content = tasks._build_alert_location_summary(
+        ctx,
+        {
+            "result_type": "summary",
+            "severity": "critical",
+            "content": alert_content,
+        },
+        priority_label="🟡 [P1|61.2分]",
+        issue_label="",
+        reason="🟡 P1: critical 级别错误，正常通知",
+    )
+
+    assert "ThreadController.getThread" in content
+    assert "java.lang.NullPointerException" in content
+    assert "FailedExceptionResolver.handleException" in content
+    assert "分析入口: https://logmind.example.com/analysis/task-expanded-issue-detail" in content
+
+
 def test_ai_alert_location_summary_omits_empty_evidence_and_next_step_sections(monkeypatch):
     from logmind.domain.analysis import tasks
 
