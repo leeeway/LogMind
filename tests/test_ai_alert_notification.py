@@ -8,6 +8,58 @@ import pytest
 from logmind.domain.analysis.pipeline import PipelineContext
 
 
+def test_ai_alert_location_summary_omits_duplicate_cause(monkeypatch):
+    from logmind.domain.analysis import tasks
+
+    monkeypatch.setattr(
+        "logmind.core.config.get_settings",
+        lambda: SimpleNamespace(public_app_url=""),
+    )
+
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="task-duplicate-cause",
+        business_line_id="biz-1",
+        business_line_name="Core Service",
+        log_count=91,
+    )
+    alert_content = (
+        "建议进一步按更宽的关键词和上下游链路排查："
+        "检索同时间段的 WARN/ERROR 全量日志与异常堆栈。"
+    )
+
+    content = tasks._build_alert_location_summary(
+        ctx,
+        {"severity": "warning", "content": alert_content},
+        priority_label="🟡 [P1|40.7分]",
+        issue_label="",
+        reason="P1: warning 级别错误，正常通知",
+    )
+
+    assert f"问题: {alert_content}" in content
+    assert "疑似原因:" not in content
+    assert content.count(alert_content) == 1
+
+
+def test_ai_alert_template_uses_compact_summary_heading():
+    from logmind.domain.alert.channels.webhook import _build_ai_analysis_alert
+
+    content = _build_ai_analysis_alert(
+        business_line="游戏社区-中宣实名",
+        domain="stage-nppa.gyyx.cn",
+        branch="master",
+        host_name="",
+        language="java",
+        severity="warning",
+        content="问题: 数据库连接池等待超时\n分析入口: 任务 task-1",
+        task_id="task-1",
+        log_count=91,
+    )
+
+    assert "**摘要**:" in content
+    assert "**AI 分析结论**:" not in content
+
+
 @pytest.mark.asyncio
 async def test_ai_alert_content_includes_priority_reason_and_limited_log_refs(monkeypatch):
     from logmind.domain.analysis import tasks

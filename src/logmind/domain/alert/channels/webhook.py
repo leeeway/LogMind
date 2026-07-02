@@ -172,7 +172,7 @@ def _build_ai_analysis_alert(
         f"",
         f"---",
         f"",
-        f"**AI 分析结论**:",
+        f"**摘要**:",
         f"{content[:2000]}",
         f"",
         f"---",

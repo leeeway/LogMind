@@ -242,6 +242,22 @@ def _compact_text(text: str, max_chars: int) -> str:
     return compacted[: max_chars - 1].rstrip() + "…"
 
 
+def _normalize_alert_text_for_compare(text: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", (text or "").lower())
+
+
+def _is_redundant_alert_text(candidate: str, reference: str) -> bool:
+    candidate_norm = _normalize_alert_text_for_compare(candidate)
+    reference_norm = _normalize_alert_text_for_compare(reference)
+    if not candidate_norm or not reference_norm:
+        return False
+    if candidate_norm == reference_norm:
+        return True
+
+    shorter, longer = sorted((candidate_norm, reference_norm), key=len)
+    return len(shorter) >= 40 and longer.startswith(shorter)
+
+
 def _analysis_entry_text(task_id: str) -> str:
     """Return a human-facing analysis entry link, or a task id when no public URL exists."""
     try:
@@ -342,12 +358,15 @@ def _build_alert_location_summary(
     lines = [
         f"{priority_label} {issue_label}".rstrip(),
         f"问题: {content}",
-        f"疑似原因: {cause}",
+    ]
+    if not _is_redundant_alert_text(cause, content):
+        lines.append(f"疑似原因: {cause}")
+    lines.extend([
         "证据:",
         *[f"- {line}" for line in evidence_lines],
         "下一步:",
         *[f"- {line}" for line in verification_lines],
-    ]
+    ])
     if reason:
         lines.append(f"通知原因: {reason}")
     lines.append(f"分析入口: {_analysis_entry_text(ctx.task_id)}")
