@@ -119,6 +119,46 @@ def test_ai_alert_location_summary_omits_truncated_duplicate_ai_finding_evidence
     assert content.count("Broken pipe") == 1
 
 
+def test_ai_alert_location_summary_omits_empty_evidence_and_next_step_sections(monkeypatch):
+    from logmind.domain.analysis import tasks
+
+    monkeypatch.setattr(
+        "logmind.core.config.get_settings",
+        lambda: SimpleNamespace(public_app_url="https://logmind.example.com"),
+    )
+
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="task-no-actionable-sections",
+        business_line_id="biz-1",
+        business_line_name="qr.module",
+        log_count=259,
+    )
+    alert_content = (
+        "在给定时间窗内，日志以数据库访问成功的 DEBUG 记录为主，未直接出现 ERROR 级别异常堆栈；"
+        "但错误率检测显示 2026-07-02T02:53:00Z 附近出现显著突增。"
+    )
+
+    content = tasks._build_alert_location_summary(
+        ctx,
+        {
+            "result_type": "summary",
+            "severity": "critical",
+            "content": alert_content,
+        },
+        priority_label="🟡 [P1|57.7分]",
+        issue_label="",
+        reason="🟡 P1: critical 级别错误，正常通知",
+    )
+
+    assert f"问题: {alert_content}" in content
+    assert "暂无结构化证据" not in content
+    assert "打开分析详情，核对原始日志" not in content
+    assert "证据:" not in content
+    assert "下一步:" not in content
+    assert "分析入口: https://logmind.example.com/analysis/task-no-actionable-sections" in content
+
+
 def test_ai_alert_template_uses_compact_summary_heading():
     from logmind.domain.alert.channels.webhook import _build_ai_analysis_alert
 

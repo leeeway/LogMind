@@ -356,12 +356,8 @@ def _build_alert_location_summary(
         refs = [str(ref)[:120] for ref in parsed_refs if ref][:3] if isinstance(parsed_refs, list) else []
         if refs:
             evidence_lines.append(f"日志引用: {', '.join(refs)}")
-    if not evidence_lines:
-        evidence_lines.append("暂无结构化证据，建议打开分析详情查看完整上下文")
 
     verification_lines = [_compact_text(str(step), 140) for step in verifications if step][:2]
-    if not verification_lines:
-        verification_lines.append("打开分析详情，核对原始日志、变点和关联服务上下文")
 
     lines = [
         f"{priority_label} {issue_label}".rstrip(),
@@ -369,12 +365,16 @@ def _build_alert_location_summary(
     ]
     if not _is_redundant_alert_text(cause, content):
         lines.append(f"疑似原因: {cause}")
-    lines.extend([
-        "证据:",
-        *[f"- {line}" for line in evidence_lines],
-        "下一步:",
-        *[f"- {line}" for line in verification_lines],
-    ])
+    if evidence_lines:
+        lines.extend([
+            "证据:",
+            *[f"- {line}" for line in evidence_lines],
+        ])
+    if verification_lines:
+        lines.extend([
+            "下一步:",
+            *[f"- {line}" for line in verification_lines],
+        ])
     if reason:
         lines.append(f"通知原因: {reason}")
     lines.append(f"分析入口: {_analysis_entry_text(ctx.task_id)}")
