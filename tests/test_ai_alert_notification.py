@@ -41,6 +41,44 @@ def test_ai_alert_location_summary_omits_duplicate_cause(monkeypatch):
     assert content.count(alert_content) == 1
 
 
+def test_ai_alert_location_summary_omits_duplicate_ai_finding_evidence(monkeypatch):
+    from logmind.domain.analysis import tasks
+
+    monkeypatch.setattr(
+        "logmind.core.config.get_settings",
+        lambda: SimpleNamespace(public_app_url=""),
+    )
+
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="task-duplicate-evidence",
+        business_line_id="biz-1",
+        business_line_name="Core Service",
+        log_count=62,
+    )
+    alert_content = (
+        "在分析窗口内捕获到同一类 ERROR/异常堆栈："
+        "cn.gydev.lib.exception.RedisLockException: 操作过快，请稍后重试，"
+        "发生于 ExternalAuthController.login 登录接口的分布式锁/互斥保护逻辑中。"
+    )
+
+    content = tasks._build_alert_location_summary(
+        ctx,
+        {
+            "result_type": "root_cause",
+            "severity": "warning",
+            "content": alert_content,
+        },
+        priority_label="🟡 [P1|50.2分]",
+        issue_label="",
+        reason="P1: warning 级别错误，正常通知",
+    )
+
+    assert f"问题: {alert_content}" in content
+    assert "AI 分析发现:" not in content
+    assert content.count(alert_content) == 1
+
+
 def test_ai_alert_template_uses_compact_summary_heading():
     from logmind.domain.alert.channels.webhook import _build_ai_analysis_alert
 

@@ -255,7 +255,7 @@ def _is_redundant_alert_text(candidate: str, reference: str) -> bool:
         return True
 
     shorter, longer = sorted((candidate_norm, reference_norm), key=len)
-    return len(shorter) >= 40 and longer.startswith(shorter)
+    return len(shorter) >= 40 and shorter in longer
 
 
 def _analysis_entry_text(task_id: str) -> str:
@@ -335,6 +335,8 @@ def _build_alert_location_summary(
     evidence_lines: list[str] = []
     for item in evidence:
         rendered = _format_evidence_item(item)
+        if _is_redundant_alert_text(rendered, content) or _is_redundant_alert_text(rendered, cause):
+            continue
         if rendered and rendered not in evidence_lines:
             evidence_lines.append(rendered)
         if len(evidence_lines) >= 3:
