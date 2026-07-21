@@ -76,3 +76,19 @@ async def test_prompt_build_keeps_rendered_prompt_when_commit_connection_resets(
     assert ctx.system_prompt == "system prompt"
     assert ctx.user_prompt == "user prompt"
     assert ctx.prompt_template_id == "tpl-1"
+
+
+def test_sanitize_negative_boilerplate():
+    from logmind.domain.analysis.stages.result_parse import _sanitize_negative_boilerplate
+
+    sample = (
+        "当前提供的日志片段仅包含 DEBUG 级别的数据库 SELECT 执行记录，且均显示“执行成功”，"
+        "未发现 ERROR、异常堆栈、DataIntegrityViolationException、SQL 数据截断、核心表写入失败或连接池/数据库故障等严重问题。"
+        "因此无法从现有片段确认具体业务故障。"
+    )
+    res = _sanitize_negative_boilerplate(sample)
+    assert "DataIntegrityViolationException" not in res
+    assert "SQL 数据截断" not in res
+    assert "当前提供的日志片段仅包含 DEBUG 级别的数据库 SELECT 执行记录" in res
+    assert "因此无法从现有片段确认具体业务故障" in res
+

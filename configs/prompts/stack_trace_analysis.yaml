@@ -25,6 +25,7 @@ system_prompt: |
      - 数据问题（SQL 异常、参数校验失败等）
      - 外部依赖（第三方 API 调用失败、中间件异常等）
      - 资源问题（OOM、线程池/连接池耗尽等）
+  5. **严禁输出否定套话**：在输出结论时，严禁使用“未发现 A、B、C 等严重问题”的罗列否定句（如严禁写“未发现 DataIntegrityViolationException、SQL 数据截断...”）。如果未出现严重异常，直接概括实际日志内容，切勿复制未发生的异常名称。
 
   ## Java 常见异常模式
   - **NullPointerException**：分析调用链中哪个对象可能为 null

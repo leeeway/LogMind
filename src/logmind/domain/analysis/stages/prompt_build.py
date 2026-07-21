@@ -212,7 +212,8 @@ def _fallback_system_prompt(ctx: PipelineContext) -> str:
 3. 即使日志中没有严重问题，也请输出至少一条 info 级别的总结。
 4. 对相同类型的错误请合并分析，说明出现频率和影响范围。
 5. 对于 severity 为 critical 或 warning 的结果，务必提供 error_signals 和 experience_rule 字段。
-6. 对于业务噪声日志，务必提供 noise_classification、noise_category、noise_reason 字段。"""
+6. 对于业务噪声日志，务必提供 noise_classification、noise_category、noise_reason 字段。
+7. **严禁输出否定套话罗列**：在输出分析结论时，严禁使用“未发现 A、B、C 等严重问题”的否定套话进行冗长罗列（如严禁写“未发现 DataIntegrityViolationException、SQL 数据截断、核心表写入失败...”）。若无严重异常，直接说明实际日志状态，切勿复述抄写未出现的异常名称。"""
 
     if ctx.has_stack_traces:
         if ctx.language == "csharp":

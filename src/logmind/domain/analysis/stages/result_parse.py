@@ -1,10 +1,26 @@
 """Result Parse Stage — Parse AI output to structured results."""
 
 import json
+import re
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
 
 logger = get_logger(__name__)
+
+_NEGATIVE_BOILERPLATE_RE = re.compile(
+    r"(?:[，,、\s]*未发现\s*(?:ERROR|异常堆栈|DataIntegrityViolationException|SQL\s*数据截断|核心[库表]*写入失败|连接池(?:/数据库)?故障|致命异常|结构性[重症]*异常|\s|、|或|等)+[严重致命]*[问题异常]*[。！!？?\s]*)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_negative_boilerplate(text: str) -> str:
+    """Strip out boilerplate negative enumeration phrases from AI analysis content."""
+    if not text:
+        return text
+    cleaned = _NEGATIVE_BOILERPLATE_RE.sub("。", text)
+    cleaned = re.sub(r"([。！!？?])\s*([。！!？?])", r"\1", cleaned)
+    cleaned = re.sub(r"[，,]\s*([。！!？?])", r"\1", cleaned)
+    return cleaned.strip()
 
 
 class ResultParseStage(PipelineStage):
@@ -43,9 +59,12 @@ class ResultParseStage(PipelineStage):
                 # Normalize: keep only strings, limit to 20
                 log_refs = [str(r)[:200] for r in raw_refs if r][:20]
 
+                raw_content = item.get("content", "")
+                sanitized_content = _sanitize_negative_boilerplate(raw_content)
+
                 ctx.analysis_results.append({
                     "result_type": item.get("result_type", "anomaly"),
-                    "content": item.get("content", ""),
+                    "content": sanitized_content,
                     "severity": item.get("severity", "info"),
                     "confidence_score": float(item.get("confidence_score", 0.5)),
                     "structured_data": json.dumps(item, ensure_ascii=False),
