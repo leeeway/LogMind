@@ -94,6 +94,7 @@ class TestCrossServiceCorrelation:
             MagicMock(raw={"message": "Connection pool exhausted"}),
             MagicMock(raw={"message": "DB query timeout after 30s"}),
         ]
+        mock_result.total = 27
         mock_log_svc.search_logs = AsyncMock(return_value=mock_result)
 
         # Mock DB context
@@ -121,8 +122,10 @@ class TestCrossServiceCorrelation:
         assert len(result.correlated_errors) == 1
         assert result.correlated_errors[0]["service_name"] == "DatabaseService"
         assert result.correlated_errors[0]["direction"] == "upstream"
-        assert result.correlated_errors[0]["error_count"] == 2
+        assert result.correlated_errors[0]["error_count"] == 27
         assert "Connection pool exhausted" in result.correlated_errors[0]["error_samples"][0]
+        request = mock_log_svc.search_logs.await_args.args[0]
+        assert request.business_line_id == "biz-db-001"
 
     @pytest.mark.asyncio
     async def test_no_correlated_errors(self):

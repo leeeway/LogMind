@@ -60,6 +60,14 @@ class AIInferenceStub(PipelineStage):
         return ctx
 
 
+class ResultParseStub(PipelineStage):
+    name = "result_parse"
+
+    async def execute(self, ctx: PipelineContext) -> PipelineContext:
+        ctx.analysis_results = []
+        return ctx
+
+
 # ── Helper ───────────────────────────────────────────────
 
 def _make_ctx(**kwargs) -> PipelineContext:
@@ -119,20 +127,23 @@ async def test_non_critical_stage_continues():
 
 @pytest.mark.asyncio
 async def test_semantic_dedup_hit_skips_ai_stages():
-    """When semantic_dedup_hit is True, prompt_build and ai_inference are skipped."""
+    """A semantic hit keeps the reused result and skips all AI parsing stages."""
     pipeline = AnalysisPipeline(stages=[
-        OkStage(), PromptBuildStub(), AIInferenceStub(), OkStage()
+        OkStage(), PromptBuildStub(), AIInferenceStub(), ResultParseStub(), OkStage()
     ])
-    ctx = _make_ctx(semantic_dedup_hit=True)
+    reused = [{"severity": "warning", "content": "历史已确认根因"}]
+    ctx = _make_ctx(semantic_dedup_hit=True, analysis_results=reused.copy())
 
     result = await pipeline.run(ctx)
 
     assert result.log_count == 2  # Two OkStages executed
     assert result.system_prompt == ""  # PromptBuild was skipped
     assert result.ai_response == ""    # AIInference was skipped
-    assert len(result.stage_metrics) == 4
+    assert result.analysis_results == reused
+    assert len(result.stage_metrics) == 5
     assert result.stage_metrics[1]["status"] == "skipped"
     assert result.stage_metrics[2]["status"] == "skipped"
+    assert result.stage_metrics[3]["status"] == "skipped"
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,30 @@ class TestSourceLogRefs:
     """Tests for source_log_refs extraction in ResultParseStage."""
 
     @pytest.mark.asyncio
+    async def test_semantic_reuse_is_not_overwritten_by_empty_ai_response(self):
+        from logmind.domain.analysis.pipeline import PipelineContext
+        from logmind.domain.analysis.stages.result_parse import ResultParseStage
+
+        reused = [{
+            "result_type": "root_cause",
+            "content": "历史确认：Redis 连接池耗尽",
+            "severity": "warning",
+            "alertable": True,
+        }]
+        ctx = PipelineContext(
+            tenant_id="t1",
+            task_id="t1",
+            business_line_id="b1",
+            semantic_dedup_hit=True,
+            analysis_results=reused.copy(),
+        )
+
+        result = await ResultParseStage().execute(ctx)
+
+        assert result.analysis_results == reused
+        assert result.log_metadata["actionable_findings"] == 1
+
+    @pytest.mark.asyncio
     async def test_refs_extracted_from_ai_output(self):
         """source_log_refs from AI output are captured."""
         from logmind.domain.analysis.stages.result_parse import ResultParseStage

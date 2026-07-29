@@ -60,6 +60,36 @@ MAX_SAMPLED_LOGS = 200
 MAX_PROCESSED_CHARS = 32000
 
 
+def _fit_complete_events(events: list[str], max_chars: int) -> str:
+    """Fit complete log events while retaining both early and recent evidence."""
+    rendered = "\n".join(events)
+    if len(rendered) <= max_chars:
+        return rendered
+
+    marker = "\n... (middle events omitted) ...\n"
+    available = max(max_chars - len(marker), 1)
+
+    newest = events[-1]
+    if len(newest) > available:
+        side_budget = max(available // 2, 1)
+        return newest[:side_budget] + marker + newest[-side_budget:]
+
+    # Always retain the latest complete event; root exceptions and failure
+    # responses commonly appear at the end of the sampled timeline.
+    tail = [newest]
+    remaining = available - len(newest)
+    head: list[str] = []
+    head_size = 0
+    for event in events[:-1]:
+        cost = len(event) + (1 if head else 0)
+        if head_size + cost > remaining:
+            break
+        head.append(event)
+        head_size += cost
+
+    return "\n".join(head) + marker + "\n".join(tail)
+
+
 class LogPreprocessStage(PipelineStage):
     """
     Clean, deduplicate, merge stack traces, and format logs for AI consumption.
@@ -87,9 +117,11 @@ class LogPreprocessStage(PipelineStage):
         # Phase 2: Deduplicate
         seen = set()
         unique_logs = []
+        occurrence_counts: dict[str, int] = defaultdict(int)
         for log in merged_logs:
             msg = self._extract_message(log)
             dedup_key = self._make_dedup_key(msg)
+            occurrence_counts[dedup_key] += 1
             if dedup_key not in seen:
                 seen.add(dedup_key)
                 unique_logs.append(log)
@@ -156,13 +188,15 @@ class LogPreprocessStage(PipelineStage):
                 context_parts.append(f"host:{host_name}")
 
             context_str = f" [{', '.join(context_parts)}]" if context_parts else ""
-            lines.append(f"[{ts}] [{level}]{context_str} {msg}")
+            occurrences = occurrence_counts[self._make_dedup_key(
+                self._extract_message(log)
+            )]
+            frequency_str = f" [occurrences:{occurrences}]" if occurrences > 1 else ""
+            lines.append(f"[{ts}] [{level}]{context_str}{frequency_str} {msg}")
 
-        ctx.processed_logs = "\n".join(lines)
-
-        # Truncate to ~8000 tokens (~32000 chars)
-        if len(ctx.processed_logs) > MAX_PROCESSED_CHARS:
-            ctx.processed_logs = ctx.processed_logs[:MAX_PROCESSED_CHARS] + "\n... (truncated)"
+        # Fit complete events to the model budget. Keep both ends of the sampled
+        # timeline so a recent trigger or a trailing C# InnerException is not lost.
+        ctx.processed_logs = _fit_complete_events(lines, MAX_PROCESSED_CHARS)
 
         # Detect stack traces in processed output
         has_stacks = any(
@@ -177,6 +211,9 @@ class LogPreprocessStage(PipelineStage):
             "original_count": ctx.log_count,
             "merged_count": len(merged_logs),
             "deduped_count": len(unique_logs),
+            "duplicate_occurrences": sum(
+                count - 1 for count in occurrence_counts.values() if count > 1
+            ),
             "formatted_count": len(lines),
             "has_stack_traces": ctx.has_stack_traces,
             "language": ctx.language,

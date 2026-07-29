@@ -347,6 +347,7 @@ async def execute_tool(
     tenant_id: str = "",
     business_line_id: str = "",
     related_services: dict | None = None,
+    language: str | None = None,
 ) -> str:
     """
     Execute an agent tool and return the result as a string.
@@ -359,13 +360,24 @@ async def execute_tool(
             return await _exec_search_logs(
                 arguments, es_index_pattern, time_from, time_to,
                 business_line_id=business_line_id,
+                language=language,
             )
         elif tool_name == "get_log_context":
             return await _exec_get_log_context(
-                arguments, es_index_pattern, business_line_id=business_line_id
+                arguments,
+                es_index_pattern,
+                business_line_id=business_line_id,
+                language=language,
             )
         elif tool_name == "count_error_patterns":
-            return await _exec_count_error_patterns(arguments, es_index_pattern, time_from, time_to)
+            return await _exec_count_error_patterns(
+                arguments,
+                es_index_pattern,
+                time_from,
+                time_to,
+                business_line_id=business_line_id,
+                language=language,
+            )
         elif tool_name == "list_available_indices":
             return await _exec_list_indices(arguments, es_index_pattern)
         elif tool_name == "search_knowledge_base":
@@ -387,9 +399,22 @@ async def execute_tool(
                 arguments, tenant_id=tenant_id, business_line_id=business_line_id
             )
         elif tool_name == "get_service_health":
-            return await _exec_get_service_health(arguments, es_index_pattern, time_from, time_to)
+            return await _exec_get_service_health(
+                arguments,
+                es_index_pattern,
+                time_from,
+                time_to,
+                business_line_id=business_line_id,
+                language=language,
+            )
         elif tool_name == "compare_time_windows":
-            return await _exec_compare_time_windows(arguments, es_index_pattern, time_to)
+            return await _exec_compare_time_windows(
+                arguments,
+                es_index_pattern,
+                time_to,
+                business_line_id=business_line_id,
+                language=language,
+            )
         elif tool_name == "trace_error_chain":
             related_patterns = await _load_related_index_patterns(related_services, tenant_id)
             return await _exec_trace_error_chain(
@@ -471,6 +496,7 @@ async def _exec_search_logs(
     default_from,
     default_to,
     business_line_id: str = "",
+    language: str | None = None,
 ) -> str:
     """Execute search_logs tool."""
     from logmind.domain.log.schemas import LogQueryRequest
@@ -493,6 +519,7 @@ async def _exec_search_logs(
         severity=args.get("severity"),
         domain=args.get("domain"),
         business_line_id=business_line_id or None,
+        language=language,
         size=size,
     )
 
@@ -520,6 +547,7 @@ async def _exec_get_log_context(
     args: dict,
     index_pattern: str,
     business_line_id: str = "",
+    language: str | None = None,
 ) -> str:
     """Execute get_log_context tool."""
     from logmind.domain.log.schemas import LogQueryRequest
@@ -531,9 +559,9 @@ async def _exec_get_log_context(
 
     window = args.get("window_minutes", 5)
     size = min(args.get("size", 30), 50)
-    # Default to 'warning' severity to avoid pulling in INFO/DEBUG noise
-    # that often contains sensitive business data (SQL queries, tokens, etc.)
-    severity = args.get("severity", "warning")
+    # Context must include the successful operations immediately before/after
+    # an error. Sensitive values are masked before returning to the model.
+    severity = args.get("severity")
 
     request = LogQueryRequest(
         index_pattern=index_pattern,
@@ -541,6 +569,7 @@ async def _exec_get_log_context(
         time_to=ts + timedelta(minutes=window),
         severity=severity,
         business_line_id=business_line_id or None,
+        language=language,
         size=size,
     )
 
@@ -566,7 +595,15 @@ async def _exec_get_log_context(
     }, ensure_ascii=False, default=str)
 
 
-async def _exec_count_error_patterns(args: dict, index_pattern: str, default_from, default_to) -> str:
+async def _exec_count_error_patterns(
+    args: dict,
+    index_pattern: str,
+    default_from,
+    default_to,
+    *,
+    business_line_id: str = "",
+    language: str | None = None,
+) -> str:
     """Execute count_error_patterns tool."""
 
     t_from = _parse_time(args.get("time_from")) or default_from
@@ -575,12 +612,19 @@ async def _exec_count_error_patterns(args: dict, index_pattern: str, default_fro
     if not t_from or not t_to:
         return json.dumps({"error": "time range is required"})
 
-    stats = await log_service.get_log_stats(index_pattern, t_from, t_to)
+    stats = await log_service.get_log_stats(
+        index_pattern,
+        t_from,
+        t_to,
+        severity="error",
+        business_line_id=business_line_id,
+        language=language,
+    )
 
     group_by = args.get("group_by", "filetype")
 
     result = {
-        "total_logs": stats.total_logs,
+        "error_count": stats.total_logs,
         "time_range": f"{t_from.isoformat()} ~ {t_to.isoformat()}",
     }
 
@@ -913,15 +957,29 @@ async def _exec_get_alerts(
     return "\n".join(lines)
 
 
-async def _exec_get_service_health(args: dict, index_pattern: str, default_from, default_to) -> str:
+async def _exec_get_service_health(
+    args: dict,
+    index_pattern: str,
+    default_from,
+    default_to,
+    *,
+    business_line_id: str = "",
+    language: str | None = None,
+) -> str:
     """Query service health metrics from ES: error rate, total count, hourly trend."""
     from logmind.core.elasticsearch import get_es_client
+    from logmind.domain.log.service import build_severity_filter
 
     hours_back = min(args.get("hours_back", 6), 24)
     now = default_to or datetime.now(timezone.utc)
     since = now - timedelta(hours=hours_back)
 
-    es = await get_es_client()
+    es = get_es_client()
+    error_filter = await build_severity_filter(
+        "error",
+        business_line_id=business_line_id,
+        language=language,
+    )
 
     # Total + error count
     body = {
@@ -938,6 +996,9 @@ async def _exec_get_service_health(args: dict, index_pattern: str, default_from,
             "by_level": {
                 "terms": {"field": "level.keyword", "size": 10}
             },
+            "errors": {
+                "filter": error_filter,
+            },
             "hourly": {
                 "date_histogram": {
                     "field": "@timestamp",
@@ -945,9 +1006,7 @@ async def _exec_get_service_health(args: dict, index_pattern: str, default_from,
                 },
                 "aggs": {
                     "errors": {
-                        "filter": {
-                            "terms": {"level.keyword": ["ERROR", "FATAL", "error", "fatal"]}
-                        }
+                        "filter": error_filter
                     }
                 }
             }
@@ -961,7 +1020,7 @@ async def _exec_get_service_health(args: dict, index_pattern: str, default_from,
         total = aggs.get("total", {}).get("value", 0)
         level_buckets = aggs.get("by_level", {}).get("buckets", [])
         level_dist = {b["key"]: b["doc_count"] for b in level_buckets}
-        error_count = sum(v for k, v in level_dist.items() if k.upper() in ("ERROR", "FATAL"))
+        error_count = aggs.get("errors", {}).get("doc_count", 0)
         error_rate = round(error_count / max(total, 1) * 100, 2)
 
         hourly = aggs.get("hourly", {}).get("buckets", [])
@@ -982,16 +1041,29 @@ async def _exec_get_service_health(args: dict, index_pattern: str, default_from,
         return json.dumps({"error": f"Service health query failed: {str(e)}"})
 
 
-async def _exec_compare_time_windows(args: dict, index_pattern: str, default_to) -> str:
+async def _exec_compare_time_windows(
+    args: dict,
+    index_pattern: str,
+    default_to,
+    *,
+    business_line_id: str = "",
+    language: str | None = None,
+) -> str:
     """Compare error distribution between two time windows."""
     from logmind.core.elasticsearch import get_es_client
+    from logmind.domain.log.service import build_severity_filter
 
     window_hours = min(args.get("window_hours", 1), 6)
     now = default_to or datetime.now(timezone.utc)
     current_start = now - timedelta(hours=window_hours)
     prev_start = current_start - timedelta(hours=window_hours)
 
-    es = await get_es_client()
+    es = get_es_client()
+    error_filter = await build_severity_filter(
+        "error",
+        business_line_id=business_line_id,
+        language=language,
+    )
 
     async def _count_errors(start, end):
         body = {
@@ -999,8 +1071,15 @@ async def _exec_compare_time_windows(args: dict, index_pattern: str, default_to)
             "query": {
                 "bool": {
                     "filter": [
-                        {"range": {"@timestamp": {"gte": start.isoformat(), "lt": end.isoformat()}}},
-                        {"terms": {"level.keyword": ["ERROR", "FATAL", "error", "fatal"]}},
+                        {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": start.isoformat(),
+                                    "lt": end.isoformat(),
+                                }
+                            }
+                        },
+                        error_filter,
                     ]
                 }
             },
@@ -1060,7 +1139,7 @@ async def _exec_trace_error_chain(
     if not search_index:
         return "未配置可搜索的服务索引。"
 
-    es = await get_es_client()
+    es = get_es_client()
 
     # Search only the current service and explicitly configured related services.
     body = {

@@ -27,6 +27,9 @@ _INLINE_TS_RE = re.compile(
     r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))"
     r"(?P<suffix>\]?)"
 )
+_WECOM_OMITTED_METADATA_RE = re.compile(
+    r"^\s*(?:[-*>]\s*)?(?:\*\*)?(?:通知原因|分析入口)(?:\*\*)?\s*[:：]"
+)
 
 
 def _is_wecom_webhook(url: str | None) -> bool:
@@ -35,6 +38,15 @@ def _is_wecom_webhook(url: str | None) -> bool:
         return False
     lowered = url.lower()
     return "qyapi.weixin" in lowered or "wecom" in lowered
+
+
+def _strip_wecom_notification_metadata(content: str) -> str:
+    """Remove low-value internal metadata from operator-facing WeCom messages."""
+    return "\n".join(
+        line
+        for line in content.splitlines()
+        if not _WECOM_OMITTED_METADATA_RE.match(line)
+    )
 
 
 def _to_display_timezone(dt: datetime | None) -> datetime | None:
@@ -248,9 +260,10 @@ async def send_webhook_notification(
     # Detect webhook type from URL and build payload accordingly
     if _is_wecom_webhook(url):
         # WeChat Work
+        wecom_content = _strip_wecom_notification_metadata(markdown_content)
         payload = {
             "msgtype": msg_type,
-            msg_type: {"content": markdown_content},
+            msg_type: {"content": wecom_content},
         }
     elif "dingtalk" in url or "oapi.dingtalk" in url:
         # DingTalk

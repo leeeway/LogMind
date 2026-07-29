@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from logmind.core.logging import get_logger
-from logmind.domain.log.service import _SEVERITY_FILETYPE_MAP
+from logmind.domain.log.service import build_base_severity_filter
 
 logger = get_logger(__name__)
 
@@ -235,33 +235,7 @@ class AnomalyDetector:
     @staticmethod
     def _build_severity_filter(severity_threshold: str) -> dict:
         """Build an ES filter aligned with LogService severity matching."""
-        threshold = (severity_threshold or "error").lower()
-        should_clauses = [
-            {"term": {"level.keyword": threshold}},
-            {"term": {"level": threshold}},
-            {"term": {"log.level.keyword": threshold}},
-            {"term": {"log.level": threshold}},
-            {"term": {"severity.keyword": threshold}},
-            {"term": {"severity": threshold}},
-        ]
-
-        if threshold == "critical":
-            should_clauses.extend([
-                {"term": {"level.keyword": "fatal"}},
-                {"term": {"level": "fatal"}},
-                {"term": {"log.level.keyword": "fatal"}},
-                {"term": {"log.level": "fatal"}},
-            ])
-
-        for filetype in _SEVERITY_FILETYPE_MAP.get(threshold, []):
-            should_clauses.append({"term": {"gy.filetype.keyword": filetype}})
-
-        return {
-            "bool": {
-                "should": should_clauses,
-                "minimum_should_match": 1,
-            }
-        }
+        return build_base_severity_filter(severity_threshold or "error")
 
 
 # Singleton

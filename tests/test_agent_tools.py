@@ -72,7 +72,7 @@ async def test_trace_error_chain_uses_bounded_indices_and_masks_messages(monkeyp
         }
 
     fake_es.search = fake_search
-    monkeypatch.setattr("logmind.core.elasticsearch.get_es_client", AsyncMock(return_value=fake_es))
+    monkeypatch.setattr("logmind.core.elasticsearch.get_es_client", lambda: fake_es)
 
     result = await agent_tools._exec_trace_error_chain(
         {"error_keyword": "Login failed", "minutes_back": 30},
@@ -85,6 +85,113 @@ async def test_trace_error_chain_uses_bounded_indices_and_masks_messages(monkeyp
     assert captured["index"] != "*"
     assert "supersecret" not in result
     assert "password=" in result
+
+
+@pytest.mark.asyncio
+async def test_count_error_patterns_requests_error_only_stats(monkeypatch):
+    from logmind.domain.analysis import agent_tools
+
+    captured = {}
+
+    async def fake_get_log_stats(index_pattern, time_from, time_to, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            total_logs=3,
+            by_filetype=[],
+            by_domain=[],
+            time_histogram=[],
+            by_level=[],
+        )
+
+    monkeypatch.setattr(agent_tools.log_service, "get_log_stats", fake_get_log_stats)
+
+    result = await agent_tools._exec_count_error_patterns(
+        {},
+        "csharp-*",
+        datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+        datetime(2026, 6, 28, 11, 0, tzinfo=timezone.utc),
+        business_line_id="biz-1",
+        language="csharp",
+    )
+
+    assert captured == {
+        "severity": "error",
+        "business_line_id": "biz-1",
+        "language": "csharp",
+    }
+    assert '"error_count": 3' in result
+    assert "total_logs" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_log_context_keeps_all_levels_and_language(monkeypatch):
+    from logmind.domain.analysis import agent_tools
+
+    captured = {}
+
+    async def fake_search_logs(request):
+        captured["request"] = request
+        return SimpleNamespace(total=0, logs=[])
+
+    monkeypatch.setattr(agent_tools.log_service, "search_logs", fake_search_logs)
+
+    await agent_tools._exec_get_log_context(
+        {"timestamp": "2026-06-28T10:00:00Z"},
+        "csharp-*",
+        business_line_id="biz-1",
+        language="csharp",
+    )
+
+    request = captured["request"]
+    assert request.severity is None
+    assert request.language == "csharp"
+    assert request.business_line_id == "biz-1"
+
+
+@pytest.mark.asyncio
+async def test_service_health_uses_canonical_csharp_error_count(monkeypatch):
+    from logmind.domain.analysis import agent_tools
+
+    captured = {}
+    fake_es = AsyncMock()
+
+    async def fake_search(**kwargs):
+        captured.update(kwargs)
+        return {
+            "aggregations": {
+                "total": {"value": 10003},
+                "by_level": {"buckets": []},
+                "errors": {"doc_count": 3},
+                "hourly": {
+                    "buckets": [{
+                        "key_as_string": "2026-06-28T10:00:00Z",
+                        "errors": {"doc_count": 3},
+                    }]
+                },
+            }
+        }
+
+    fake_es.search = fake_search
+    monkeypatch.setattr("logmind.core.elasticsearch.get_es_client", lambda: fake_es)
+    monkeypatch.setattr(
+        "logmind.domain.log.error_signals.get_all_error_signals",
+        AsyncMock(return_value=[]),
+    )
+
+    result = await agent_tools._exec_get_service_health(
+        {"hours_back": 1},
+        "csharp-*",
+        None,
+        datetime(2026, 6, 28, 11, 0, tzinfo=timezone.utc),
+        business_line_id="biz-1",
+        language="csharp",
+    )
+
+    query_text = str(captured["body"])
+    assert "sys.log.txt" not in query_text
+    assert "[ERR]" in query_text
+    assert "错误数: 3" in result
+    assert "错误率: 0.03%" in result
 
 
 @pytest.mark.asyncio

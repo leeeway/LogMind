@@ -95,6 +95,8 @@ class ChangePointDetectionStage(PipelineStage):
             window_hours = settings.analysis_changepoint_window_hours
             analysis_end = ctx.time_to
             analysis_start = analysis_end - timedelta(hours=window_hours)
+            if ctx.time_from:
+                analysis_start = max(analysis_start, ctx.time_from)
 
             # Query ES for minute-level error counts
             time_series = await self._fetch_error_time_series(
@@ -162,31 +164,13 @@ class ChangePointDetectionStage(PipelineStage):
             index_pattern = biz.es_index_pattern
 
         try:
-            from logmind.domain.log.error_signals import get_all_error_signals
-            from logmind.domain.log.service import _SEVERITY_FILETYPE_MAP
+            from logmind.domain.log.service import build_severity_filter
 
-            error_should = [
-                {"term": {"level.keyword": "ERROR"}},
-                {"term": {"level.keyword": "FATAL"}},
-                {"term": {"level": "error"}},
-                {"term": {"level": "fatal"}},
-                {"term": {"log.level": "error"}},
-                {"term": {"severity": "error"}},
-                {"term": {"loglevel": "ERROR"}},
-                {"term": {"loglevel": "FATAL"}},
-                {"match_phrase": {"message": "[ERROR]"}},
-                {"match_phrase": {"message": "[FATAL]"}},
-                {"match_phrase": {"message": "] ERROR "}},
-                {"match_phrase": {"message": "Exception"}},
-                {"match_phrase": {"message": "Error:"}},
-                {"match_phrase": {"message": "Traceback"}},
-                {"match_phrase": {"message": "panic:"}},
-            ]
-            for filetype in _SEVERITY_FILETYPE_MAP.get("error", []):
-                error_should.append({"term": {"gy.filetype.keyword": filetype}})
-
-            for signal in await get_all_error_signals(business_line_id):
-                error_should.append({"match_phrase": {"message": signal}})
+            error_filter = await build_severity_filter(
+                "error",
+                business_line_id=business_line_id,
+                language=getattr(biz, "language", None),
+            )
 
             resp = await self.log_service.es.search(
                 index=index_pattern,
@@ -202,12 +186,7 @@ class ChangePointDetectionStage(PipelineStage):
                                     }
                                 }
                             },
-                            {
-                                "bool": {
-                                    "should": error_should,
-                                    "minimum_should_match": 1,
-                                }
-                            },
+                            error_filter,
                         ]
                     }
                 },

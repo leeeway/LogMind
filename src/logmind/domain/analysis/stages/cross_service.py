@@ -14,8 +14,7 @@ When a business line has errors, this stage:
 This is a NON-CRITICAL stage — failure does not abort the pipeline.
 """
 
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
@@ -75,6 +74,7 @@ class CrossServiceCorrelationStage(PipelineStage):
             stmt = select(BusinessLine).where(
                 BusinessLine.id.in_(all_related),
                 BusinessLine.is_active == True,  # noqa: E712
+                BusinessLine.tenant_id == ctx.tenant_id,
             )
             result = await session.execute(stmt)
             for biz in result.scalars().all():
@@ -114,6 +114,7 @@ class CrossServiceCorrelationStage(PipelineStage):
                     time_to=time_to,
                     severity="error",
                     language=config["language"],
+                    business_line_id=biz_id,
                     size=MAX_ERRORS_PER_SERVICE,
                 )
                 result = await self.log_service.search_logs(request)
@@ -130,7 +131,7 @@ class CrossServiceCorrelationStage(PipelineStage):
                         "service_name": config["name"],
                         "service_id": biz_id,
                         "direction": config["direction"],
-                        "error_count": len(result.logs),
+                        "error_count": result.total,
                         "error_samples": error_samples,
                     })
 
@@ -138,7 +139,7 @@ class CrossServiceCorrelationStage(PipelineStage):
                         "cross_service_errors_found",
                         related_service=config["name"],
                         direction=config["direction"],
-                        error_count=len(result.logs),
+                        error_count=result.total,
                         task_id=ctx.task_id,
                     )
             except Exception as e:

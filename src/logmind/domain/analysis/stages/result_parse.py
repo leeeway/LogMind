@@ -111,6 +111,20 @@ class ResultParseStage(PipelineStage):
     name = "result_parse"
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
+        if ctx.semantic_dedup_hit and ctx.analysis_results:
+            ctx.log_metadata["actionable_findings"] = sum(
+                1 for result in ctx.analysis_results
+                if result.get("alertable", result.get("severity") in {
+                    "critical", "error", "warning",
+                })
+            )
+            logger.info(
+                "result_parse_reused_semantic_result",
+                result_count=len(ctx.analysis_results),
+                task_id=ctx.task_id,
+            )
+            return ctx
+
         logger.info("result_parse_input", ai_response_length=len(ctx.ai_response),
                      ai_response_preview=ctx.ai_response[:500], task_id=ctx.task_id)
 

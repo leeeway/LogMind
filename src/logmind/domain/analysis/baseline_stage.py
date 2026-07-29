@@ -17,7 +17,7 @@ Flow:
 Non-critical: if the query fails, pipeline continues with baseline=0.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
@@ -101,7 +101,11 @@ class ErrorBaselineStage(PipelineStage):
                 index_pattern=ctx.es_index_pattern,
                 time_from=hist_from,
                 time_to=hist_to,
-                severity=ctx.severity_threshold,
+                # Full-log analysis has no retrieval severity, but its priority
+                # score still compares actual errors against an error baseline.
+                severity="error",
+                business_line_id=ctx.business_line_id,
+                language=ctx.language,
             )
             if count > 0:
                 daily_counts.append(count)
@@ -118,6 +122,8 @@ class ErrorBaselineStage(PipelineStage):
         time_from: datetime,
         time_to: datetime,
         severity: str | None = None,
+        business_line_id: str = "",
+        language: str | None = None,
     ) -> int:
         """Count errors in ES using the count API (lightweight, no docs returned)."""
         filter_clauses = [
@@ -133,30 +139,13 @@ class ErrorBaselineStage(PipelineStage):
 
         # Add severity filter using the same logic as LogService.search_logs
         if severity and severity.lower() in ("error", "critical"):
-            from logmind.domain.log.service import _SEVERITY_FILETYPE_MAP
+            from logmind.domain.log.service import build_severity_filter
 
-            severity_should = [
-                {"term": {"level": severity}},
-                {"term": {"log.level": severity}},
-                {"term": {"severity": severity}},
-                {"term": {"loglevel": severity.upper()}},
-            ]
-            filetype_values = _SEVERITY_FILETYPE_MAP.get(severity.lower(), [])
-            for ft in filetype_values:
-                severity_should.append({"term": {"gy.filetype.keyword": ft}})
-            # Add message-level error indicators
-            severity_should.extend([
-                {"match_phrase": {"message": "[ERROR]"}},
-                {"match_phrase": {"message": "[FATAL]"}},
-                {"match_phrase": {"message": "] ERROR "}},
-                {"match_phrase": {"message": "Exception:"}},
-            ])
-            filter_clauses.append({
-                "bool": {
-                    "should": severity_should,
-                    "minimum_should_match": 1,
-                }
-            })
+            filter_clauses.append(await build_severity_filter(
+                severity,
+                business_line_id=business_line_id,
+                language=language,
+            ))
 
         body = {
             "query": {

@@ -49,20 +49,15 @@ _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
 }
 
 # ── C# NLog/log4net filetypes (mixed-level log files) ───
-# These files contain ALL levels in one file; level is embedded in message.
-# They are added to EVERY severity's filetype list so the ES query always
-# retrieves them. Actual level filtering happens in LogQualityFilterStage
-# via message-content regex.
+# These files contain ALL levels in one file; a filetype match alone must never
+# be treated as a severity match. Their level is determined from structured
+# fields or message markers.
 _MIXED_LEVEL_FILETYPES: set[str] = {
     "sys.log.txt",
     "sys.log",
     "app.log.txt",
     "application.log",
 }
-
-# Merge mixed-level filetypes into all severity levels
-for _sev in _SEVERITY_FILETYPE_MAP:
-    _SEVERITY_FILETYPE_MAP[_sev].extend(sorted(_MIXED_LEVEL_FILETYPES))
 
 # ── Level extraction regex patterns ─────────────────────
 # Pattern 1: Level in brackets — [ERROR], [WARN], [INFO]
@@ -114,6 +109,75 @@ _QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=&|><!(){}\[\]^"~*?:\\/])')
 def _escape_query_string(value: str) -> str:
     """Escape ES query_string special chars while preserving CJK punctuation."""
     return _QUERY_STRING_SPECIAL_RE.sub(r"\\\1", value)
+
+
+def build_base_severity_filter(
+    severity: str,
+    *,
+    language: str | None = None,
+) -> dict:
+    """Build the static portion of the canonical ES severity predicate."""
+    normalized = (severity or "").lower()
+    if normalized == "critical":
+        normalized = "error"
+
+    level_values = {
+        "error": ["error", "ERROR", "fatal", "FATAL", "critical", "CRITICAL"],
+        "warning": ["warning", "WARNING", "warn", "WARN"],
+        "info": ["info", "INFO"],
+        "debug": ["debug", "DEBUG", "trace", "TRACE"],
+    }.get(normalized, [normalized, normalized.upper()])
+
+    severity_should: list[dict] = []
+    for field in ("level", "level.keyword", "log.level", "severity", "loglevel"):
+        for value in level_values:
+            severity_should.append({"term": {field: value}})
+
+    # Dedicated Java files are homogeneous enough to identify their level.
+    # Mixed-level C# files are intentionally excluded here.
+    for filetype in _SEVERITY_FILETYPE_MAP.get(normalized, []):
+        severity_should.append({"term": {"gy.filetype.keyword": filetype}})
+
+    message_markers = {
+        "error": [
+            "[ERROR]", "[FATAL]", "[CRITICAL]", "] ERROR ", "] FATAL ",
+            "[ERR]", "[FTL]", "fail:", "crit:", "Exception:",
+            "Caused by:", "Unhandled exception", "InnerException",
+            "Traceback (most recent", "panic:", "产生异常",
+        ],
+        "warning": [
+            "[WARN]", "[WARNING]", "] WARN ", "] WARNING ", "[WRN]", "warn:",
+        ],
+        "info": ["[INFO]", "] INFO ", "[INF]", "info:"],
+        "debug": ["[DEBUG]", "] DEBUG ", "[DBG]", "dbug:", "[TRACE]", "trce:"],
+    }.get(normalized, [])
+    for marker in message_markers:
+        severity_should.append({"match_phrase": {"message": marker}})
+
+    return {
+        "bool": {
+            "should": severity_should,
+            "minimum_should_match": 1,
+        }
+    }
+
+
+async def build_severity_filter(
+    severity: str,
+    *,
+    business_line_id: str = "",
+    language: str | None = None,
+) -> dict:
+    """Build the canonical ES severity predicate used by search and statistics."""
+    predicate = build_base_severity_filter(severity, language=language)
+    if (severity or "").lower() in {"error", "critical"}:
+        from logmind.domain.log.error_signals import get_all_error_signals
+
+        for signal in await get_all_error_signals(business_line_id):
+            predicate["bool"]["should"].append(
+                {"match_phrase": {"message": signal}}
+            )
+    return predicate
 
 
 class LogService:
@@ -181,83 +245,11 @@ class LogService:
 
         # ── Severity filter — language-aware ─────────────
         if request.severity:
-            severity_should = [
-                # Standard level fields (exact term match, no false positives)
-                {"term": {"level": request.severity}},
-                {"term": {"log.level": request.severity}},
-                {"term": {"severity": request.severity}},
-                {"term": {"loglevel": request.severity.upper()}},
-            ]
-
-            # Java: match gy.filetype (error.log, info.log, etc.)
-            filetype_values = _SEVERITY_FILETYPE_MAP.get(request.severity.lower(), [])
-            for ft in filetype_values:
-                severity_should.append({"term": {"gy.filetype.keyword": ft}})
-
-            # C# / mixed-level: match level markers in message content
-            # IMPORTANT: Use phrase matching with brackets/delimiters to avoid
-            # false positives from JSON field names like "error":"" or "errorMessage":""
-            if request.severity.lower() in ("error", "critical"):
-                severity_should.extend([
-                    # Standard log format: [ERROR], [FATAL], [CRITICAL]
-                    {"match_phrase": {"message": "[ERROR]"}},
-                    {"match_phrase": {"message": "[FATAL]"}},
-                    {"match_phrase": {"message": "[CRITICAL]"}},
-                    # C# NLog format: "] ERROR " (after thread ID bracket)
-                    {"match_phrase": {"message": "] ERROR "}},
-                    {"match_phrase": {"message": "] FATAL "}},
-                    # Java/C# exception indicators (high-confidence error markers)
-                    {"match_phrase": {"message": "Exception:"}},
-                    {"match_phrase": {"message": "exception:"}},  # Java log4j lowercase
-                    {"match_phrase": {"message": "Caused by:"}},
-                    {"match_phrase": {"message": "Traceback (most recent"}},
-                    # Java exception class name patterns (catch Spring/JDBC exceptions in WARN logs)
-                    {"match_phrase": {"message": "Exception"}},
-                    {"match_phrase": {"message": "产生异常"}},
-                ])
-                if request.language == "csharp":
-                    severity_should.extend([
-                        # Serilog compact and Microsoft.Extensions.Logging formats
-                        {"match_phrase": {"message": "[ERR]"}},
-                        {"match_phrase": {"message": "[FTL]"}},
-                        {"match_phrase": {"message": "fail:"}},
-                        {"match_phrase": {"message": "crit:"}},
-                        # .NET exception-chain and runtime markers
-                        {"match_phrase": {"message": "Unhandled exception"}},
-                        {"match_phrase": {"message": "InnerException"}},
-                        {"match_phrase": {"message": "End of inner exception"}},
-                        {"match_phrase": {"message": "System."}},
-                    ])
-            elif request.severity.lower() == "warning":
-                severity_should.extend([
-                    {"match_phrase": {"message": "[WARN]"}},
-                    {"match_phrase": {"message": "[WARNING]"}},
-                    {"match_phrase": {"message": "] WARN "}},
-                    {"match_phrase": {"message": "] WARNING "}},
-                ])
-                if request.language == "csharp":
-                    severity_should.extend([
-                        {"match_phrase": {"message": "[WRN]"}},
-                        {"match_phrase": {"message": "warn:"}},
-                    ])
-
-            # ── Channel B: Content-aware error signal detection ──
-            # Catches real failures logged at wrong level (e.g. timeout in debug.log).
-            # These phrases are high-confidence fault signals — if they appear in
-            # the message, the log is worth analyzing regardless of filetype/level.
-            # Combines static hand-curated signals + AI-learned signals from past analyses.
-            if request.severity and request.severity.lower() in ("error", "critical"):
-                from logmind.domain.log.error_signals import get_all_error_signals
-                all_signals = await get_all_error_signals(request.business_line_id or "")
-                for signal in all_signals:
-                    severity_should.append({"match_phrase": {"message": signal}})
-
-            filter_clauses.append({
-                "bool": {
-                    "should": severity_should,
-                    "minimum_should_match": 1,
-                }
-            })
+            filter_clauses.append(await build_severity_filter(
+                request.severity,
+                business_line_id=request.business_line_id or "",
+                language=request.language,
+            ))
 
         # K8s metadata filters (backward compatible)
         if request.namespace:
@@ -306,6 +298,7 @@ class LogService:
             },
             "sort": [{"@timestamp": {"order": request.sort_order}}],
             "size": request.size,
+            "track_total_hits": True,
             "_source": True,
         }
 
@@ -341,19 +334,37 @@ class LogService:
         )
 
     async def get_log_stats(
-        self, index_pattern: str, time_from: datetime, time_to: datetime
+        self,
+        index_pattern: str,
+        time_from: datetime,
+        time_to: datetime,
+        *,
+        severity: str | None = None,
+        business_line_id: str = "",
+        language: str | None = None,
     ) -> LogStatsResponse:
         """Get log statistics with aggregations."""
+        filters = [{
+            "range": {
+                "@timestamp": {
+                    "gte": time_from.isoformat(),
+                    "lte": time_to.isoformat(),
+                }
+            }
+        }]
+        if severity:
+            filters.append(await build_severity_filter(
+                severity,
+                business_line_id=business_line_id,
+                language=language,
+            ))
+
         body = {
             "query": {
-                "range": {
-                    "@timestamp": {
-                        "gte": time_from.isoformat(),
-                        "lte": time_to.isoformat(),
-                    }
-                }
+                "bool": {"filter": filters}
             },
             "size": 0,
+            "track_total_hits": True,
             "aggs": {
                 "by_level": {
                     "terms": {

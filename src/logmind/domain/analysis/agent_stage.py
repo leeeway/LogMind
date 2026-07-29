@@ -164,6 +164,7 @@ class AgentInferenceStage(PipelineStage):
                                 tenant_id=ctx.tenant_id,
                                 business_line_id=ctx.business_line_id,
                                 related_services=ctx.related_services,
+                                language=ctx.language,
                             )
                         except Exception as tool_exc:
                             result = json.dumps({"error": str(tool_exc)})
