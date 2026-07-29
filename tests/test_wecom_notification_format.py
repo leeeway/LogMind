@@ -42,7 +42,10 @@ async def test_wecom_omits_notification_reason_and_analysis_entry(monkeypatch):
 
     content = "\n".join([
         "🟡 [P1|43.5分]",
-        "问题: 检测到日志异常",
+        (
+            r"问题: 写入 D:\WebCache\service.config\captcha\captcha.json 失败。"
+            "source_log_refs: 2026-07-29T12:54:47.695Z。"
+        ),
         "通知原因: P1: warning 级别错误，正常通知",
         "分析入口: https://logmind.example.com/analysis/task-1",
         "请及时处理。",
@@ -55,10 +58,11 @@ async def test_wecom_omits_notification_reason_and_analysis_entry(monkeypatch):
 
     assert sent is True
     payload_content = _FakeAsyncClient.requests[0][1]["markdown"]["content"]
-    assert "问题: 检测到日志异常" in payload_content
+    assert "D:/WebCache/service.config/captcha/captcha.json" in payload_content
     assert "请及时处理。" in payload_content
     assert "通知原因:" not in payload_content
     assert "分析入口:" not in payload_content
+    assert "source_log_refs" not in payload_content
 
 
 @pytest.mark.asyncio

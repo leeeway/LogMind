@@ -218,6 +218,8 @@ def test_ai_alert_template_uses_compact_summary_heading():
 
     assert "**摘要**:" in content
     assert "**AI 分析结论**:" not in content
+    assert "**扫描日志数**: 91 条" in content
+    assert "**分析日志数**:" not in content
 
 
 @pytest.mark.asyncio
@@ -518,6 +520,8 @@ def test_fallback_prompt_requires_location_fields():
     assert "root_cause_candidates" in prompt
     assert "source_log_refs" in prompt
     assert "next_verifications" in prompt
+    assert "禁止在 content 正文重复" in prompt
+    assert "D:/WebCache/file.json" in prompt
 
 
 @pytest.mark.asyncio

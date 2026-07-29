@@ -38,6 +38,12 @@ _UNCERTAIN_CAUSE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INLINE_SOURCE_REFS_RE = re.compile(
+    r"\s*(?:[。；;]\s*)?source_log_refs\s*[:：]\s*"
+    r"(?P<refs>\[[^\]\n]*\]|[^\n。]*)(?:。)?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _safe_confidence(value, default: float = 0.5) -> float:
     try:
@@ -55,6 +61,32 @@ def _sanitize_negative_boilerplate(text: str) -> str:
     cleaned = re.sub(r"[，,]\s*([。！!？?])", r"\1", cleaned)
     cleaned = re.sub(r"^\s*(?:但|不过|然而)[，,、\s]*", "", cleaned)
     return cleaned.strip()
+
+
+def _extract_inline_source_refs(text: str) -> tuple[str, list[str]]:
+    """Move model-leaked source_log_refs metadata out of the issue prose."""
+    match = _INLINE_SOURCE_REFS_RE.search(text or "")
+    if not match:
+        return text, []
+
+    raw_refs = match.group("refs").strip()
+    refs: list[str] = []
+    if raw_refs.startswith("["):
+        try:
+            parsed = json.loads(raw_refs)
+            if isinstance(parsed, list):
+                refs = [str(ref).strip() for ref in parsed if str(ref).strip()]
+        except json.JSONDecodeError:
+            raw_refs = raw_refs.strip("[]")
+    if not refs and raw_refs:
+        refs = [
+            part.strip().strip("\"'")
+            for part in re.split(r"[,，、;；]", raw_refs)
+            if part.strip().strip("\"'")
+        ]
+
+    cleaned = text[:match.start()].rstrip(" \t。；;,，")
+    return cleaned, refs[:20]
 
 
 def _is_actionable_finding(
@@ -160,7 +192,10 @@ class ResultParseStage(PipelineStage):
                 log_refs = [str(r)[:200] for r in raw_refs if r][:20]
 
                 raw_content = str(item.get("content") or "")
-                sanitized_content = _sanitize_negative_boilerplate(raw_content)
+                cleaned_content, inline_refs = _extract_inline_source_refs(raw_content)
+                if inline_refs:
+                    log_refs = list(dict.fromkeys([*log_refs, *inline_refs]))[:20]
+                sanitized_content = _sanitize_negative_boilerplate(cleaned_content)
                 actionable = _is_actionable_finding(item, sanitized_content, log_refs)
                 severity = str(item.get("severity", "info")).lower()
                 if severity not in {"critical", "error", "warning", "info"}:
@@ -181,6 +216,7 @@ class ResultParseStage(PipelineStage):
                 normalized_item["content"] = sanitized_content
                 normalized_item["severity"] = severity
                 normalized_item["alertable"] = actionable
+                normalized_item["source_log_refs"] = log_refs
 
                 ctx.analysis_results.append({
                     "result_type": item.get("result_type", "anomaly"),
@@ -255,9 +291,14 @@ class ResultParseStage(PipelineStage):
 
         except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as e:
             logger.warning("result_parse_fallback", error=str(e), task_id=ctx.task_id)
-            fallback_content = _sanitize_negative_boilerplate(ctx.ai_response)
+            cleaned_content, inline_refs = _extract_inline_source_refs(ctx.ai_response)
+            fallback_content = _sanitize_negative_boilerplate(cleaned_content)
             fallback_item = {"result_type": "summary"}
-            actionable = _is_actionable_finding(fallback_item, fallback_content, [])
+            actionable = _is_actionable_finding(
+                fallback_item,
+                fallback_content,
+                inline_refs,
+            )
             ctx.analysis_results = [{
                 "result_type": "summary", "content": fallback_content,
                 "severity": "warning" if actionable else "info",
@@ -265,7 +306,7 @@ class ResultParseStage(PipelineStage):
                 "structured_data": json.dumps(
                     {"alertable": actionable}, ensure_ascii=False
                 ),
-                "source_log_refs": "[]",
+                "source_log_refs": json.dumps(inline_refs, ensure_ascii=False),
                 "alertable": actionable,
             }]
             ctx.log_metadata["actionable_findings"] = int(actionable)

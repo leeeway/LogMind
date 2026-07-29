@@ -156,6 +156,37 @@ class TestSourceLogRefs:
         refs = json.loads(result.analysis_results[0]["source_log_refs"])
         assert refs == []
 
+    @pytest.mark.asyncio
+    async def test_inline_refs_are_extracted_from_issue_content(self):
+        from logmind.domain.analysis.pipeline import PipelineContext
+        from logmind.domain.analysis.stages.result_parse import ResultParseStage
+
+        ctx = PipelineContext(
+            tenant_id="t1",
+            task_id="t1",
+            business_line_id="b1",
+            business_line_name="Test",
+            log_count=1411,
+        )
+        ctx.ai_response = json.dumps([{
+            "result_type": "root_cause",
+            "content": (
+                "写入配置时抛出 System.UnauthorizedAccessException。"
+                "source_log_refs: 2026-07-29T12:54:47.695Z、"
+                "2026-07-29T13:22:07.229Z。"
+            ),
+            "severity": "warning",
+        }], ensure_ascii=False)
+
+        result = await ResultParseStage().execute(ctx)
+        parsed_result = result.analysis_results[0]
+
+        assert "source_log_refs" not in parsed_result["content"]
+        assert json.loads(parsed_result["source_log_refs"]) == [
+            "2026-07-29T12:54:47.695Z",
+            "2026-07-29T13:22:07.229Z",
+        ]
+
     def test_analysis_response_exposes_refs_and_evidence_fields(self):
         """AnalysisResultResponse should expose log refs and derived evidence fields."""
         from logmind.domain.analysis.models import AnalysisResult

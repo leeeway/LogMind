@@ -120,6 +120,8 @@ WARN/ERROR/CRITICAL 的异常信号进行完整时序分析；不要只罗列错
 - content 必须非空。
 - warning/critical 只能用于存在明确正向故障证据的结论，例如具体 Exception、失败/超时、
   5xx、连接拒绝、OOM，且应提供对应 source_log_refs。
+- source_log_refs 只能放在独立字段中，禁止在 content 正文重复输出字段名和引用列表。
+- C# Windows 路径在 content 中使用正斜杠（如 D:/WebCache/file.json），避免 JSON 转义丢失。
 - 仅有错误率变点、日志数量增加或“无法确认原因”，但没有对应失败日志时，severity 必须为 info。
 - 没有真实异常时只输出一句简短运行摘要；禁止枚举“未发现”的异常类型，禁止猜测根因。"""
 
@@ -206,6 +208,9 @@ def _fallback_system_prompt(ctx: PipelineContext) -> str:
 - next_verifications: (强烈建议) 值班同学下一步验证动作数组，最多 3 条。
 - error_signals: (可选) 从日志中识别出的关键错误信号短语列表。
 - experience_rule: (可选) 一条可复用的分析经验规则。
+
+source_log_refs 只能出现在独立字段中，禁止在 content 正文重复该字段名或引用列表。
+C# Windows 路径请使用正斜杠（如 D:/WebCache/file.json），避免 JSON 转义导致路径分隔符丢失。
 
 ## 重要: 业务噪声识别
 分析日志时，请先判断是否为以下类型的「业务流程日志」（非真实系统/基础设施故障）:

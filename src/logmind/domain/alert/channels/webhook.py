@@ -30,6 +30,14 @@ _INLINE_TS_RE = re.compile(
 _WECOM_OMITTED_METADATA_RE = re.compile(
     r"^\s*(?:[-*>]\s*)?(?:\*\*)?(?:通知原因|分析入口)(?:\*\*)?\s*[:：]"
 )
+_INLINE_SOURCE_REFS_SUFFIX_RE = re.compile(
+    r"\s*(?:[。；;]\s*)?source_log_refs\s*[:：]\s*"
+    r"(?:\[[^\]\n]*\]|[^\n。]*)(?:。)?\s*$",
+    re.IGNORECASE,
+)
+_WINDOWS_PATH_RE = re.compile(
+    r"\b(?P<drive>[A-Za-z]):\\(?P<rest>[A-Za-z0-9_.$()\-\\]+)"
+)
 
 
 def _is_wecom_webhook(url: str | None) -> bool:
@@ -42,11 +50,20 @@ def _is_wecom_webhook(url: str | None) -> bool:
 
 def _strip_wecom_notification_metadata(content: str) -> str:
     """Remove low-value internal metadata from operator-facing WeCom messages."""
-    return "\n".join(
-        line
-        for line in content.splitlines()
-        if not _WECOM_OMITTED_METADATA_RE.match(line)
-    )
+    lines: list[str] = []
+    for line in content.splitlines():
+        if _WECOM_OMITTED_METADATA_RE.match(line):
+            continue
+        line = _INLINE_SOURCE_REFS_SUFFIX_RE.sub("", line).rstrip()
+        line = _WINDOWS_PATH_RE.sub(
+            lambda match: (
+                f"{match.group('drive')}:/"
+                f"{match.group('rest').replace(chr(92), '/')}"
+            ),
+            line,
+        )
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _to_display_timezone(dt: datetime | None) -> datetime | None:
@@ -179,7 +196,7 @@ def _build_ai_analysis_alert(
         f"**告警级别**: {severity.upper()}",
         f"**业务线**: {business_line}",
         f"**站点**: {source}{env_tag}",
-        f"**分析日志数**: {log_count} 条",
+        f"**扫描日志数**: {log_count} 条",
         f"**任务ID**: {task_id[:8]}...",
         f"",
         f"---",
