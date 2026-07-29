@@ -487,6 +487,8 @@ async def _execute_analysis(task_id: str):
         query_params = json.loads(task.query_params)
     except Exception:
         pass
+    full_log_analysis = bool(query_params.get("full_log_analysis", False))
+    severity_override = query_params.get("severity")
 
     ctx = PipelineContext(
         tenant_id=task.tenant_id,
@@ -494,7 +496,12 @@ async def _execute_analysis(task_id: str):
         business_line_id=task.business_line_id,
         business_line_name=biz_name,
         es_index_pattern=biz.es_index_pattern,
-        severity_threshold=biz.severity_threshold,
+        severity_threshold=(
+            None
+            if full_log_analysis
+            else (severity_override or biz.severity_threshold)
+        ),
+        full_log_analysis=full_log_analysis,
         language=biz_language,
         time_from=task.time_from,
         time_to=task.time_to,

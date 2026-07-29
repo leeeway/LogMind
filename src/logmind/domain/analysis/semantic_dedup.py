@@ -31,7 +31,9 @@ logger = get_logger(__name__)
 _EXCEPTION_CLASS_RE = re.compile(r"([\w.]+(?:Exception|Error|Throwable|Fault))")
 
 # Stack trace "at" line — extract class and method only (strip line numbers)
-_AT_LINE_RE = re.compile(r"at\s+([\w.$]+)\(")
+_AT_LINE_RE = re.compile(
+    r"\bat\s+([\w.$+`<>\[\],]+)(?:\(|\s+in\s)"
+)
 
 
 def extract_error_signature(processed_logs: str, language: str = "java") -> str:
@@ -65,6 +67,13 @@ def extract_error_signature(processed_logs: str, language: str = "java") -> str:
         at_match = _AT_LINE_RE.search(stripped)
         if at_match and len(stack_methods) < 10:
             method = at_match.group(1)
+            # Normalize async compiler frames:
+            # Service+<RunAsync>d__12.MoveNext -> Service.RunAsync
+            method = re.sub(
+                r"\+<([^>]+)>d__\d+\.MoveNext$",
+                r".\1",
+                method,
+            )
             if method not in stack_methods:
                 stack_methods.append(method)
 
@@ -226,6 +235,10 @@ class SemanticDedupStage(PipelineStage):
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         settings = get_settings()
+
+        if ctx.full_log_analysis:
+            logger.info("semantic_dedup_skipped_full_log_analysis", task_id=ctx.task_id)
+            return ctx
 
         if not settings.analysis_semantic_dedup_enabled:
             logger.info("semantic_dedup_disabled", task_id=ctx.task_id)

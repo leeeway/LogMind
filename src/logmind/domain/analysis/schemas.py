@@ -4,7 +4,7 @@ Analysis Domain — Pydantic Schemas
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from logmind.shared.base_schema import BaseSchema
 
@@ -21,7 +21,43 @@ class AnalysisTaskCreate(BaseModel):
         None,
         description="Severity filter. Default uses business line threshold",
     )
+    full_log_analysis: bool = Field(
+        False,
+        description="Analyze all log levels in the selected time range and bypass error-only filters",
+    )
     extra_filters: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.time_from >= self.time_to:
+            raise ValueError("time_from must be earlier than time_to")
+        return self
+
+
+class AnalysisTaskBatchCreate(BaseModel):
+    """Request to create the same manual analysis for multiple business lines."""
+
+    business_line_ids: list[str] = Field(min_length=1, max_length=100)
+    provider_config_id: str | None = None
+    prompt_template_id: str | None = None
+    time_from: datetime
+    time_to: datetime
+    query: str = ""
+    severity: str | None = Field(
+        None,
+        description="Severity filter used when full_log_analysis is false",
+    )
+    full_log_analysis: bool = Field(
+        True,
+        description="Analyze all log levels in the selected time range",
+    )
+    extra_filters: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.time_from >= self.time_to:
+            raise ValueError("time_from must be earlier than time_to")
+        return self
 
 
 class AnalysisResultResponse(BaseSchema):

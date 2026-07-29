@@ -30,11 +30,13 @@ class LogFetchStage(PipelineStage):
             language=ctx.language,
             business_line_id=ctx.business_line_id,
             extra_filters=ctx.extra_filters,
-            size=5000,  # Expand ES window so diversity sampler can see older rare errors
+            size=10000,  # Maximum ES window; preprocessing samples with temporal diversity
         )
         result = await self.log_service.search_logs(request)
         ctx.raw_logs = [log.raw for log in result.logs]
-        ctx.log_count = len(ctx.raw_logs)
+        ctx.log_count = result.total
+        ctx.log_metadata["matched_count"] = result.total
+        ctx.log_metadata["fetched_count"] = len(ctx.raw_logs)
 
         # Extract GYYX business context from first log entry
         if ctx.raw_logs:

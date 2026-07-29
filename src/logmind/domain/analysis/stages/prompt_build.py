@@ -105,6 +105,14 @@ class PromptBuildStage(PipelineStage):
             ctx.prompt_template_id = getattr(template, "id", "") or ""
             logger.info("prompt_build_fallback_used", task_id=ctx.task_id)
 
+        if ctx.full_log_analysis:
+            ctx.user_prompt += """
+
+## 全量日志分析模式
+本次输入覆盖所选时间范围内的全部日志级别。请结合 INFO/DEBUG 的请求路径与状态变化、
+WARN/ERROR/CRITICAL 的异常信号进行完整时序分析；不要只罗列错误日志。需要总结正常运行阶段、
+异常起点、影响范围、恢复情况，并明确区分背景日志与根因证据。"""
+
         # Inject business line intelligence profile
         try:
             from logmind.domain.analysis.business_profile import build_profile_context

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from logmind.core.dependencies import CurrentUser, DBSession
 from logmind.domain.analysis.models import LogAnalysisTask
 from logmind.domain.analysis.schemas import (
+    AnalysisTaskBatchCreate,
     AnalysisTaskCreate,
     AnalysisTaskResponse,
     AnalysisTaskSummary,
@@ -27,6 +28,35 @@ router = APIRouter(prefix="/analysis", tags=["Analysis"])
 task_repo = BaseRepository(LogAnalysisTask)
 
 
+def _build_manual_task(
+    req: AnalysisTaskCreate | AnalysisTaskBatchCreate,
+    *,
+    tenant_id: str,
+    business_line_id: str,
+) -> LogAnalysisTask:
+    """Build a manual task while keeping its execution options in query_params."""
+    query_params = {
+        "query": req.query,
+        "severity": req.severity,
+        "full_log_analysis": req.full_log_analysis,
+        "extra_filters": req.extra_filters,
+    }
+    return LogAnalysisTask(
+        tenant_id=tenant_id,
+        business_line_id=business_line_id,
+        provider_config_id=req.provider_config_id,
+        prompt_template_id=req.prompt_template_id,
+        task_type="manual",
+        status="pending",
+        query_params=json.dumps(query_params),
+        time_from=req.time_from,
+        time_to=req.time_to,
+        log_count=0,
+        token_usage=0,
+        cost_usd=0.0,
+    )
+
+
 @router.post("/tasks", response_model=AnalysisTaskResponse, status_code=201)
 async def create_analysis_task(
     req: AnalysisTaskCreate, session: DBSession, user: CurrentUser
@@ -35,27 +65,16 @@ async def create_analysis_task(
     Create and trigger a manual log analysis task.
     Only analyzes ERROR/CRITICAL severity by default to control AI costs.
     """
-    query_params = {
-        "query": req.query,
-        "severity": req.severity,
-        "extra_filters": req.extra_filters,
-    }
     await get_active_business_line_or_404(
         session,
         user.tenant_id,
         req.business_line_id,
     )
 
-    task = LogAnalysisTask(
+    task = _build_manual_task(
+        req,
         tenant_id=user.tenant_id,
         business_line_id=req.business_line_id,
-        provider_config_id=req.provider_config_id,
-        prompt_template_id=req.prompt_template_id,
-        task_type="manual",
-        status="pending",
-        query_params=json.dumps(query_params),
-        time_from=req.time_from,
-        time_to=req.time_to,
     )
     task = await task_repo.create(session, task)
     await session.commit()
@@ -64,6 +83,37 @@ async def create_analysis_task(
     run_analysis_task.delay(task.id)
 
     return AnalysisTaskResponse.model_validate(task)
+
+
+@router.post("/tasks/batch", response_model=list[AnalysisTaskResponse], status_code=201)
+async def create_analysis_tasks_batch(
+    req: AnalysisTaskBatchCreate, session: DBSession, user: CurrentUser
+):
+    """Create one manual analysis task per selected business line."""
+    business_line_ids = list(dict.fromkeys(req.business_line_ids))
+
+    # Validate every target before creating anything, preventing partial batches.
+    for business_line_id in business_line_ids:
+        await get_active_business_line_or_404(
+            session,
+            user.tenant_id,
+            business_line_id,
+        )
+
+    tasks = []
+    for business_line_id in business_line_ids:
+        task = _build_manual_task(
+            req,
+            tenant_id=user.tenant_id,
+            business_line_id=business_line_id,
+        )
+        tasks.append(await task_repo.create(session, task))
+
+    await session.commit()
+    for task in tasks:
+        run_analysis_task.delay(task.id)
+
+    return [AnalysisTaskResponse.model_validate(task) for task in tasks]
 
 
 @router.get("/tasks", response_model=PaginatedResponse)

@@ -1,7 +1,22 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Table, Tag, Button, Select, Space, Typography, Card, Input, DatePicker, Modal, Form, message } from 'antd';
-import { PlusOutlined, ReloadOutlined, SwapOutlined, EyeOutlined } from '@ant-design/icons';
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  DatePicker,
+  Form,
+  Input,
+  message,
+  Modal,
+  Select,
+  Space,
+  Table,
+  Tag,
+  Typography,
+} from 'antd';
+import { PlusOutlined, ReloadOutlined, SwapOutlined } from '@ant-design/icons';
 import { analysisApi } from '@/api/analysis';
 import { businessLineApi } from '@/api/services';
 import dayjs from 'dayjs';
@@ -28,6 +43,8 @@ const TaskList: React.FC = () => {
   const [triggerOpen, setTriggerOpen] = useState(false);
   const [triggerLoading, setTriggerLoading] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [triggerForm] = Form.useForm();
+  const selectedBizIds: string[] = Form.useWatch('business_line_ids', triggerForm) || [];
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);
@@ -35,7 +52,7 @@ const TaskList: React.FC = () => {
       const { data } = await analysisApi.listTasks({
         page,
         page_size: 15,
-        status: statusFilter,
+        task_status: statusFilter,
         business_line_id: bizFilter,
       });
       setTasks(data.items || []);
@@ -53,7 +70,7 @@ const TaskList: React.FC = () => {
 
   useEffect(() => {
     businessLineApi.list({ page_size: 100 }).then(res => {
-      setBizLines(res.data?.items || []);
+      setBizLines((res.data?.items || []).filter((line: any) => line.is_active !== false));
     });
   }, []);
 
@@ -61,14 +78,15 @@ const TaskList: React.FC = () => {
     setTriggerLoading(true);
     try {
       const [from, to] = values.timeRange;
-      await analysisApi.createTask({
-        business_line_id: values.business_line_id,
+      const { data } = await analysisApi.createTasksBatch({
+        business_line_ids: values.business_line_ids,
         time_from: from.toISOString(),
         time_to: to.toISOString(),
-        severity: values.severity,
+        full_log_analysis: true,
       });
-      message.success('分析任务已创建');
+      message.success(`已创建 ${data.length} 个全量分析任务`);
       setTriggerOpen(false);
+      triggerForm.resetFields();
       fetchTasks();
     } catch (err: any) {
       message.error(err.response?.data?.detail || '创建失败');
@@ -182,23 +200,97 @@ const TaskList: React.FC = () => {
       </Card>
 
       {/* Trigger Analysis Modal */}
-      <Modal title="触发手动分析" open={triggerOpen} onCancel={() => setTriggerOpen(false)} footer={null} destroyOnClose>
-        <Form layout="vertical" onFinish={handleTrigger}>
-          <Form.Item name="business_line_id" label="业务线" rules={[{ required: true }]}>
-            <Select placeholder="选择业务线" options={bizLines.map(b => ({ value: b.id, label: b.name }))} />
+      <Modal
+        title="批量触发全量日志分析"
+        open={triggerOpen}
+        onCancel={() => {
+          setTriggerOpen(false);
+          triggerForm.resetFields();
+        }}
+        footer={null}
+        width={640}
+        destroyOnClose
+      >
+        <Form
+          form={triggerForm}
+          layout="vertical"
+          onFinish={handleTrigger}
+          initialValues={{
+            business_line_ids: [],
+            timeRange: [dayjs().subtract(1, 'hour'), dayjs()],
+          }}
+        >
+          <Form.Item
+            name="business_line_ids"
+            label={
+              <Space>
+                <span>选择服务</span>
+                <Checkbox
+                  checked={bizLines.length > 0 && selectedBizIds.length === bizLines.length}
+                  indeterminate={selectedBizIds.length > 0 && selectedBizIds.length < bizLines.length}
+                  onChange={(event) => {
+                    triggerForm.setFieldValue(
+                      'business_line_ids',
+                      event.target.checked ? bizLines.map(b => b.id) : [],
+                    );
+                  }}
+                >
+                  全选
+                </Checkbox>
+              </Space>
+            }
+            rules={[{ required: true, message: '请至少勾选一个服务' }]}
+          >
+            <Checkbox.Group style={{ width: '100%' }}>
+              <div
+                style={{
+                  maxHeight: 240,
+                  overflowY: 'auto',
+                  padding: 12,
+                  border: '1px solid var(--lm-border-light)',
+                  borderRadius: 8,
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                  gap: 10,
+                }}
+              >
+                {bizLines.map(b => (
+                  <Checkbox key={b.id} value={b.id}>
+                    <Space size={6}>
+                      <span>{b.name}</span>
+                      <Tag style={{ marginInlineEnd: 0, fontSize: 10 }}>
+                        {b.language === 'csharp' ? 'C#' : b.language}
+                      </Tag>
+                    </Space>
+                  </Checkbox>
+                ))}
+              </div>
+            </Checkbox.Group>
           </Form.Item>
           <Form.Item name="timeRange" label="时间范围" rules={[{ required: true }]}>
-            <RangePicker showTime style={{ width: '100%' }} />
+            <RangePicker
+              showTime
+              format="YYYY-MM-DD HH:mm:ss"
+              style={{ width: '100%' }}
+              presets={[
+                { label: '最近 15 分钟', value: [dayjs().subtract(15, 'minute'), dayjs()] },
+                { label: '最近 1 小时', value: [dayjs().subtract(1, 'hour'), dayjs()] },
+                { label: '最近 6 小时', value: [dayjs().subtract(6, 'hour'), dayjs()] },
+                { label: '最近 24 小时', value: [dayjs().subtract(24, 'hour'), dayjs()] },
+              ]}
+            />
           </Form.Item>
-          <Form.Item name="severity" label="日志级别" initialValue="error">
-            <Select options={[
-              { value: 'error', label: 'Error' },
-              { value: 'warning', label: 'Warning' },
-              { value: 'critical', label: 'Critical' },
-            ]} />
-          </Form.Item>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="全量模式会检索所选时间范围内的全部日志级别"
+            description="不会套用服务的 ERROR 阈值、业务噪声过滤或历史去重；日志量过大时仍会按严重度、错误类型和时间分布智能取样，避免遗漏稀有异常。"
+          />
           <Form.Item>
-            <Button type="primary" htmlType="submit" loading={triggerLoading} block>创建分析任务</Button>
+            <Button type="primary" htmlType="submit" loading={triggerLoading} block>
+              批量创建 {selectedBizIds.length || ''} 个分析任务
+            </Button>
           </Form.Item>
         </Form>
       </Modal>

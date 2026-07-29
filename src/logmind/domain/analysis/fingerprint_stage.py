@@ -66,6 +66,10 @@ class ErrorFingerprintStage(PipelineStage):
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         settings = get_settings()
 
+        if ctx.full_log_analysis:
+            logger.info("fingerprint_skipped_full_log_analysis", task_id=ctx.task_id)
+            return ctx
+
         if not settings.analysis_fingerprint_enabled:
             logger.info("fingerprint_disabled", task_id=ctx.task_id)
             return ctx

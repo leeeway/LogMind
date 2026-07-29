@@ -81,6 +81,18 @@ _NLOG_LEVEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Pattern 3: Serilog compact levels — [ERR], [WRN], [INF], [DBG], [FTL], [VRB]
+_SERILOG_LEVEL_RE = re.compile(
+    r"\[(ERR|WRN|INF|DBG|FTL|VRB)\]",
+    re.IGNORECASE,
+)
+
+# Pattern 4: Microsoft.Extensions.Logging console format — fail:/crit:/warn:/info:/dbug:/trce:
+_DOTNET_CONSOLE_LEVEL_RE = re.compile(
+    r"^\s*(fail|crit|warn|info|dbug|trce):\s",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 # Pattern 3: Java Logback/Log4j2 — level in message (sometimes)
 # Matches: "[2026-04-13 21:49:48.488] ... [ERROR] ..."
 _JAVA_MSG_LEVEL_RE = re.compile(
@@ -203,6 +215,19 @@ class LogService:
                     {"match_phrase": {"message": "Exception"}},
                     {"match_phrase": {"message": "产生异常"}},
                 ])
+                if request.language == "csharp":
+                    severity_should.extend([
+                        # Serilog compact and Microsoft.Extensions.Logging formats
+                        {"match_phrase": {"message": "[ERR]"}},
+                        {"match_phrase": {"message": "[FTL]"}},
+                        {"match_phrase": {"message": "fail:"}},
+                        {"match_phrase": {"message": "crit:"}},
+                        # .NET exception-chain and runtime markers
+                        {"match_phrase": {"message": "Unhandled exception"}},
+                        {"match_phrase": {"message": "InnerException"}},
+                        {"match_phrase": {"message": "End of inner exception"}},
+                        {"match_phrase": {"message": "System."}},
+                    ])
             elif request.severity.lower() == "warning":
                 severity_should.extend([
                     {"match_phrase": {"message": "[WARN]"}},
@@ -210,6 +235,11 @@ class LogService:
                     {"match_phrase": {"message": "] WARN "}},
                     {"match_phrase": {"message": "] WARNING "}},
                 ])
+                if request.language == "csharp":
+                    severity_should.extend([
+                        {"match_phrase": {"message": "[WRN]"}},
+                        {"match_phrase": {"message": "warn:"}},
+                    ])
 
             # ── Channel B: Content-aware error signal detection ──
             # Catches real failures logged at wrong level (e.g. timeout in debug.log).
@@ -714,8 +744,14 @@ class LogService:
             if match:
                 return _normalize_level(match.group(1))
 
-            # Then try bracket format [ERROR], [WARN]
+            # Then try bracket/Serilog/.NET console formats
             match = _BRACKET_LEVEL_RE.search(message)
+            if match:
+                return _normalize_level(match.group(1))
+            match = _SERILOG_LEVEL_RE.search(message)
+            if match:
+                return _normalize_level(match.group(1))
+            match = _DOTNET_CONSOLE_LEVEL_RE.search(message)
             if match:
                 return _normalize_level(match.group(1))
 
@@ -772,15 +808,24 @@ def _normalize_level(raw: str) -> str:
     level_map = {
         "ERROR": "error",
         "ERR": "error",
+        "FAIL": "error",
         "FATAL": "critical",
+        "FTL": "critical",
         "CRITICAL": "critical",
+        "CRIT": "critical",
         "WARN": "warning",
+        "WRN": "warning",
         "WARNING": "warning",
         "INFO": "info",
+        "INF": "info",
         "INFORMATION": "info",
         "DEBUG": "debug",
+        "DBG": "debug",
+        "DBUG": "debug",
         "TRACE": "debug",
+        "TRCE": "debug",
         "VERBOSE": "debug",
+        "VRB": "debug",
     }
     return level_map.get(upper, raw.lower())
 

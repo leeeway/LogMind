@@ -19,6 +19,8 @@ _SEVERITY_RANK = {
 
 _MSG_LEVEL_PATTERNS = [
     re.compile(r"\[(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\]", re.IGNORECASE),
+    re.compile(r"\[(ERR|WRN|INF|DBG|FTL|VRB)\]", re.IGNORECASE),
+    re.compile(r"^\s*(fail|crit|warn|info|dbug|trce):\s", re.IGNORECASE),
     re.compile(
         r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.\d]*\s+\[[\w\-]+\]\s+"
         r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b", re.IGNORECASE,
@@ -28,6 +30,15 @@ _MSG_LEVEL_PATTERNS = [
         r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b", re.IGNORECASE,
     ),
 ]
+
+_LEVEL_ALIASES = {
+    "ERR": "ERROR", "FAIL": "ERROR",
+    "FTL": "FATAL", "CRIT": "CRITICAL",
+    "WRN": "WARN",
+    "INF": "INFO",
+    "DBG": "DEBUG", "DBUG": "DEBUG",
+    "VRB": "TRACE", "TRCE": "TRACE",
+}
 
 _NOISE_INDICATORS = [
     re.compile(r'"status"\s*:\s*true', re.IGNORECASE),
@@ -66,7 +77,9 @@ _REAL_ERROR_INDICATORS = [
                r'|denied|forbidden|unauthorized|overflow|deadlock|OOM|OutOfMemory'
                r'|fatal|null\s*pointer|segfault|core\s+dump)\b'),
     re.compile(r'--- End of (?:inner )?exception'),
-    re.compile(r'System\.\w+Exception'),
+    re.compile(r'(?:System|Microsoft)(?:\.[\w`]+)+Exception'),
+    re.compile(r'\bUnhandled exception\b', re.IGNORECASE),
+    re.compile(r'\bInnerException\b'),
 ]
 
 _CHINESE_FAULT_KEYWORDS = [
@@ -81,7 +94,8 @@ def _extract_message_level(line: str) -> str | None:
     for pattern in _MSG_LEVEL_PATTERNS:
         match = pattern.search(line)
         if match:
-            return match.group(1).upper()
+            level = match.group(1).upper()
+            return _LEVEL_ALIASES.get(level, level)
     return None
 
 
@@ -103,6 +117,10 @@ class LogQualityFilterStage(PipelineStage):
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         if not ctx.processed_logs or not ctx.raw_logs:
+            return ctx
+
+        if ctx.full_log_analysis:
+            ctx.log_metadata["quality_filter_skipped"] = "full_log_analysis"
             return ctx
 
         threshold = (ctx.severity_threshold or "error").upper()

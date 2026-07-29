@@ -36,6 +36,10 @@ class BusinessNoiseFilterStage(PipelineStage):
         if not ctx.processed_logs or not ctx.raw_logs:
             return ctx
 
+        if ctx.full_log_analysis:
+            ctx.log_metadata["business_noise_filter_skipped"] = "full_log_analysis"
+            return ctx
+
         from logmind.domain.log.business_noise import (
             classify_line,
             load_learned_noise_rules,

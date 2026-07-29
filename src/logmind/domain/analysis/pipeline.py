@@ -46,7 +46,8 @@ class PipelineContext:
     business_line_id: str
     business_line_name: str = ""
     es_index_pattern: str = ""
-    severity_threshold: str = "error"
+    severity_threshold: str | None = "error"
+    full_log_analysis: bool = False
     time_from: datetime | None = None
     time_to: datetime | None = None
     query: str = ""

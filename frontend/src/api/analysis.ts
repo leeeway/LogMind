@@ -1,7 +1,7 @@
 import client from './client';
 
 export const analysisApi = {
-  listTasks: (params?: { page?: number; page_size?: number; business_line_id?: string; status?: string }) =>
+  listTasks: (params?: { page?: number; page_size?: number; business_line_id?: string; task_status?: string }) =>
     client.get('/analysis/tasks', { params }),
 
   getTask: (taskId: string) =>
@@ -10,8 +10,23 @@ export const analysisApi = {
   getTrace: (taskId: string) =>
     client.get(`/analysis/tasks/${taskId}/trace`),
 
-  createTask: (data: { business_line_id: string; time_from: string; time_to: string; severity?: string }) =>
+  createTask: (data: {
+    business_line_id: string;
+    time_from: string;
+    time_to: string;
+    severity?: string;
+    full_log_analysis?: boolean;
+  }) =>
     client.post('/analysis/tasks', data),
+
+  createTasksBatch: (data: {
+    business_line_ids: string[];
+    time_from: string;
+    time_to: string;
+    severity?: string;
+    full_log_analysis?: boolean;
+  }) =>
+    client.post('/analysis/tasks/batch', data),
 
   compare: (taskA: string, taskB: string) =>
     client.get('/analysis/compare', { params: { task_a: taskA, task_b: taskB } }),

@@ -15,7 +15,14 @@ from collections import defaultdict
 
 from logmind.core.logging import get_logger
 from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
-from logmind.domain.log.service import _FILETYPE_LEVEL_MAP, _normalize_level
+from logmind.domain.log.service import (
+    _BRACKET_LEVEL_RE,
+    _DOTNET_CONSOLE_LEVEL_RE,
+    _FILETYPE_LEVEL_MAP,
+    _NLOG_LEVEL_RE,
+    _SERILOG_LEVEL_RE,
+    _normalize_level,
+)
 
 logger = get_logger(__name__)
 
@@ -28,8 +35,9 @@ _JAVA_STACK_RE = re.compile(
 
 # C# .NET stack trace patterns
 _CSHARP_STACK_RE = re.compile(
-    r"^\s+at\s+[\w.]+\(.*\)"          # at Gyyx.Core.Class.Method(args)
-    r"|^\s+at\s+[\w.]+.*\sin\s"       # at Namespace.Class.Method() in D:\path\File.cs:line 96
+    r"^\s+at\s+[\w.$+`<>\[\],]+"       # namespaces, nested/generic/compiler types
+    r"(?:\(.*?\))?"                    # optional argument list
+    r"(?:\s+in\s+.*?:line\s+\d+)?"     # optional Windows/Linux source location
 )
 
 # Common stack trace continuation markers (both Java + C#)
@@ -45,20 +53,6 @@ _STACK_CONTINUATION_PREFIXES = (
 # Pattern to extract exception class name from message
 _EXCEPTION_CLASS_RE = re.compile(
     r"([\w.]+(?:Exception|Error|Throwable|Fault))"
-)
-
-# C# NLog level regex for pipeline-internal level extraction
-_NLOG_LEVEL_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.\d]*\s+"
-    r"\[[\w\-]+\]\s+"
-    r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b",
-    re.IGNORECASE,
-)
-
-# Bracket level regex
-_BRACKET_LEVEL_RE = re.compile(
-    r"\[(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\]",
-    re.IGNORECASE,
 )
 
 # ── Constants ────────────────────────────────────────────
@@ -80,6 +74,15 @@ class LogPreprocessStage(PipelineStage):
 
         # Phase 1: Merge stack traces (skip for Filebeat multiline-merged docs)
         merged_logs = self._merge_stack_traces(ctx.raw_logs)
+        configured_language = ctx.language
+        detected_language = self._detect_language(merged_logs)
+        if detected_language == "csharp" and ctx.language != "csharp":
+            ctx.language = "csharp"
+            logger.info(
+                "csharp_language_auto_detected",
+                task_id=ctx.task_id,
+                configured_language=configured_language,
+            )
 
         # Phase 2: Deduplicate
         seen = set()
@@ -163,13 +166,16 @@ class LogPreprocessStage(PipelineStage):
         )
         ctx.has_stack_traces = has_stacks
 
+        fetch_metadata = dict(ctx.log_metadata)
         ctx.log_metadata = {
+            **fetch_metadata,
             "original_count": ctx.log_count,
             "merged_count": len(merged_logs),
             "deduped_count": len(unique_logs),
             "formatted_count": len(lines),
             "has_stack_traces": ctx.has_stack_traces,
             "language": ctx.language,
+            "configured_language": configured_language,
             "sampling": sampling_metrics.to_dict(),
         }
 
@@ -262,6 +268,39 @@ class LogPreprocessStage(PipelineStage):
         return bool(_EXCEPTION_CLASS_RE.search(msg))
 
     @staticmethod
+    def _detect_language(logs: list[dict]) -> str | None:
+        """Detect strong .NET evidence so default-Java services still get C# analysis."""
+        csharp_score = 0
+        java_score = 0
+        for log in logs[:200]:
+            msg = LogPreprocessStage._extract_message(log)
+            gy = log.get("gy", {}) if isinstance(log.get("gy"), dict) else {}
+            filetype = str(gy.get("filetype", "")).lower()
+
+            if filetype in {"sys.log.txt", "sys.log", "app.log.txt"}:
+                csharp_score += 2
+            if re.search(r"\bSystem(?:\.[\w`]+)+(?:Exception|Error)\b", msg):
+                csharp_score += 2
+            if re.search(r"\bat\s+[\w.$+`<>]+\s*(?:\(.*?\))?\s+in\s+.*?\.cs:line\s+\d+", msg):
+                csharp_score += 3
+            if "--- End of inner exception" in msg or "InnerException" in msg:
+                csharp_score += 3
+            if _SERILOG_LEVEL_RE.search(msg) or _DOTNET_CONSOLE_LEVEL_RE.search(msg):
+                csharp_score += 1
+
+            if re.search(r"\bjava\.[\w.]+(?:Exception|Error)\b", msg):
+                java_score += 2
+            if re.search(r"\bat\s+[\w.$]+\(.*?\.java:\d+\)", msg):
+                java_score += 2
+            if "Caused by:" in msg:
+                java_score += 1
+
+            if csharp_score >= 4 and java_score == 0:
+                return "csharp"
+
+        return None
+
+    @staticmethod
     def _make_dedup_key(msg: str) -> str:
         """Generate a deduplication key for a log message."""
         if not msg:
@@ -346,6 +385,12 @@ class LogPreprocessStage(PipelineStage):
             if match:
                 return _normalize_level(match.group(1)).upper()
             match = _BRACKET_LEVEL_RE.search(message)
+            if match:
+                return _normalize_level(match.group(1)).upper()
+            match = _SERILOG_LEVEL_RE.search(message)
+            if match:
+                return _normalize_level(match.group(1)).upper()
+            match = _DOTNET_CONSOLE_LEVEL_RE.search(message)
             if match:
                 return _normalize_level(match.group(1)).upper()
 

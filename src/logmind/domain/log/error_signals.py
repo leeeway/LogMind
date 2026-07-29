@@ -122,6 +122,19 @@ EXCEPTION_SIGNALS: list[str] = [
     "DeadlockLoserDataAccessException",
     "SQLServerException",
     "SQLException",
+    # C#/.NET
+    "Unhandled exception",
+    "InnerException",
+    "TaskCanceledException",
+    "OperationCanceledException",
+    "HttpRequestException",
+    "SocketException",
+    "AuthenticationException",
+    "SqlException",
+    "ObjectDisposedException",
+    "InvalidOperationException",
+    "AggregateException",
+    "End of inner exception stack trace",
     "连接被拒",
 ]
 
