@@ -822,6 +822,13 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
     from logmind.domain.alert.storm_detector import alert_storm_detector
 
     for alert in ctx.alerts_fired:
+        if alert.get("alertable") is False or not str(alert.get("content", "")).strip():
+            logger.info(
+                "ai_alert_skipped_no_actionable_content",
+                biz=ctx.business_line_name,
+                task_id=ctx.task_id,
+            )
+            continue
         severity = alert.get("severity", "warning")
 
         # Prepend priority + issue status labels to alert content

@@ -114,6 +114,11 @@ class LogPreprocessStage(PipelineStage):
             level_extractor=self._extract_level,
             message_extractor=self._extract_message,
         )
+        actionable_level_count = sum(
+            1
+            for log in ctx.raw_logs
+            if self._extract_level(log) in {"ERROR", "FATAL", "CRITICAL"}
+        )
 
         # Phase 4: Format logs with business context
         # Apply sensitive data masking before sending to LLM
@@ -176,6 +181,7 @@ class LogPreprocessStage(PipelineStage):
             "has_stack_traces": ctx.has_stack_traces,
             "language": ctx.language,
             "configured_language": configured_language,
+            "actionable_level_count": actionable_level_count,
             "sampling": sampling_metrics.to_dict(),
         }
 

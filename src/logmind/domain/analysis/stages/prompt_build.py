@@ -113,6 +113,16 @@ class PromptBuildStage(PipelineStage):
 WARN/ERROR/CRITICAL 的异常信号进行完整时序分析；不要只罗列错误日志。需要总结正常运行阶段、
 异常起点、影响范围、恢复情况，并明确区分背景日志与根因证据。"""
 
+        if ctx.full_log_analysis or ctx.language == "csharp":
+            ctx.system_prompt += """
+
+## 告警证据硬规则
+- content 必须非空。
+- warning/critical 只能用于存在明确正向故障证据的结论，例如具体 Exception、失败/超时、
+  5xx、连接拒绝、OOM，且应提供对应 source_log_refs。
+- 仅有错误率变点、日志数量增加或“无法确认原因”，但没有对应失败日志时，severity 必须为 info。
+- 没有真实异常时只输出一句简短运行摘要；禁止枚举“未发现”的异常类型，禁止猜测根因。"""
+
         # Inject business line intelligence profile
         try:
             from logmind.domain.analysis.business_profile import build_profile_context

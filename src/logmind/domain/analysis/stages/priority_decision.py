@@ -20,9 +20,16 @@ class PriorityDecisionStage(PipelineStage):
         top_severity = "info"
         top_confidence = 0.5
         unique_errors = set()
+        actionable_results = []
 
         for r in ctx.analysis_results:
             sev = r.get("severity", "info")
+            is_alertable = r.get(
+                "alertable",
+                sev in ("critical", "warning", "error"),
+            )
+            if is_alertable and sev in ("critical", "warning", "error"):
+                actionable_results.append(r)
             if self._severity_rank(sev) > self._severity_rank(top_severity):
                 top_severity = sev
             conf = r.get("confidence_score", 0.5)
@@ -31,7 +38,11 @@ class PriorityDecisionStage(PipelineStage):
             if r.get("result_type") in ("anomaly", "root_cause"):
                 unique_errors.add(r.get("content", "")[:80])
 
-        current_errors = ctx.log_count
+        current_errors = (
+            ctx.log_metadata.get("actionable_level_count", ctx.log_count)
+            if ctx.full_log_analysis
+            else ctx.log_count
+        )
         baseline_errors = ctx.log_metadata.get("baseline_error_count", 0)
         if baseline_errors == 0:
             baseline_errors = max(current_errors, 1)
@@ -53,7 +64,7 @@ class PriorityDecisionStage(PipelineStage):
             ai_severity=top_severity, confidence=top_confidence,
             current_error_count=current_errors, baseline_error_count=baseline_errors,
             business_weight=ctx.business_weight, is_core_path=ctx.is_core_path,
-            estimated_dau=ctx.estimated_dau, log_count=ctx.log_count,
+            estimated_dau=ctx.estimated_dau, log_count=current_errors,
             has_stack_traces=ctx.has_stack_traces,
             unique_error_types=max(len(unique_errors), 1),
             historical_adjustment=historical_adj,
@@ -73,6 +84,16 @@ class PriorityDecisionStage(PipelineStage):
             "factors": decision.factors_summary,
         }
 
+        if not actionable_results and not ctx.log_metadata.get("is_regression"):
+            ctx.priority_decision.update({
+                "priority": "P2",
+                "should_notify": False,
+                "should_wake": False,
+                "delay_until_morning": False,
+                "include_in_digest": True,
+                "reason": "🟢 P2: 未发现可核验的异常证据，仅记录分析结果",
+            })
+
         # Regression Override
         if ctx.log_metadata.get("is_regression"):
             ctx.priority_decision["priority"] = "P0"
@@ -90,11 +111,10 @@ class PriorityDecisionStage(PipelineStage):
 
         if final_should_notify:
             alertable_results = [
-                r for r in ctx.analysis_results
-                if r.get("severity") in ("critical", "warning", "error")
-                and r.get("confidence_score", 0) >= 0.4
+                r for r in actionable_results
+                if r.get("confidence_score", 0) >= 0.4
             ]
-            if not alertable_results:
+            if not alertable_results and ctx.log_metadata.get("is_regression"):
                 alertable_results = ctx.analysis_results[:1]
             ctx.alerts_fired = alertable_results
 

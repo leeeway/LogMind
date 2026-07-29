@@ -272,7 +272,11 @@ def build_root_cause_evidence(results: list[Any]) -> dict:
                 metadata={"resolved_at": structured.get("resolved_at")},
             ))
 
-        if not current_evidence and result_type in {"root_cause", "anomaly", "summary"}:
+        if (
+            content
+            and not current_evidence
+            and result_type in {"root_cause", "anomaly", "summary"}
+        ):
             current_evidence.append(add_evidence(
                 kind="ai_finding",
                 title="AI 分析发现",
