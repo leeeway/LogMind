@@ -294,6 +294,41 @@ class SemanticDedupStage(PipelineStage):
                     task_id=ctx.task_id,
                 )
 
+                # Old model outputs may contain only negative boilerplate such
+                # as "未显示 DataIntegrityViolationException，因此不定性为
+                # critical". Such text is not reusable knowledge: quarantine
+                # the vector and run a fresh analysis instead.
+                from logmind.domain.analysis.stages.result_parse import (
+                    _ACTIONABLE_SIGNAL_RE,
+                    _sanitize_negative_boilerplate,
+                )
+
+                historical_content = str(match.get("analysis_content") or "")
+                sanitized_history = _sanitize_negative_boilerplate(
+                    historical_content
+                )
+                if (
+                    sanitized_history != historical_content.strip()
+                    and not _ACTIONABLE_SIGNAL_RE.search(sanitized_history)
+                ):
+                    logger.warning(
+                        "semantic_dedup_stale_boilerplate_ignored",
+                        historical_task=match.get("task_id", "")[:8],
+                        task_id=ctx.task_id,
+                    )
+                    try:
+                        await log_service.update_analysis_vector_status(
+                            doc_id=doc_id,
+                            status="ignored",
+                            feedback_quality="poor",
+                        )
+                    except Exception:
+                        pass
+                    ctx.semantic_dedup_hit = False
+                    ctx.log_metadata["semantic_stale_history_ignored"] = True
+                    ctx.log_metadata["is_first_seen"] = True
+                    return ctx
+
                 # ── Regression Detection ─────────────────
                 # If the issue was marked as resolved but re-appeared,
                 # it's a REGRESSION — don't reuse stale conclusions,

@@ -18,8 +18,16 @@ const evidenceKindLabels: Record<string, string> = {
   change_point: '变点',
   cross_service: '跨服务',
   history_match: '历史命中',
+  knowledge_match: '知识库命中',
   regression: '回归',
   ai_finding: 'AI 发现',
+};
+const pipelineStageLabels: Record<string, string> = {
+  knowledge_retrieval: '知识库预检索',
+  semantic_dedup: '历史经验匹配',
+  prompt_build: '分析上下文组装',
+  ai_inference: 'AI 分析推理',
+  result_parse: '结论校验清洗',
 };
 
 const parseJsonList = (value: any): any[] => {
@@ -75,7 +83,11 @@ const TaskDetail: React.FC = () => {
   const handleFeedback = async (resultId: string, score: number) => {
     try {
       await analysisApi.submitFeedback(resultId, score);
-      message.success(score > 0 ? '感谢反馈 👍' : '感谢反馈，将改进分析质量');
+      message.success(
+        score > 0
+          ? '已验证，并加入自学习知识库 👍'
+          : '已标记为不准确，后续分析将排除该经验',
+      );
     } catch { message.error('反馈失败'); }
   };
 
@@ -187,10 +199,12 @@ const TaskDetail: React.FC = () => {
               const pct = trace.total_duration_ms > 0 ? Math.max((stage.duration_ms / trace.total_duration_ms) * 100, 2) : 0;
               const icon = stage.status === 'ok' ? '✅' : stage.status === 'skipped' ? '⏭️' : '❌';
               return (
-                <Tooltip key={i} title={`${stage.stage}: ${stage.duration_ms}ms — ${stage.status}`}>
+                <Tooltip key={i} title={`${pipelineStageLabels[stage.stage] || stage.stage}: ${stage.duration_ms}ms — ${stage.status}`}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
                     <span style={{ width: 24 }}>{icon}</span>
-                    <span style={{ width: 160, color: 'var(--lm-text-secondary)', fontSize: 12 }}>{stage.stage}</span>
+                    <span style={{ width: 160, color: 'var(--lm-text-secondary)', fontSize: 12 }}>
+                      {pipelineStageLabels[stage.stage] || stage.stage}
+                    </span>
                     <div style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 4, height: 18, overflow: 'hidden' }}>
                       <div style={{
                         width: `${pct}%`,

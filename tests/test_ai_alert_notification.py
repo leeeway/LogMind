@@ -41,6 +41,38 @@ def test_ai_alert_location_summary_omits_duplicate_cause(monkeypatch):
     assert content.count(alert_content) == 1
 
 
+def test_ai_alert_location_summary_strips_negative_exception_enumeration(monkeypatch):
+    from logmind.domain.analysis import tasks
+
+    monkeypatch.setattr(
+        "logmind.core.config.get_settings",
+        lambda: SimpleNamespace(public_app_url=""),
+    )
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="task-negative-boilerplate",
+        business_line_id="biz-1",
+    )
+
+    content = tasks._build_alert_location_summary(
+        ctx,
+        {
+            "severity": "warning",
+            "content": (
+                "当前日志未显示数据库写入失败、DataIntegrityViolationException "
+                "或 SQL 截断等异常，因此暂不定性为 critical。"
+            ),
+        },
+        priority_label="🟡 [P1|40分]",
+        issue_label="",
+        reason="",
+    )
+
+    assert "DataIntegrityViolationException" not in content
+    assert "SQL 截断" not in content
+    assert "问题: 检测到日志异常，请查看分析详情。" in content
+
+
 def test_ai_alert_location_summary_omits_duplicate_ai_finding_evidence(monkeypatch):
     from logmind.domain.analysis import tasks
 

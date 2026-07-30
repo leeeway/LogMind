@@ -610,6 +610,7 @@ class LogService:
                             "must_not": [
                                 # Exclude entries marked as poor quality by feedback
                                 {"term": {"feedback_quality": "poor"}},
+                                {"term": {"status": "ignored"}},
                             ],
                         }
                     }

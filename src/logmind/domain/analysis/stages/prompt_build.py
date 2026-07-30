@@ -125,12 +125,30 @@ WARN/ERROR/CRITICAL 的异常信号进行完整时序分析；不要只罗列错
 - 仅有错误率变点、日志数量增加或“无法确认原因”，但没有对应失败日志时，severity 必须为 info。
 - 没有真实异常时只输出一句简短运行摘要；禁止枚举“未发现”的异常类型，禁止猜测根因。"""
 
+        # Deterministic RAG preload: custom templates do not always reference
+        # ``rag_context``, so ensure retrieved knowledge reaches the model once.
+        if (
+            ctx.rag_context
+            and ctx.rag_context not in ctx.system_prompt
+            and ctx.rag_context not in ctx.user_prompt
+        ):
+            ctx.system_prompt += (
+                "\n\n## 内部知识库预检索结果\n"
+                + ctx.rag_context
+            )
+        if ctx.rag_context:
+            ctx.log_metadata["knowledge_context_injected"] = True
+            ctx.log_metadata["knowledge_sources"] = ctx.rag_sources[:10]
+
         # Inject business line intelligence profile
         try:
             from logmind.domain.analysis.business_profile import build_profile_context
             profile = await build_profile_context(ctx.business_line_id)
             if profile:
                 ctx.system_prompt = ctx.system_prompt + "\n\n" + profile
+                if "自学习业务画像" not in ctx.rag_sources:
+                    ctx.rag_sources.append("自学习业务画像")
+                ctx.log_metadata["business_profile_injected"] = True
                 logger.info("business_profile_injected",
                             business_line_id=ctx.business_line_id,
                             profile_length=len(profile), task_id=ctx.task_id)

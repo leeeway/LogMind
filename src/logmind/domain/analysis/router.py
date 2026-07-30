@@ -271,6 +271,36 @@ async def submit_result_feedback(
                     historical_task_id, "verified"
                 )
                 feedback_result += " | Vector marked as verified (TTL=365d)"
+
+                # Verified operator feedback is high-quality enough to enter the
+                # visible RAG knowledge base. Unreviewed AI conclusions stay in
+                # the internal semantic memory only.
+                try:
+                    from logmind.domain.rag.tasks import index_document_chunks
+
+                    knowledge_content = (
+                        "# 已验证日志分析经验\n\n"
+                        f"- 业务线ID: {task.business_line_id}\n"
+                        f"- 分析任务ID: {task.id}\n"
+                        f"- 严重级别: {result.severity}\n\n"
+                        f"## 已验证结论\n{result.content}\n"
+                    )
+                    if comment:
+                        knowledge_content += f"\n## 运维反馈\n{comment}\n"
+                    index_document_chunks.delay(
+                        content=knowledge_content,
+                        filename=f"已验证分析-{task.id[:8]}.md",
+                        tenant_id=user.tenant_id,
+                        metadata={
+                            "source": "verified_analysis_feedback",
+                            "source_task_id": task.id,
+                            "source_result_id": result.id,
+                            "business_line_id": task.business_line_id,
+                        },
+                    )
+                    feedback_result += " | Added to verified knowledge base"
+                except Exception as kb_err:
+                    feedback_result += f" | Knowledge indexing failed: {kb_err}"
             elif score == -1:
                 # Negative: mark as poor, excluded from future matches
                 await _update_vector_feedback(

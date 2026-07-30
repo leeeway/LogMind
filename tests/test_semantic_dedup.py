@@ -10,8 +10,16 @@ Covers:
   - Stack frame line-number agnosticism
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
-from logmind.domain.analysis.semantic_dedup import extract_error_signature
+
+from logmind.domain.analysis.pipeline import PipelineContext
+from logmind.domain.analysis.semantic_dedup import (
+    SemanticDedupStage,
+    extract_error_signature,
+)
 
 
 class TestExtractErrorSignature:
@@ -127,3 +135,67 @@ class TestExtractErrorSignature:
             logs = f"{exc_class}: something went wrong\n"
             sig = extract_error_signature(logs, "java")
             assert exc_class.split(".")[-1] in sig
+
+
+@pytest.mark.asyncio
+async def test_stale_negative_history_is_quarantined_and_reanalyzed(monkeypatch):
+    settings = SimpleNamespace(
+        analysis_semantic_dedup_enabled=True,
+        redis_url="redis://unused",
+        analysis_embedding_cache_ttl_seconds=3600,
+        analysis_semantic_dedup_threshold=0.92,
+        analysis_semantic_dedup_ttl_hours=168,
+    )
+    embed = AsyncMock(return_value=[0.1, 0.2])
+    search = AsyncMock(return_value=[{
+        "doc_id": "vector-1",
+        "score": 0.97,
+        "analysis_content": (
+            "当前日志未显示数据库写入失败、DataIntegrityViolationException "
+            "或 SQL 截断，因此暂不定性为 critical。"
+        ),
+        "severity": "warning",
+        "task_id": "old-task",
+        "status": "open",
+        "hit_count": 1,
+    }])
+    quarantine = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(
+        "logmind.domain.analysis.semantic_dedup.get_settings",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.analysis.semantic_dedup.cached_embed",
+        embed,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.log.service.log_service.knn_search_analysis_history",
+        search,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.log.service.log_service.update_analysis_vector_status",
+        quarantine,
+    )
+
+    ctx = PipelineContext(
+        tenant_id="tenant-1",
+        task_id="new-task",
+        business_line_id="biz-1",
+        language="csharp",
+        processed_logs=(
+            "System.InvalidOperationException: current failure\n"
+            "at Gyyx.OrderService.Save() in OrderService.cs:line 18"
+        ),
+    )
+
+    result = await SemanticDedupStage().execute(ctx)
+
+    assert result.semantic_dedup_hit is False
+    assert result.analysis_results == []
+    assert result.log_metadata["semantic_stale_history_ignored"] is True
+    quarantine.assert_awaited_once_with(
+        doc_id="vector-1",
+        status="ignored",
+        feedback_quality="poor",
+    )

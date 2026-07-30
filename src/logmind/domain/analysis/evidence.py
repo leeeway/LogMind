@@ -260,6 +260,23 @@ def build_root_cause_evidence(results: list[Any]) -> dict:
                 },
             ))
 
+        knowledge_sources = [
+            _as_text(source)
+            for source in _as_list(structured.get("knowledge_sources"))
+            if _as_text(source)
+        ]
+        if knowledge_sources:
+            current_evidence.append(add_evidence(
+                kind="knowledge_match",
+                title="知识库参考",
+                detail=f"分析时已参考：{'、'.join(knowledge_sources[:4])}。",
+                severity="info",
+                timestamp=timestamp,
+                score=0.6,
+                source="knowledge_retrieval",
+                metadata={"sources": knowledge_sources[:10]},
+            ))
+
         if structured.get("is_regression"):
             current_evidence.append(add_evidence(
                 kind="regression",

@@ -111,7 +111,9 @@ class TestSourceLogRefs:
 
         result = await ResultParseStage().execute(ctx)
 
-        assert result.analysis_results == reused
+        assert result.analysis_results[0]["content"] == reused[0]["content"]
+        assert result.analysis_results[0]["severity"] == "warning"
+        assert result.analysis_results[0]["alertable"] is True
         assert result.log_metadata["actionable_findings"] == 1
 
     @pytest.mark.asyncio

@@ -88,6 +88,11 @@ async def _async_index_analysis(
         success = await log_service.insert_analysis_vector(doc)
 
         if success:
+            from logmind.domain.analysis.business_profile import (
+                invalidate_profile_cache,
+            )
+
+            invalidate_profile_cache(business_line_id)
             logger.info(
                 "analysis_indexed_for_dedup",
                 task_id=task_id,

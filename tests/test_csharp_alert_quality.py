@@ -93,6 +93,36 @@ async def test_negative_enumeration_and_unproven_spike_are_suppressed(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_reused_historical_negative_boilerplate_is_sanitized(monkeypatch):
+    await _disable_priority_learning(monkeypatch)
+    ctx = _context()
+    ctx.semantic_dedup_hit = True
+    ctx.processed_logs = "INFO query completed successfully"
+    ctx.analysis_results = [{
+        "result_type": "root_cause",
+        "content": (
+            "当前日志未显示数据库写入失败、DataIntegrityViolationException "
+            "或 SQL 截断等结构性数据一致性异常，因此暂不定性为 critical。"
+        ),
+        "severity": "warning",
+        "confidence_score": 0.86,
+        "structured_data": json.dumps({
+            "dedup_source": "semantic",
+            "historical_task_id": "old-task",
+        }),
+    }]
+
+    ctx = await ResultParseStage().execute(ctx)
+    ctx = await PriorityDecisionStage().execute(ctx)
+
+    finding = ctx.analysis_results[0]
+    assert "DataIntegrityViolationException" not in finding["content"]
+    assert finding["severity"] == "info"
+    assert finding["alertable"] is False
+    assert ctx.priority_decision["should_notify"] is False
+
+
+@pytest.mark.asyncio
 async def test_concrete_dotnet_exception_remains_alertable(monkeypatch):
     await _disable_priority_learning(monkeypatch)
     ctx = _context()

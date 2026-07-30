@@ -81,6 +81,31 @@ def test_rootcause_graph_parses_persisted_structured_json():
     assert graph.next_verifications == ["查看数据库连接池活跃连接"]
 
 
+def test_evidence_exposes_knowledge_sources_used_by_analysis():
+    from logmind.domain.analysis.evidence import build_root_cause_evidence
+
+    result = _result(
+        structured_data=json.dumps({
+            "root_cause": "目录 ACL 不允许服务账号写入",
+            "knowledge_context_used": True,
+            "knowledge_sources": [
+                "故障复盘知识库 / 配置同步失败复盘.md",
+                "运维 SOP / Windows 权限排查.md",
+            ],
+        }, ensure_ascii=False),
+    )
+
+    summary = build_root_cause_evidence([result])
+
+    knowledge = [
+        item for item in summary["evidence"]
+        if item["kind"] == "knowledge_match"
+    ]
+    assert len(knowledge) == 1
+    assert "配置同步失败复盘.md" in knowledge[0]["detail"]
+    assert knowledge[0]["source"] == "knowledge_retrieval"
+
+
 async def test_timeline_expands_change_point_and_cross_service_evidence(monkeypatch):
     from logmind.domain.analysis import timeline_router
 

@@ -8,11 +8,12 @@ from logmind.domain.analysis.pipeline import PipelineContext, PipelineStage
 logger = get_logger(__name__)
 
 _NEGATIVE_CLAUSE_RE = re.compile(
-    r"(?:^|(?<=[。！？!?；;，,]))\s*"
+    r"(?:^|(?<=\n)|(?<=[。！？!?；;，,]))\s*"
     r"[^。！？!?；;，,]*?"
-    r"(?:未发现|未检测到|没有发现|未出现|未包含|未见|"
+    r"(?:未发现|未检测到|未检出|未观察到|未识别到|未显示|"
+    r"没有发现|没有显示|未出现|未包含|未见|"
     r"没有明确(?:的)?|无明确(?:的)?|不存在明确(?:的)?)"
-    r"[^。！？!?；;]*"
+    r"[^。！？!?；;]*?"
     r"(?:[；;，,]\s*(?:但|不过|然而|只是)|[。！？!?；;]|$)",
     re.IGNORECASE,
 )
@@ -144,14 +145,63 @@ class ResultParseStage(PipelineStage):
 
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         if ctx.semantic_dedup_hit and ctx.analysis_results:
+            normalized_results = []
+            for result in ctx.analysis_results:
+                raw_content = str(result.get("content") or "")
+                cleaned_content, inline_refs = _extract_inline_source_refs(raw_content)
+                sanitized_content = _sanitize_negative_boilerplate(cleaned_content)
+
+                raw_refs = result.get("source_log_refs", "[]")
+                if isinstance(raw_refs, str):
+                    try:
+                        raw_refs = json.loads(raw_refs)
+                    except json.JSONDecodeError:
+                        raw_refs = []
+                log_refs = [
+                    str(ref)[:200]
+                    for ref in (raw_refs if isinstance(raw_refs, list) else [])
+                    if ref
+                ][:20]
+                if inline_refs:
+                    log_refs = list(dict.fromkeys([*log_refs, *inline_refs]))[:20]
+
+                current_log_evidence = bool(
+                    _ACTIONABLE_SIGNAL_RE.search(ctx.processed_logs or "")
+                )
+                actionable = (
+                    _is_actionable_finding(result, sanitized_content, log_refs)
+                    or (
+                        result.get("alertable") is True
+                        and sanitized_content == cleaned_content
+                    )
+                    or current_log_evidence
+                )
+                severity = str(result.get("severity", "info")).lower()
+                if severity not in {"critical", "error", "warning", "info"}:
+                    severity = "info"
+                if severity in {"critical", "error", "warning"} and not actionable:
+                    severity = "info"
+                    sanitized_content = _non_actionable_summary(raw_content)
+                elif not sanitized_content:
+                    sanitized_content = _non_actionable_summary(raw_content)
+
+                normalized = dict(result)
+                normalized["content"] = sanitized_content
+                normalized["severity"] = severity
+                normalized["alertable"] = actionable
+                normalized["source_log_refs"] = json.dumps(
+                    log_refs,
+                    ensure_ascii=False,
+                )
+                normalized_results.append(normalized)
+
+            ctx.analysis_results = normalized_results
             ctx.log_metadata["actionable_findings"] = sum(
                 1 for result in ctx.analysis_results
-                if result.get("alertable", result.get("severity") in {
-                    "critical", "error", "warning",
-                })
+                if result.get("alertable")
             )
             logger.info(
-                "result_parse_reused_semantic_result",
+                "result_parse_sanitized_semantic_result",
                 result_count=len(ctx.analysis_results),
                 task_id=ctx.task_id,
             )
@@ -217,6 +267,9 @@ class ResultParseStage(PipelineStage):
                 normalized_item["severity"] = severity
                 normalized_item["alertable"] = actionable
                 normalized_item["source_log_refs"] = log_refs
+                if ctx.rag_sources:
+                    normalized_item["knowledge_sources"] = ctx.rag_sources[:10]
+                    normalized_item["knowledge_context_used"] = True
 
                 ctx.analysis_results.append({
                     "result_type": item.get("result_type", "anomaly"),

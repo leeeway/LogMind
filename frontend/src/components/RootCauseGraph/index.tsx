@@ -45,6 +45,7 @@ const nodeTypeLabels: Record<string, string> = {
   change_point: '变点',
   cross_service: '跨服务',
   history_match: '历史',
+  knowledge_match: '知识库',
   regression: '回归',
   ai_finding: '发现',
 };

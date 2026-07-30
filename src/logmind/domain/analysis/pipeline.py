@@ -162,9 +162,10 @@ class AnalysisPipeline:
         """Execute all pipeline stages in order, recording per-stage metrics."""
         for stage in self.stages:
             # Semantic dedup already populated analysis_results. Re-running the
-            # parser against an empty AI response would erase the reused result.
+            # parser sanitizes the reused historical result without reading the
+            # empty AI response. Knowledge/prompt/model work is unnecessary.
             if ctx.semantic_dedup_hit and stage.name in (
-                'prompt_build', 'ai_inference', 'result_parse'
+                "knowledge_retrieval", "prompt_build", "ai_inference"
             ):
                 logger.info("stage_skipped_semantic_dedup", stage=stage.name, task_id=ctx.task_id)
                 ctx.stage_metrics.append({

@@ -307,12 +307,23 @@ def _build_alert_location_summary(
     the key facts needed for first-response triage.
     """
     from logmind.domain.analysis.evidence import build_root_cause_evidence
+    from logmind.domain.analysis.stages.result_parse import (
+        _sanitize_negative_boilerplate,
+    )
 
-    content = _compact_text(str(alert.get("content", "")), _MAX_ALERT_ISSUE_CHARS)
+    safe_alert = dict(alert)
+    safe_alert["content"] = _sanitize_negative_boilerplate(
+        str(alert.get("content", ""))
+    )
+    content = _compact_text(
+        safe_alert["content"],
+        _MAX_ALERT_ISSUE_CHARS,
+    )
     if not content:
         content = "检测到日志异常，请查看分析详情。"
+        safe_alert["content"] = content
 
-    summary = build_root_cause_evidence([alert])
+    summary = build_root_cause_evidence([safe_alert])
     candidates = summary.get("candidates", [])
     evidence = summary.get("evidence", [])
     verifications = summary.get("next_verifications", [])
@@ -331,7 +342,7 @@ def _build_alert_location_summary(
         if not verifications and isinstance(candidate_steps, list):
             verifications = candidate_steps
     else:
-        cause = _compact_text(str(alert.get("content", "")) or "待进一步确认", 220)
+        cause = _compact_text(safe_alert["content"] or "待进一步确认", 220)
 
     evidence_lines: list[str] = []
     for item in evidence:
@@ -404,6 +415,7 @@ async def _execute_analysis(task_id: str):
         BusinessNoiseFilterStage,
         ChangePointDetectionStage,
         CrossServiceCorrelationStage,
+        KnowledgeRetrievalStage,
         LogFetchStage,
         LogPreprocessStage,
         LogQualityFilterStage,
@@ -464,6 +476,7 @@ async def _execute_analysis(task_id: str):
             ErrorFingerprintStage(),             # Layer 1: Fast MD5 dedup
             SemanticDedupStage(),                # Layer 2: Vector semantic dedup
             CrossServiceCorrelationStage(log_service),  # Cross-service root cause correlation
+            KnowledgeRetrievalStage(),           # Deterministic tenant knowledge preload
             PromptBuildStage(prompt_engine, prompt_repo),
             AgentInferenceStage(provider_manager),
             ResultParseStage(),
@@ -704,13 +717,21 @@ async def _run_learning_hooks(ctx, task_id: str):
       - Experience rule storage (for prompt evolution)
       - Profile cache invalidation
     """
-    # Hook 1: Index analysis conclusions into vector store for future dedup
-    if ctx.analysis_results and not ctx.semantic_dedup_hit:
+    # Hook 1: Index only evidence-backed conclusions into the vector store.
+    # Recording info summaries or non-alertable negative prose pollutes semantic
+    # memory and can cause a later real incident to reuse "未发现..." as a root cause.
+    actionable_results = [
+        result
+        for result in ctx.analysis_results
+        if result.get("alertable") is True
+        and result.get("severity") in {"critical", "error", "warning"}
+    ]
+    if actionable_results and not ctx.semantic_dedup_hit:
         try:
             from logmind.domain.analysis.analysis_indexer import index_analysis_result
             combined_content = "\n\n".join(
                 f"[{r.get('severity', 'info').upper()}] {r.get('content', '')}"
-                for r in ctx.analysis_results
+                for r in actionable_results
             )
             error_sig = ctx.error_signature
             if not error_sig:
@@ -718,7 +739,7 @@ async def _run_learning_hooks(ctx, task_id: str):
                 error_sig = extract_error_signature(ctx.processed_logs, ctx.language)
             if error_sig and len(error_sig) >= 20:
                 top_severity = "info"
-                for r in ctx.analysis_results:
+                for r in actionable_results:
                     s = r.get("severity", "info")
                     if s == "critical":
                         top_severity = "critical"
@@ -736,6 +757,12 @@ async def _run_learning_hooks(ctx, task_id: str):
                 logger.info("analysis_index_dispatched", task_id=task_id)
         except Exception as e:
             logger.warning("analysis_index_dispatch_failed", error=str(e))
+    elif ctx.analysis_results and not ctx.semantic_dedup_hit:
+        logger.info(
+            "analysis_index_skipped_no_actionable_finding",
+            task_id=task_id,
+            result_count=len(ctx.analysis_results),
+        )
 
     # Hook 2: Store AI-learned error signals for self-learning loop
     if ctx.learned_signals:

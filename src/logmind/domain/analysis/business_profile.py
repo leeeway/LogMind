@@ -25,6 +25,7 @@ logger = get_logger(__name__)
 # ── In-memory cache ──────────────────────────────────────
 _profile_cache: dict[str, tuple[str, float]] = {}
 _CACHE_TTL = 600  # 10 minutes
+_EMPTY_CACHE_TTL = 30  # async learning writes may arrive shortly after analysis
 
 _VECTORS_INDEX = "logmind-analysis-vectors"
 _RULES_INDEX = "logmind-experience-rules"
@@ -41,7 +42,8 @@ async def build_profile_context(business_line_id: str) -> str:
 
     now = time.monotonic()
     cached = _profile_cache.get(business_line_id)
-    if cached and (now - cached[1]) < _CACHE_TTL:
+    cache_ttl = _CACHE_TTL if cached and cached[0] else _EMPTY_CACHE_TTL
+    if cached and (now - cached[1]) < cache_ttl:
         return cached[0]
 
     try:
@@ -229,6 +231,7 @@ async def store_experience_rule(
                 },
             },
         )
+        invalidate_profile_cache(business_line_id)
         logger.info("experience_rule_stored", rule=rule[:60], doc_id=doc_id[:8])
 
     except Exception as e:
