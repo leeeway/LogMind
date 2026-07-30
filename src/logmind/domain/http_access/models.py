@@ -94,6 +94,11 @@ class AccessWindow:
         )
 
 
+def is_rejected_traffic_window(window: AccessWindow) -> bool:
+    """Identify windows dominated by scans or requests rejected at the edge."""
+    return window.request_count >= 100 and window.rate_4xx >= 0.80
+
+
 @dataclass(slots=True)
 class AccessRouteMetric:
     """Current-window aggregation for one normalized method/route."""
@@ -456,11 +461,7 @@ def detect_route_incidents(
     incidents: list[AccessIncident] = []
     for metric in combined.values():
         site_window = (windows or {}).get((metric.source, metric.site))
-        if (
-            site_window
-            and site_window.request_count >= 100
-            and site_window.rate_4xx >= 0.80
-        ):
+        if site_window and is_rejected_traffic_window(site_window):
             continue
         route_path = metric.route_key.partition(" ")[2]
         if _KNOWN_PROBE_PATH_RE.search(route_path):

@@ -18,6 +18,7 @@ from logmind.domain.http_access.models import (
     AccessSample,
     AccessWindow,
     is_allowed_site,
+    is_rejected_traffic_window,
     normalize_request,
     normalize_site,
     safe_float,
@@ -425,24 +426,61 @@ class HttpAccessService:
         There is at most one route aggregation per configured source index,
         rather than one Elasticsearch query or Celery task per server_name.
         """
-        candidates_by_source: dict[str, set[str]] = {}
+        candidate_windows: dict[str, list[AccessWindow]] = {}
+        rejected_site_count = 0
         for window in windows.values():
             if window.status_4xx < 10:
                 continue
-            candidates_by_source.setdefault(window.source, set()).add(window.site)
-        if not candidates_by_source:
+            if is_rejected_traffic_window(window):
+                rejected_site_count += 1
+                continue
+            candidate_windows.setdefault(window.source, []).append(window)
+        if not candidate_windows:
+            if rejected_site_count:
+                logger.info(
+                    "http_access_route_candidates_rejected",
+                    rejected_site_count=rejected_site_count,
+                )
             return []
 
         settings = get_settings()
+        max_candidates = getattr(
+            settings,
+            "http_access_max_route_candidate_sites",
+            20,
+        )
+        candidates_by_source: dict[str, list[str]] = {}
+        omitted_site_count = 0
+        for source, source_windows in candidate_windows.items():
+            ranked = sorted(
+                source_windows,
+                key=lambda item: (
+                    -item.status_4xx,
+                    -item.rate_4xx,
+                    item.site,
+                ),
+            )
+            candidates_by_source[source] = [
+                item.site for item in ranked[:max_candidates]
+            ]
+            omitted_site_count += max(0, len(ranked) - max_candidates)
+        if rejected_site_count or omitted_site_count:
+            logger.info(
+                "http_access_route_candidates_filtered",
+                rejected_site_count=rejected_site_count,
+                omitted_site_count=omitted_site_count,
+                selected_site_count=sum(
+                    len(sites) for sites in candidates_by_source.values()
+                ),
+            )
+
         queries = [
             (
                 index_name,
                 source_name_for_index(index_name),
-                sorted(
-                    candidates_by_source.get(
-                        source_name_for_index(index_name),
-                        set(),
-                    )
+                candidates_by_source.get(
+                    source_name_for_index(index_name),
+                    [],
                 ),
             )
             for index_name in settings.http_access_index_list
@@ -553,21 +591,12 @@ class HttpAccessService:
                                     }
                                 }
                             },
-                            "status_5xx": {
-                                "filter": {
-                                    "range": {
-                                        "lm_status_code": {
-                                            "gte": 500,
-                                            "lt": 600,
-                                        }
-                                    }
-                                }
-                            },
-                            "latency": {
-                                "percentiles": {
-                                    "field": "lm_request_time_ms",
-                                    "percents": [95],
-                                    "keyed": True,
+                            "has_4xx": {
+                                "bucket_selector": {
+                                    "buckets_path": {
+                                        "errors": "status_4xx>_count"
+                                    },
+                                    "script": "params.errors > 0",
                                 }
                             },
                         },
@@ -583,23 +612,18 @@ class HttpAccessService:
                 route_key = str(key.get("route") or "")[:520]
                 if not route_key or route_key == "UNKNOWN /":
                     continue
+                status_4xx = int(
+                    bucket.get("status_4xx", {}).get("doc_count", 0)
+                )
+                if status_4xx <= 0:
+                    continue
                 route_metrics.append(
                     AccessRouteMetric(
                         source=source,
                         site=normalize_site(key.get("site")),
                         route_key=route_key,
                         request_count=int(bucket.get("doc_count", 0)),
-                        status_4xx=int(
-                            bucket.get("status_4xx", {}).get("doc_count", 0)
-                        ),
-                        status_5xx=int(
-                            bucket.get("status_5xx", {}).get("doc_count", 0)
-                        ),
-                        p95_ms=safe_float(
-                            bucket.get("latency", {})
-                            .get("values", {})
-                            .get("95.0")
-                        ),
+                        status_4xx=status_4xx,
                     )
                 )
             after_key = aggregation.get("after_key")

@@ -18,6 +18,7 @@ _PATROL_LEASE_KEY = "logmind:http_access:patrol:lease:v1"
 _SUMMARY_COOLDOWN_KEY = "logmind:http_access:summary:last_sent:v1"
 _SUMMARY_P0_LEASE_KEY = "logmind:http_access:summary:p0:lease:v1"
 _RUN_SNAPSHOT_KEY = "logmind:http_access:last_run:v1"
+_RUN_HISTORY_KEY = "logmind:http_access:run_history:v1"
 _STATE_TTL_SECONDS = 14 * 24 * 60 * 60
 _RUN_SNAPSHOT_TTL_SECONDS = 7 * 24 * 60 * 60
 _PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
@@ -223,11 +224,23 @@ class HttpAccessAlertState:
             await self._release_lease(lease)
 
     async def save_run_snapshot(self, result: dict) -> None:
+        payload = json.dumps(result, ensure_ascii=False)
+        history_limit = getattr(
+            get_settings(),
+            "http_access_run_history_limit",
+            288,
+        )
         try:
             await self.redis.setex(
                 _RUN_SNAPSHOT_KEY,
                 _RUN_SNAPSHOT_TTL_SECONDS,
-                json.dumps(result, ensure_ascii=False),
+                payload,
+            )
+            await self.redis.lpush(_RUN_HISTORY_KEY, payload)
+            await self.redis.ltrim(_RUN_HISTORY_KEY, 0, history_limit - 1)
+            await self.redis.expire(
+                _RUN_HISTORY_KEY,
+                _RUN_SNAPSHOT_TTL_SECONDS,
             )
         except Exception as exc:
             logger.warning("http_access_run_snapshot_save_failed", error=str(exc))
@@ -240,6 +253,33 @@ class HttpAccessAlertState:
         except Exception as exc:
             logger.warning("http_access_run_snapshot_load_failed", error=str(exc))
             return {}
+
+    async def get_run_history(self, *, limit: int = 288) -> list[dict]:
+        max_limit = getattr(
+            get_settings(),
+            "http_access_run_history_limit",
+            288,
+        )
+        safe_limit = min(max(1, limit), max_limit)
+        try:
+            rows = await self.redis.lrange(
+                _RUN_HISTORY_KEY,
+                0,
+                safe_limit - 1,
+            )
+        except Exception as exc:
+            logger.warning("http_access_run_history_load_failed", error=str(exc))
+            return []
+
+        history: list[dict] = []
+        for raw in rows:
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                history.append(parsed)
+        return history
 
     async def _acquire_lease(
         self,

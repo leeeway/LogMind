@@ -9,13 +9,18 @@ from logmind.domain.http_access.models import (
     AccessRecovery,
     AccessRouteMetric,
     AccessSample,
+    AccessWindow,
     aggregate_metrics,
     detect_incidents,
     detect_route_incidents,
     is_allowed_site,
     normalize_request,
 )
-from logmind.domain.http_access.router import get_http_access_patrol_status
+from logmind.domain.http_access.router import (
+    _summarize_runs,
+    get_http_access_patrol_runs,
+    get_http_access_patrol_status,
+)
 from logmind.domain.http_access.service import HttpAccessService
 from logmind.domain.http_access.state import HttpAccessAlertState
 from logmind.domain.http_access.tasks import (
@@ -383,13 +388,79 @@ def test_route_aggregation_handles_many_server_names_in_one_query():
         )
     )
 
-    assert len(metrics) == 2
+    assert len(metrics) == 1
+    assert metrics[0].route_key == "GET /notice/noread/{uuid}/"
     assert len(es.search_calls) == 1
     body = es.search_calls[0]["body"]
     assert body["query"]["bool"]["filter"][1]["terms"][
         "server_name.keyword"
     ] == ["api.qibao.tjlong.cn", "pigeon.gyyx.cn"]
     assert "lm_route_key" in body["runtime_mappings"]
+
+
+def test_route_candidates_skip_rejected_sites_and_apply_capacity_limit(
+    monkeypatch,
+):
+    es = _FakeEs(
+        [
+            {
+                "aggregations": {
+                    "by_site_route": {
+                        "buckets": [],
+                    }
+                }
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "logmind.domain.http_access.service.get_settings",
+        lambda: SimpleNamespace(
+            http_access_index_list=("nginx-log-json",),
+            http_access_max_route_candidate_sites=2,
+        ),
+    )
+    service = HttpAccessService(es=es)
+    windows = {
+        ("nginx", "scan.gyyx.cn"): AccessWindow(
+            source="nginx",
+            site="scan.gyyx.cn",
+            request_count=1000,
+            status_4xx=900,
+        ),
+        ("nginx", "a.gyyx.cn"): AccessWindow(
+            source="nginx",
+            site="a.gyyx.cn",
+            request_count=1000,
+            status_4xx=50,
+        ),
+        ("nginx", "b.gyyx.cn"): AccessWindow(
+            source="nginx",
+            site="b.gyyx.cn",
+            request_count=1000,
+            status_4xx=40,
+        ),
+        ("nginx", "c.gyyx.cn"): AccessWindow(
+            source="nginx",
+            site="c.gyyx.cn",
+            request_count=1000,
+            status_4xx=30,
+        ),
+    }
+
+    asyncio.run(
+        service.collect_route_metrics(
+            windows,
+            time_from=_utc(),
+            time_to=_utc() + timedelta(minutes=5),
+        )
+    )
+
+    selected_sites = es.search_calls[0]["body"]["query"]["bool"]["filter"][1][
+        "terms"
+    ]["server_name.keyword"]
+    assert selected_sites == ["a.gyyx.cn", "b.gyyx.cn"]
+    assert "scan.gyyx.cn" not in selected_sites
+    assert "c.gyyx.cn" not in selected_sites
 
 
 def test_baseline_uses_same_time_slots_and_medians(monkeypatch):
@@ -648,6 +719,7 @@ def test_route_notification_names_each_interface_without_redundant_main_route():
 class _FakeRedis:
     def __init__(self):
         self.values = {}
+        self.lists = {}
 
     async def get(self, key):
         return self.values.get(key)
@@ -667,6 +739,20 @@ class _FakeRedis:
             return 0
         del self.values[key]
         return 1
+
+    async def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+        return len(self.lists[key])
+
+    async def ltrim(self, key, start, stop):
+        self.lists[key] = self.lists.get(key, [])[start : stop + 1]
+        return True
+
+    async def expire(self, _key, _ttl):
+        return True
+
+    async def lrange(self, key, start, stop):
+        return self.lists.get(key, [])[start : stop + 1]
 
 
 def test_traffic_drop_requires_two_windows_and_recovery_requires_two():
@@ -804,6 +890,16 @@ def test_patrol_lease_and_run_snapshot_are_shared_in_redis():
         }
         await state.save_run_snapshot(snapshot)
         assert await state.get_run_snapshot() == snapshot
+        newer_snapshot = {
+            "run_status": "notified",
+            "metric_count": 20,
+            "notification_sent": True,
+        }
+        await state.save_run_snapshot(newer_snapshot)
+        assert await state.get_run_history(limit=2) == [
+            newer_snapshot,
+            snapshot,
+        ]
 
     asyncio.run(scenario())
 
@@ -1010,6 +1106,12 @@ def test_patrol_sends_exactly_one_message_for_multiple_sites(monkeypatch):
     assert len(sent_messages) == 1
     assert "api.qibao.tjlong.cn" in sent_messages[0]
     assert "pigeon.gyyx.cn" in sent_messages[0]
+    assert result["incident_site_count"] == 2
+    assert {item["site"] for item in result["top_incidents"]} == {
+        "api.qibao.tjlong.cn",
+        "pigeon.gyyx.cn",
+    }
+    assert all("samples" not in item for item in result["top_incidents"])
 
 
 def test_http_access_status_exposes_safe_settings_and_last_run(monkeypatch):
@@ -1020,6 +1122,8 @@ def test_http_access_status_exposes_safe_settings_and_last_run(monkeypatch):
         http_access_ai_enabled=True,
         http_access_window_minutes=5,
         http_access_notification_cooldown_minutes=30,
+        http_access_max_route_candidate_sites=20,
+        http_access_run_history_limit=288,
         http_access_baseline_days=7,
         http_access_baseline_slot_minutes=60,
         http_access_index_list=(
@@ -1054,3 +1158,60 @@ def test_http_access_status_exposes_safe_settings_and_last_run(monkeypatch):
     assert status["last_run"]["metric_count"] == 42
     assert "webhook_url" not in status
     assert "tenant_id" not in status
+
+
+def test_http_access_run_history_returns_24_hour_summary(monkeypatch):
+    runs = [
+        {
+            "run_status": "notified",
+            "time_from": "2026-07-30T07:55:00+00:00",
+            "time_to": "2026-07-30T08:00:00+00:00",
+            "notification_sent": True,
+            "top_incidents": [
+                {
+                    "site": "api.qibao.tjlong.cn",
+                    "kind": "route_4xx",
+                }
+            ],
+        },
+        {
+            "run_status": "shadow",
+            "time_from": "2026-07-30T07:50:00+00:00",
+            "time_to": "2026-07-30T07:55:00+00:00",
+            "notification_sent": False,
+            "top_incidents": [
+                {
+                    "site": "api.qibao.tjlong.cn",
+                    "kind": "route_4xx",
+                },
+                {
+                    "site": "creator-ops.gyyx.cn",
+                    "kind": "latency",
+                },
+            ],
+        },
+    ]
+
+    async def fake_history(*, limit):
+        assert limit == 288
+        return runs
+
+    monkeypatch.setattr(
+        "logmind.domain.http_access.router."
+        "http_access_alert_state.get_run_history",
+        fake_history,
+    )
+
+    response = asyncio.run(get_http_access_patrol_runs(limit=288))
+
+    assert response["summary"] == _summarize_runs(runs)
+    assert response["summary"]["run_count"] == 2
+    assert response["summary"]["notification_count"] == 1
+    assert response["summary"]["status_counts"] == {
+        "notified": 1,
+        "shadow": 1,
+    }
+    assert response["summary"]["top_sites"][0] == {
+        "site": "api.qibao.tjlong.cn",
+        "affected_windows": 2,
+    }

@@ -20,6 +20,7 @@ from logmind.domain.http_access.models import (
     aggregate_metrics,
     detect_incidents,
     detect_route_incidents,
+    is_rejected_traffic_window,
 )
 from logmind.domain.http_access.service import http_access_service
 from logmind.domain.http_access.state import http_access_alert_state
@@ -117,8 +118,26 @@ async def _run_http_access_patrol(
         logger.warning("http_access_baseline_load_failed", error=str(exc))
     windows = aggregate_metrics(metrics)
     incidents = detect_incidents(windows, baselines)
+    route_eligible_by_source: dict[str, int] = defaultdict(int)
+    route_rejected_site_count = 0
+    for window in windows.values():
+        if window.status_4xx < 10:
+            continue
+        if is_rejected_traffic_window(window):
+            route_rejected_site_count += 1
+            continue
+        route_eligible_by_source[window.source] += 1
+    max_route_candidates = getattr(
+        settings,
+        "http_access_max_route_candidate_sites",
+        20,
+    )
+    route_omitted_site_count = sum(
+        max(0, count - max_route_candidates)
+        for count in route_eligible_by_source.values()
+    )
     route_metrics = []
-    if any(window.status_4xx >= 10 for window in windows.values()):
+    if route_eligible_by_source:
         route_metrics = await service.collect_route_metrics(
             windows,
             time_from=time_from,
@@ -140,7 +159,14 @@ async def _run_http_access_patrol(
         "metric_count": len(metrics),
         "persisted_metric_count": persisted,
         "route_metric_count": len(route_metrics),
+        "route_candidate_site_count": len(
+            {(item.source, item.site) for item in route_metrics}
+        ),
+        "route_rejected_site_count": route_rejected_site_count,
+        "route_omitted_site_count": route_omitted_site_count,
         "incident_count": len(incidents),
+        "incident_site_count": len({item.site for item in incidents}),
+        "top_incidents": _build_incident_snapshot(incidents),
         "notification_incident_count": len(batch.due),
         "recovery_count": len(batch.recoveries),
         "notification_sent": False,
@@ -255,6 +281,39 @@ async def _finalize_patrol_result(
     if callable(save_snapshot):
         await save_snapshot(result)
     return result
+
+
+def _build_incident_snapshot(
+    incidents: list[AccessIncident],
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Keep privacy-safe candidate details for the 24-hour shadow history."""
+    ranked = sorted(
+        incidents,
+        key=lambda item: (
+            _PRIORITY_RANK.get(item.priority, 9),
+            -item.impact,
+            item.site,
+            item.kind,
+        ),
+    )
+    return [
+        {
+            "priority": item.priority,
+            "source": item.source,
+            "site": item.site,
+            "kind": item.kind,
+            "route": item.route_key,
+            "request_count": item.request_count,
+            "status_4xx": item.status_4xx,
+            "status_5xx": item.status_5xx,
+            "current_value": round(item.current_value, 6),
+            "baseline_value": round(item.baseline_value, 6),
+            "p95_ms": round(item.p95_ms, 3),
+        }
+        for item in ranked[:limit]
+    ]
 
 
 def _select_notification_incidents(

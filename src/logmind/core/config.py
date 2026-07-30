@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     http_access_baseline_slot_minutes: int = 60
     http_access_dedup_minutes: int = 30
     http_access_notification_cooldown_minutes: int = 30
+    http_access_max_route_candidate_sites: int = 20
+    http_access_run_history_limit: int = 288
     http_access_max_notification_sites: int = 10
     http_access_sample_size: int = 20
 
@@ -193,6 +195,8 @@ class Settings(BaseSettings):
         "http_access_baseline_slot_minutes",
         "http_access_dedup_minutes",
         "http_access_notification_cooldown_minutes",
+        "http_access_max_route_candidate_sites",
+        "http_access_run_history_limit",
         "http_access_max_notification_sites",
         "http_access_sample_size",
     )
