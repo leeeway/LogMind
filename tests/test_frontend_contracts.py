@@ -20,3 +20,7 @@ def test_frontend_websocket_urls_support_dev_proxy_and_https():
 
     assert "window.location.protocol === 'https:' ? 'wss:' : 'ws:'" in live_tail
     assert "'/ws'" in vite_config
+    assert "showSearch" in live_tail
+    assert "lookback_seconds" in live_tail
+    assert "RECONNECT_DELAYS" in live_tail
+    assert "action: 'subscribe'" in live_tail

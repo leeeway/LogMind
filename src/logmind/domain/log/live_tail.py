@@ -6,34 +6,40 @@ to connected clients in near real-time (1s polling).
 
 Protocol:
   Client → Server:
-    {"action": "subscribe", "index_pattern": "...", "filters": {...}}
+    {"action": "subscribe", "business_line_id": "...",
+     "lookback_seconds": 300, "filters": {...}}
     {"action": "pause"}
     {"action": "resume"}
     "ping"
 
   Server → Client:
     {"type": "logs", "data": [...], "rate": N, "total": N}
-    {"type": "status", "state": "streaming|paused", "rate": N}
+    {"type": "status", "state": "loading_history|streaming|paused", "rate": N}
     {"type": "heartbeat", "ts": "..."}
     {"type": "pong"}
 """
 
-import json
 import asyncio
+import json
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
-from fastapi import WebSocket, WebSocketDisconnect, Query
+from fastapi import Query, WebSocket, WebSocketDisconnect
 
+from logmind.core.elasticsearch import get_es_client
 from logmind.core.logging import get_logger
 from logmind.core.security import decode_access_token
-from logmind.core.elasticsearch import get_es_client
+from logmind.domain.log.service import LogService, build_base_severity_filter
 
 logger = get_logger(__name__)
 
 POLL_INTERVAL = 1.0  # seconds
-MAX_LOGS_PER_PUSH = 50
-MAX_IDLE_SECONDS = 300  # disconnect after 5 min idle
+MAX_LOGS_PER_PUSH = 200
+INITIAL_LOG_LIMIT = 200
+DEFAULT_LOOKBACK_SECONDS = 300
+MIN_LOOKBACK_SECONDS = 30
+MAX_LOOKBACK_SECONDS = 3600
+INGESTION_DELAY_SECONDS = 60
 _QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=&|><!(){}\[\]^"~*?:\\/])')
 
 
@@ -46,69 +52,112 @@ async def _fetch_latest_logs(
     since: datetime,
     filters: dict | None = None,
     size: int = MAX_LOGS_PER_PUSH,
-) -> tuple[list[dict], datetime]:
-    """Fetch logs newer than `since` from ES, return (logs, new_cursor)."""
+    *,
+    newest_first: bool = False,
+) -> tuple[list[dict], datetime, str | None]:
+    """Fetch logs newer than ``since``.
+
+    Initial history queries request the newest records and reverse them before
+    returning so a busy service does not spend many polling cycles replaying
+    stale logs. The third return value contains a query error for the WebSocket
+    client; an empty result is otherwise a valid response.
+    """
     es = get_es_client()
     if not es:
-        return [], since
+        return [], since, "Elasticsearch 未配置或当前不可用"
 
     must = [{"range": {"@timestamp": {"gt": since.isoformat()}}}]
 
     if filters:
         if filters.get("keyword"):
-            keyword = str(filters["keyword"])
-            must.append({
-                "bool": {
-                    "should": [
-                        {"match_phrase": {"message": keyword}},
-                        {
-                            "wildcard": {
-                                "message.keyword": {
-                                    "value": f"*{keyword}*",
-                                    "case_insensitive": True,
-                                }
-                            }
-                        },
-                        {
-                            "query_string": {
-                                "query": f"*{_escape_query_string(keyword)}*",
-                                "default_field": "message",
-                                "analyze_wildcard": True,
-                            }
-                        },
-                    ],
-                    "minimum_should_match": 1,
-                }
-            })
+            keyword = str(filters["keyword"]).strip()[:200]
+            if keyword:
+                must.append(
+                    {
+                        "bool": {
+                            "should": [
+                                {"match_phrase": {"message": keyword}},
+                                {
+                                    "wildcard": {
+                                        "message.keyword": {
+                                            "value": f"*{keyword}*",
+                                            "case_insensitive": True,
+                                        }
+                                    }
+                                },
+                                {
+                                    "query_string": {
+                                        "query": f"*{_escape_query_string(keyword)}*",
+                                        "default_field": "message",
+                                        "analyze_wildcard": True,
+                                    }
+                                },
+                            ],
+                            "minimum_should_match": 1,
+                        }
+                    }
+                )
         if filters.get("level"):
-            lvl = filters["level"]
-            must.append({"bool": {"should": [
-                {"term": {"gy.filetype.keyword": f"{lvl}.log"}},
-                {"match_phrase": {"message": lvl.upper()}},
-            ]}})
+            must.append(build_base_severity_filter(str(filters["level"])))
 
+    sort_order = "desc" if newest_first else "asc"
     body = {
         "query": {"bool": {"must": must}},
-        "sort": [{"@timestamp": "asc"}],
-        "size": size,
-        "_source": ["@timestamp", "message", "gy.filetype", "gy.domain", "gy.hostname", "kubernetes.container.name"],
+        "sort": [{"@timestamp": {"order": sort_order, "unmapped_type": "date"}}],
+        "size": max(1, min(size, MAX_LOGS_PER_PUSH)),
+        "_source": [
+            "@timestamp",
+            "message",
+            "msg",
+            "log",
+            "content",
+            "level",
+            "severity",
+            "loglevel",
+            "log.level",
+            "gy.filetype",
+            "gy.domain",
+            "gy.hostname",
+            "host.name",
+            "kubernetes.container.name",
+        ],
     }
 
     try:
         resp = await es.search(index=es_index, body=body)
         hits = resp.get("hits", {}).get("hits", [])
+        if newest_first:
+            hits = list(reversed(hits))
         logs = []
         new_cursor = since
         for h in hits:
             src = h.get("_source", {})
             ts_str = src.get("@timestamp", "")
-            logs.append({
-                "id": h.get("_id", ""),
-                "timestamp": ts_str,
-                "message": src.get("message", ""),
-                "level": _extract_level(src),
-                "source": src.get("gy", {}).get("domain", "") or src.get("kubernetes", {}).get("container", {}).get("name", ""),
-            })
+            gy = src.get("gy", {}) if isinstance(src.get("gy"), dict) else {}
+            kubernetes = (
+                src.get("kubernetes", {})
+                if isinstance(src.get("kubernetes"), dict)
+                else {}
+            )
+            container = (
+                kubernetes.get("container", {})
+                if isinstance(kubernetes.get("container"), dict)
+                else {}
+            )
+            host = src.get("host", {}) if isinstance(src.get("host"), dict) else {}
+            logs.append(
+                {
+                    "id": h.get("_id", ""),
+                    "timestamp": ts_str,
+                    "message": LogService._extract_message(src),
+                    "level": _extract_level(src),
+                    "source": (
+                        gy.get("domain", "")
+                        or container.get("name", "")
+                        or host.get("name", "")
+                    ),
+                }
+            )
             if ts_str:
                 try:
                     ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -116,10 +165,19 @@ async def _fetch_latest_logs(
                         new_cursor = ts_dt
                 except (ValueError, TypeError):
                     pass
-        return logs, new_cursor
+        return logs, new_cursor, None
     except Exception as e:
         logger.warning("live_tail_es_error", error=str(e))
-        return [], since
+        return [], since, f"实时日志查询失败: {str(e)[:200]}"
+
+
+def _clamp_lookback_seconds(value: object) -> int:
+    """Parse a client lookback value while enforcing a safe query window."""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = DEFAULT_LOOKBACK_SECONDS
+    return max(MIN_LOOKBACK_SECONDS, min(seconds, MAX_LOOKBACK_SECONDS))
 
 
 async def _resolve_live_tail_index(tenant_id: str, business_line_id: str | None) -> str:
@@ -139,25 +197,9 @@ async def _resolve_live_tail_index(tenant_id: str, business_line_id: str | None)
 
 
 def _extract_level(src: dict) -> str:
-    """Extract log level from source."""
-    filetype = (src.get("gy", {}).get("filetype", "") or "").lower()
-    if "error" in filetype:
-        return "ERROR"
-    if "warn" in filetype:
-        return "WARN"
-    if "info" in filetype:
-        return "INFO"
-    if "debug" in filetype:
-        return "DEBUG"
-
-    msg = (src.get("message", "") or "")[:200].upper()
-    if "ERROR" in msg or "EXCEPTION" in msg:
-        return "ERROR"
-    if "WARN" in msg:
-        return "WARN"
-    if "DEBUG" in msg:
-        return "DEBUG"
-    return "INFO"
+    """Use the canonical Java/C# level parser used by normal log search."""
+    level = LogService._extract_level(src).upper()
+    return "WARN" if level == "WARNING" else (level or "INFO")
 
 
 async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
@@ -184,9 +226,11 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
     index_pattern = ""
     filters: dict = {}
     paused = True
-    cursor = datetime.now(timezone.utc) - timedelta(seconds=60)  # 60s lookback for Filebeat ingestion delay
+    cursor = datetime.now(timezone.utc) - timedelta(seconds=DEFAULT_LOOKBACK_SECONDS)
+    initial_load = False
     log_count = 0
     rate_window: list[int] = []
+    last_query_error = ""
 
     try:
         while True:
@@ -202,6 +246,14 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
                     msg = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(msg, dict):
+                    await websocket.send_text(
+                        json.dumps(
+                            {"type": "error", "message": "无效的订阅请求"},
+                            ensure_ascii=False,
+                        )
+                    )
+                    continue
 
                 action = msg.get("action", "")
 
@@ -213,69 +265,151 @@ async def live_tail_endpoint(websocket: WebSocket, token: str = Query(...)):
                         )
                     except Exception as e:
                         paused = True
-                        await websocket.send_text(json.dumps({
-                            "type": "error",
-                            "message": str(e),
-                        }, ensure_ascii=False))
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "message": str(e),
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
                         continue
 
-                    filters = msg.get("filters", {})
-                    cursor = datetime.now(timezone.utc) - timedelta(seconds=60)  # 60s lookback for Filebeat delay
+                    raw_filters = msg.get("filters")
+                    filters = raw_filters if isinstance(raw_filters, dict) else {}
+                    lookback_seconds = _clamp_lookback_seconds(
+                        msg.get("lookback_seconds")
+                    )
+                    cursor = datetime.now(timezone.utc) - timedelta(
+                        seconds=lookback_seconds
+                    )
                     paused = False
+                    initial_load = True
                     log_count = 0
                     rate_window = []
-                    await websocket.send_text(json.dumps({
-                        "type": "status", "state": "streaming", "rate": 0,
-                        "index": index_pattern,
-                    }, ensure_ascii=False))
+                    last_query_error = ""
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "status",
+                                "state": "loading_history",
+                                "rate": 0,
+                                "index": index_pattern,
+                                "lookback_seconds": lookback_seconds,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
 
                 elif action == "pause":
                     paused = True
-                    await websocket.send_text(json.dumps({
-                        "type": "status", "state": "paused", "rate": 0,
-                    }))
+                    await websocket.send_text(
+                        json.dumps(
+                            {"type": "status", "state": "paused", "rate": 0}
+                        )
+                    )
 
                 elif action == "resume":
                     if index_pattern:
                         paused = False
-                        cursor = datetime.now(timezone.utc) - timedelta(seconds=30)  # 30s for Filebeat delay
-                        await websocket.send_text(json.dumps({
-                            "type": "status", "state": "streaming", "rate": 0,
-                        }))
+                        await websocket.send_text(
+                            json.dumps(
+                                {"type": "status", "state": "streaming", "rate": 0}
+                            )
+                        )
 
             except asyncio.TimeoutError:
                 pass
 
             # Push new logs if not paused
             if not paused:
-                logs, new_cursor = await _fetch_latest_logs(
-                    index_pattern, cursor, filters
+                was_initial_load = initial_load
+                logs, new_cursor, query_error = await _fetch_latest_logs(
+                    index_pattern,
+                    cursor,
+                    filters,
+                    size=INITIAL_LOG_LIMIT if was_initial_load else MAX_LOGS_PER_PUSH,
+                    newest_first=was_initial_load,
                 )
+
+                if query_error:
+                    if query_error != last_query_error:
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "message": query_error,
+                                    "recoverable": True,
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
+                        last_query_error = query_error
+                    continue
+
+                recovered = bool(last_query_error)
+                last_query_error = ""
                 if logs:
                     cursor = new_cursor
                     log_count += len(logs)
+                if was_initial_load:
+                    # Avoid rescanning a quiet service's entire lookback window
+                    # on every poll while retaining a Filebeat ingestion buffer.
+                    ingestion_cursor = datetime.now(timezone.utc) - timedelta(
+                        seconds=INGESTION_DELAY_SECONDS
+                    )
+                    if cursor < ingestion_cursor:
+                        cursor = ingestion_cursor
+                    initial_load = False
 
                 # Track rate (logs per second)
-                rate_window.append(len(logs))
+                rate_window.append(0 if was_initial_load else len(logs))
                 if len(rate_window) > 10:
                     rate_window.pop(0)
                 rate = sum(rate_window) / max(len(rate_window), 1)
 
                 if logs:
-                    await websocket.send_text(json.dumps({
-                        "type": "logs",
-                        "data": logs,
-                        "rate": round(rate, 1),
-                        "total": log_count,
-                    }, ensure_ascii=False, default=str))
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "logs",
+                                "data": logs,
+                                "rate": round(rate, 1),
+                                "total": log_count,
+                                "initial": was_initial_load,
+                            },
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                    )
                 else:
                     # Send heartbeat periodically even with no logs
-                    await websocket.send_text(json.dumps({
-                        "type": "heartbeat",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "rate": round(rate, 1),
-                        "total": log_count,
-                    }))
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "heartbeat",
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                                "rate": round(rate, 1),
+                                "total": log_count,
+                            }
+                        )
+                    )
+
+                if was_initial_load or recovered:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "status",
+                                "state": "streaming",
+                                "rate": round(rate, 1),
+                                "history_count": (
+                                    len(logs) if was_initial_load else None
+                                ),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
 
     except WebSocketDisconnect:
         pass

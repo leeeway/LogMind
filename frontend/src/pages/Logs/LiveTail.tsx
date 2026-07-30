@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Typography, Space, Tag, Button, Select, Input, Tooltip, Badge } from 'antd';
 import {
   PlayCircleOutlined, PauseCircleOutlined, ClearOutlined,
   ThunderboltOutlined, FilterOutlined, WifiOutlined,
-  DisconnectOutlined, LoadingOutlined,
+  DisconnectOutlined, LoadingOutlined, ReloadOutlined,
 } from '@ant-design/icons';
-import { businessLineApi } from '@/api/services';
+import { businessLineApi, type BusinessLineListItem } from '@/api/services';
 import { useAuthStore } from '@/stores/authStore';
 import { useQuickDiagnose } from '@/components/QuickDiagnose';
 
@@ -27,23 +27,52 @@ interface LogLine {
 }
 
 const MAX_VISIBLE_LINES = 500;
+const MAX_DEDUP_IDENTITIES = 2000;
+const RECONNECT_DELAYS = [1000, 2000, 5000, 10000];
+
+type ConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'loading'
+  | 'streaming'
+  | 'paused'
+  | 'reconnecting'
+  | 'error';
 
 const LiveTail: React.FC = () => {
-  const [bizLines, setBizLines] = useState<any[]>([]);
+  const [bizLines, setBizLines] = useState<BusinessLineListItem[]>([]);
   const [selectedBiz, setSelectedBiz] = useState<string>('');
   const [keyword, setKeyword] = useState('');
   const [levelFilter, setLevelFilter] = useState<string>('');
-  const [connected, setConnected] = useState(false);
+  const [lookbackSeconds, setLookbackSeconds] = useState(300);
+  const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
+  const [errorMessage, setErrorMessage] = useState('');
   const [paused, setPaused] = useState(false);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [rate, setRate] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [lastMessageAt, setLastMessageAt] = useState<number>(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const connectTimeoutRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const manualDisconnectRef = useRef(false);
+  const mountedRef = useRef(true);
+  const logIdsRef = useRef<Set<string>>(new Set());
+  const logIdQueueRef = useRef<string[]>([]);
+  const connectRef = useRef<(reconnecting?: boolean) => void>(() => {});
   const token = useAuthStore(s => s.token);
   const quickDiagnose = useQuickDiagnose();
+  const connected = ['loading', 'streaming', 'paused'].includes(connectionState);
+
+  const businessLineOptions = useMemo(() => bizLines.map(b => ({
+    value: b.id,
+    label: b.name,
+    searchText: `${b.name || ''} ${b.es_index_pattern || ''} ${String(b.site || '')}`,
+  })), [bizLines]);
 
   // Load business lines
   useEffect(() => {
@@ -71,90 +100,244 @@ const LiveTail: React.FC = () => {
     setAutoScroll(atBottom);
   }, []);
 
-  // Connect WebSocket
-  const connect = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
+  const clearTimer = (ref: React.MutableRefObject<number | null>) => {
+    if (ref.current !== null) {
+      window.clearTimeout(ref.current);
+      ref.current = null;
     }
+  };
+
+  const resetStream = useCallback(() => {
+    logIdsRef.current.clear();
+    logIdQueueRef.current = [];
+    setLogs([]);
+    setRate(0);
+    setTotalCount(0);
+    setAutoScroll(true);
+  }, []);
+
+  const subscribe = useCallback((socket = wsRef.current) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN || !selectedBiz) return;
+    resetStream();
+    setPaused(false);
+    setConnectionState('loading');
+    setErrorMessage('');
+    socket.send(JSON.stringify({
+      action: 'subscribe',
+      business_line_id: selectedBiz,
+      lookback_seconds: lookbackSeconds,
+      filters: {
+        keyword: keyword.trim() || undefined,
+        level: levelFilter || undefined,
+      },
+    }));
+  }, [keyword, levelFilter, lookbackSeconds, resetStream, selectedBiz]);
+
+  // Connect WebSocket and recover transient network/proxy interruptions.
+  const connect = useCallback((reconnecting = false) => {
+    if (!selectedBiz) {
+      setConnectionState('error');
+      setErrorMessage('请先选择业务线');
+      return;
+    }
+    if (!token) {
+      setConnectionState('error');
+      setErrorMessage('登录状态已失效，请重新登录');
+      return;
+    }
+
+    manualDisconnectRef.current = false;
+    clearTimer(reconnectTimerRef);
+    clearTimer(connectTimeoutRef);
+
+    const previous = wsRef.current;
+    if (previous) {
+      previous.onclose = null;
+      previous.close();
+    }
+
+    setConnectionState(reconnecting ? 'reconnecting' : 'connecting');
+    setErrorMessage(reconnecting ? '连接中断，正在自动重连…' : '');
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsBase = `${protocol}//${window.location.host}`;
-    const ws = new WebSocket(`${wsBase}/ws/logs/live?token=${token}`);
+    const ws = new WebSocket(`${wsBase}/ws/logs/live?token=${encodeURIComponent(token)}`);
+    wsRef.current = ws;
+
+    connectTimeoutRef.current = window.setTimeout(() => {
+      if (wsRef.current === ws && ws.readyState !== WebSocket.OPEN) {
+        setErrorMessage('连接超时，正在重试…');
+        ws.close();
+      }
+    }, 10000);
 
     ws.onopen = () => {
-      setConnected(true);
-      setPaused(false);
-      setLogs([]);
-      setTotalCount(0);
-      // Subscribe to logs
-      ws.send(JSON.stringify({
-        action: 'subscribe',
-        business_line_id: selectedBiz,
-        filters: {
-          keyword: keyword || undefined,
-          level: levelFilter || undefined,
-        },
-      }));
+      if (wsRef.current !== ws) return;
+      clearTimer(connectTimeoutRef);
+      reconnectAttemptRef.current = 0;
+      setLastMessageAt(Date.now());
+      subscribe(ws);
     };
 
     ws.onmessage = (event) => {
+      if (wsRef.current !== ws) return;
+      setLastMessageAt(Date.now());
       try {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'logs' && msg.data?.length) {
-          setLogs(prev => {
-            const newLogs = [...prev, ...msg.data];
-            return newLogs.length > MAX_VISIBLE_LINES
-              ? newLogs.slice(-MAX_VISIBLE_LINES)
-              : newLogs;
-          });
-          setRate(msg.rate || 0);
-          setTotalCount(msg.total || 0);
+        if (msg.type === 'logs' && Array.isArray(msg.data)) {
+          const uniqueLogs: LogLine[] = [];
+          for (const raw of msg.data) {
+            const normalized: LogLine = {
+              ...raw,
+              level: String(raw.level || 'INFO').toUpperCase() === 'WARNING'
+                ? 'WARN'
+                : String(raw.level || 'INFO').toUpperCase(),
+            };
+            const identity = normalized.id
+              || `${normalized.timestamp}|${normalized.source}|${normalized.message}`;
+            if (!logIdsRef.current.has(identity)) {
+              logIdsRef.current.add(identity);
+              logIdQueueRef.current.push(identity);
+              uniqueLogs.push(normalized);
+            }
+          }
+          while (logIdQueueRef.current.length > MAX_DEDUP_IDENTITIES) {
+            const expiredIdentity = logIdQueueRef.current.shift();
+            if (expiredIdentity) logIdsRef.current.delete(expiredIdentity);
+          }
+          if (uniqueLogs.length) {
+            setLogs(prev => {
+              const next = [...prev, ...uniqueLogs];
+              return next.length > MAX_VISIBLE_LINES
+                ? next.slice(-MAX_VISIBLE_LINES)
+                : next;
+            });
+          }
+          setRate(Number(msg.rate) || 0);
+          setTotalCount(Number(msg.total) || 0);
         } else if (msg.type === 'heartbeat') {
-          setRate(msg.rate || 0);
-          setTotalCount(msg.total || 0);
+          setRate(Number(msg.rate) || 0);
+          setTotalCount(Number(msg.total) || 0);
         } else if (msg.type === 'status') {
-          setPaused(msg.state === 'paused');
+          if (msg.state === 'loading_history') {
+            setConnectionState('loading');
+          } else if (msg.state === 'paused') {
+            setPaused(true);
+            setConnectionState('paused');
+          } else if (msg.state === 'streaming') {
+            setPaused(false);
+            setConnectionState('streaming');
+            setErrorMessage('');
+          }
+        } else if (msg.type === 'error') {
+          setConnectionState('error');
+          setErrorMessage(msg.message || '实时日志查询失败');
         }
-      } catch { /* skip */ }
+      } catch {
+        setErrorMessage('收到无法识别的实时日志数据');
+      }
     };
 
-    ws.onclose = () => {
-      setConnected(false);
+    ws.onclose = (event) => {
+      if (wsRef.current !== ws) return;
+      clearTimer(connectTimeoutRef);
+      wsRef.current = null;
       setRate(0);
+      if (manualDisconnectRef.current || !mountedRef.current) {
+        setConnectionState('idle');
+        return;
+      }
+      if (event.code === 4001) {
+        setConnectionState('error');
+        setErrorMessage('登录状态已失效，请重新登录');
+        return;
+      }
+
+      const attempt = reconnectAttemptRef.current;
+      const delay = RECONNECT_DELAYS[Math.min(attempt, RECONNECT_DELAYS.length - 1)];
+      reconnectAttemptRef.current += 1;
+      setConnectionState('reconnecting');
+      setErrorMessage(`连接已中断，${Math.round(delay / 1000)} 秒后重试…`);
+      reconnectTimerRef.current = window.setTimeout(
+        () => connectRef.current(true),
+        delay,
+      );
     };
 
     ws.onerror = () => {
-      setConnected(false);
+      if (wsRef.current === ws) setErrorMessage('WebSocket 连接异常');
     };
+  }, [selectedBiz, subscribe, token]);
 
-    wsRef.current = ws;
-  }, [token, selectedBiz, keyword, levelFilter]);
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   // Disconnect
   const disconnect = useCallback(() => {
-    wsRef.current?.close();
+    manualDisconnectRef.current = true;
+    clearTimer(reconnectTimerRef);
+    clearTimer(connectTimeoutRef);
+    const ws = wsRef.current;
     wsRef.current = null;
-    setConnected(false);
+    if (ws) {
+      ws.onclose = null;
+      ws.close();
+    }
+    reconnectAttemptRef.current = 0;
+    setConnectionState('idle');
+    setErrorMessage('');
+    setPaused(false);
     setRate(0);
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      wsRef.current?.close();
+      mountedRef.current = false;
+      manualDisconnectRef.current = true;
+      clearTimer(reconnectTimerRef);
+      clearTimer(connectTimeoutRef);
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
     };
   }, []);
+
+  // Changing any query option updates the active stream without reconnecting.
+  useEffect(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!selectedBiz) {
+      disconnect();
+      resetStream();
+      return;
+    }
+    const timer = window.setTimeout(() => subscribe(ws), 350);
+    return () => window.clearTimeout(timer);
+  }, [disconnect, resetStream, selectedBiz, subscribe]);
 
   // Pause / Resume
   const togglePause = () => {
     if (paused) {
       wsRef.current?.send(JSON.stringify({ action: 'resume' }));
       setPaused(false);
+      setConnectionState('streaming');
       setAutoScroll(true);
     } else {
       wsRef.current?.send(JSON.stringify({ action: 'pause' }));
       setPaused(true);
+      setConnectionState('paused');
     }
+  };
+
+  const clearLogs = () => {
+    logIdsRef.current.clear();
+    logIdQueueRef.current = [];
+    setLogs([]);
   };
 
   // Format timestamp
@@ -178,8 +361,12 @@ const LiveTail: React.FC = () => {
         flexShrink: 0,
       }}>
         <Space>
-          {connected ? (
+          {connectionState === 'error' ? (
+            <Badge status="error" />
+          ) : connected ? (
             <Badge status="processing" color="#52c41a" />
+          ) : ['connecting', 'reconnecting'].includes(connectionState) ? (
+            <Badge status="processing" />
           ) : (
             <Badge status="default" />
           )}
@@ -189,12 +376,18 @@ const LiveTail: React.FC = () => {
         </Space>
 
         <Select
-          value={selectedBiz}
-          onChange={setSelectedBiz}
-          style={{ width: 180 }}
+          value={selectedBiz || undefined}
+          onChange={value => setSelectedBiz(value || '')}
+          style={{ width: 220 }}
           size="small"
-          placeholder="选择服务"
-          options={bizLines.map(b => ({ value: b.id, label: b.name }))}
+          placeholder="搜索并选择业务线"
+          showSearch
+          allowClear
+          optionFilterProp="searchText"
+          filterOption={(input, option) => String(
+            (option as { searchText?: string } | undefined)?.searchText || '',
+          ).toLowerCase().includes(input.trim().toLowerCase())}
+          options={businessLineOptions}
         />
 
         <Input
@@ -204,7 +397,7 @@ const LiveTail: React.FC = () => {
           value={keyword}
           onChange={e => setKeyword(e.target.value)}
           style={{ width: 160 }}
-          onPressEnter={() => { if (connected) { disconnect(); setTimeout(connect, 100); } }}
+          allowClear
         />
 
         <Select
@@ -216,9 +409,22 @@ const LiveTail: React.FC = () => {
           placeholder="级别"
           options={[
             { value: 'error', label: 'ERROR' },
-            { value: 'warn', label: 'WARN' },
+            { value: 'warning', label: 'WARN' },
             { value: 'info', label: 'INFO' },
             { value: 'debug', label: 'DEBUG' },
+          ]}
+        />
+
+        <Select
+          value={lookbackSeconds}
+          onChange={setLookbackSeconds}
+          style={{ width: 112 }}
+          size="small"
+          options={[
+            { value: 60, label: '回看 1 分钟' },
+            { value: 300, label: '回看 5 分钟' },
+            { value: 900, label: '回看 15 分钟' },
+            { value: 3600, label: '回看 1 小时' },
           ]}
         />
 
@@ -234,16 +440,26 @@ const LiveTail: React.FC = () => {
             >
               {paused ? '继续' : '暂停'}
             </Button>
-            <Button size="small" icon={<ClearOutlined />} onClick={() => setLogs([])}>
+            <Button size="small" icon={<ClearOutlined />} onClick={clearLogs}>
               清空
             </Button>
             <Button size="small" danger icon={<DisconnectOutlined />} onClick={disconnect}>
               断开
             </Button>
           </Space>
+        ) : ['connecting', 'reconnecting'].includes(connectionState) ? (
+          <Button size="small" icon={<DisconnectOutlined />} onClick={disconnect}>
+            取消连接
+          </Button>
         ) : (
-          <Button type="primary" size="small" icon={<WifiOutlined />} onClick={connect}>
-            连接
+          <Button
+            type="primary"
+            size="small"
+            icon={connectionState === 'error' ? <ReloadOutlined /> : <WifiOutlined />}
+            onClick={() => connect(false)}
+            disabled={!selectedBiz}
+          >
+            {connectionState === 'error' ? '重新连接' : '连接'}
           </Button>
         )}
       </div>
@@ -264,12 +480,22 @@ const LiveTail: React.FC = () => {
             textAlign: 'center', padding: '80px 24px',
             color: 'var(--lm-text-tertiary)',
           }}>
-            <WifiOutlined style={{ fontSize: 48, marginBottom: 16, opacity: 0.3 }} />
+            {['connecting', 'loading', 'reconnecting'].includes(connectionState) ? (
+              <LoadingOutlined style={{ fontSize: 48, marginBottom: 16, opacity: 0.5 }} />
+            ) : (
+              <WifiOutlined style={{ fontSize: 48, marginBottom: 16, opacity: 0.3 }} />
+            )}
             <div style={{ fontSize: 16, marginBottom: 8 }}>
-              {connected ? '等待日志...' : '选择服务后点击「连接」开始实时日志流'}
+              {connectionState === 'connecting' && '正在建立实时连接…'}
+              {connectionState === 'reconnecting' && (errorMessage || '正在重新连接…')}
+              {connectionState === 'loading' && `正在加载最近 ${lookbackSeconds / 60} 分钟日志…`}
+              {connectionState === 'streaming' && `最近 ${lookbackSeconds / 60} 分钟没有匹配日志，正在等待新日志`}
+              {connectionState === 'paused' && '实时日志流已暂停'}
+              {connectionState === 'error' && (errorMessage || '实时日志连接失败')}
+              {connectionState === 'idle' && '搜索业务线并点击「连接」开始实时日志流'}
             </div>
             <div style={{ fontSize: 12 }}>
-              WebSocket 实时推送 · 毫秒级延迟 · 最多保留 {MAX_VISIBLE_LINES} 行
+              连接后立即回放历史 · 自动重连 · 最多保留 {MAX_VISIBLE_LINES} 行
             </div>
           </div>
         )}
@@ -360,7 +586,7 @@ const LiveTail: React.FC = () => {
         </div>
 
         <Text style={{ color: 'var(--lm-text-tertiary)' }}>
-          共 {totalCount.toLocaleString()} 条
+          本次接收 {totalCount.toLocaleString()} 条
         </Text>
 
         <Text style={{ color: 'var(--lm-text-tertiary)' }}>
@@ -375,16 +601,33 @@ const LiveTail: React.FC = () => {
 
         <div style={{ flex: 1 }} />
 
-        {connected && (
+        {connectionState !== 'idle' && (
           <Space size={4}>
-            {paused ? (
+            {connectionState === 'paused' ? (
               <Tag color="orange" style={{ borderRadius: 4, fontSize: 10, margin: 0 }}>⏸ 已暂停</Tag>
+            ) : connectionState === 'error' ? (
+              <Tooltip title={errorMessage}>
+                <Tag color="error" style={{ borderRadius: 4, fontSize: 10, margin: 0 }}>
+                  查询异常
+                </Tag>
+              </Tooltip>
+            ) : ['connecting', 'reconnecting', 'loading'].includes(connectionState) ? (
+              <Tag color="processing" style={{ borderRadius: 4, fontSize: 10, margin: 0 }}>
+                <LoadingOutlined style={{ marginRight: 4 }} />
+                {connectionState === 'loading' ? 'LOADING' : 'CONNECTING'}
+              </Tag>
             ) : (
               <Tag color="green" style={{ borderRadius: 4, fontSize: 10, margin: 0 }}>
                 <LoadingOutlined style={{ marginRight: 4 }} />STREAMING
               </Tag>
             )}
           </Space>
+        )}
+
+        {lastMessageAt > 0 && connectionState !== 'idle' && (
+          <Text style={{ color: 'var(--lm-text-tertiary)', fontSize: 10 }}>
+            最近响应 {new Date(lastMessageAt).toLocaleTimeString('zh-CN', { hour12: false })}
+          </Text>
         )}
 
         <Tooltip title="双击日志行可快速发起 AI 诊断">
