@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 _UUID_SEGMENT_RE = re.compile(
     r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
@@ -24,6 +25,19 @@ _KNOWN_PROBE_PATH_RE = re.compile(
     r"(?i)(?:^|/)(?:nuclei(?:\.svg)?|\.env|\.git|wp-admin|wp-login\.php|"
     r"phpinfo\.php|vendor/phpunit|actuator/env)(?:/|$)"
 )
+_NGINX_STATIC_PATH_RE = re.compile(
+    r"(?i)\.(?:avif|bmp|css|data|eot|gif|ico|ini|jpe?g|js|m3u8|map|mp3|"
+    r"mp4|otf|pdf|svg|ts|ttf|webp|woff2?|zip)(?:/)?$"
+)
+_NGINX_REPOSITORY_PATH_RE = re.compile(
+    r"(?i)(?:/info/refs|/git-upload-pack|/git-receive-pack)(?:/)?$"
+)
+_SAFE_PARAMETER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,63}$")
+_SENSITIVE_PARAMETER_NAME_RE = re.compile(
+    r"(?i)(?:^|[_.\-\[])(?:authorization|cookie|password|passwd|pwd|secret|"
+    r"sign(?:ature)?|token|access_token|refresh_token|api_?key)(?:$|[_.\-\]])"
+)
+_MAX_PARAMETER_NAMES = 12
 
 
 @dataclass(slots=True)
@@ -96,7 +110,11 @@ class AccessWindow:
 
 def is_rejected_traffic_window(window: AccessWindow) -> bool:
     """Identify windows dominated by scans or requests rejected at the edge."""
-    return window.request_count >= 100 and window.rate_4xx >= 0.80
+    return (
+        window.source == "nginx"
+        and window.request_count >= 100
+        and window.rate_4xx >= 0.80
+    )
 
 
 @dataclass(slots=True)
@@ -110,6 +128,7 @@ class AccessRouteMetric:
     status_4xx: int = 0
     status_5xx: int = 0
     p95_ms: float = 0.0
+    status_counts: dict[int, int] = field(default_factory=dict)
 
     @property
     def rate_4xx(self) -> float:
@@ -145,6 +164,8 @@ class AccessSample:
     upstream_status: int | None = None
     upstream_time_ms: float | None = None
     upstream_addr: str = ""
+    query_parameters: list[str] = field(default_factory=list)
+    body_fields: list[str] = field(default_factory=list)
 
     def to_ai_dict(self) -> dict:
         return {
@@ -160,6 +181,8 @@ class AccessSample:
                 else None
             ),
             "upstream_addr": self.upstream_addr[:120],
+            "query_parameters": self.query_parameters[:_MAX_PARAMETER_NAMES],
+            "body_fields": self.body_fields[:_MAX_PARAMETER_NAMES],
         }
 
 
@@ -180,6 +203,7 @@ class AccessIncident:
     upstream_5xx: int = 0
     p95_ms: float = 0.0
     route_key: str = ""
+    status_counts: dict[int, int] = field(default_factory=dict)
     samples: list[AccessSample] = field(default_factory=list)
     ai_summary: str = ""
 
@@ -302,6 +326,128 @@ def normalize_request(request: object) -> tuple[str, str]:
     route = "/".join(normalized_segments)
     route = re.sub(r"/{2,}", "/", route)
     return method, route[:500] or "/"
+
+
+def extract_query_parameter_names(request: object) -> list[str]:
+    """Return only safe query-string field names; values are never retained."""
+    raw = str(request or "").strip()
+    if not raw:
+        return []
+    parts = raw.split()
+    target = parts[1] if len(parts) >= 2 and parts[0].isalpha() else parts[0]
+    try:
+        query = urlsplit(target).query
+        names = [name for name, _value in parse_qsl(query, keep_blank_values=True)]
+    except ValueError:
+        return []
+    return _safe_parameter_names(names)
+
+
+def extract_body_field_names(request_body: object) -> list[str]:
+    """
+    Extract JSON/form field names without retaining request values.
+
+    Only the first 16 KiB is inspected and sensitive credential/signature field
+    names are excluded as an extra guard before AI or WeCom receives metadata.
+    """
+    if isinstance(request_body, dict):
+        return _json_field_names(request_body)
+    raw = str(request_body or "").strip()
+    if not raw or raw in {"（空）", "(empty)", "-"}:
+        return []
+    raw = raw[:16384]
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        return _json_field_names(parsed)
+    try:
+        names = [name for name, _value in parse_qsl(raw, keep_blank_values=True)]
+    except ValueError:
+        names = []
+    if names:
+        return _safe_parameter_names(names)
+    return _safe_parameter_names(
+        match.group(1)
+        for match in re.finditer(r'["\']?([A-Za-z_][\w.\-\[\]]{0,63})["\']?\s*[:=]', raw)
+    )
+
+
+def _json_field_names(value: dict) -> list[str]:
+    names: list[str] = []
+
+    def visit(item: object, prefix: str = "", depth: int = 0) -> None:
+        if not isinstance(item, dict) or depth > 1:
+            return
+        for key, child in item.items():
+            name = f"{prefix}.{key}" if prefix else str(key)
+            names.append(name)
+            if len(names) >= _MAX_PARAMETER_NAMES * 2:
+                return
+            visit(child, name, depth + 1)
+
+    visit(value)
+    return _safe_parameter_names(names)
+
+
+def _safe_parameter_names(names) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in names:
+        name = str(value or "").strip()
+        lowered = name.lower()
+        compact = re.sub(r"[^a-z0-9]", "", lowered)
+        if (
+            not _SAFE_PARAMETER_NAME_RE.fullmatch(name)
+            or _SENSITIVE_PARAMETER_NAME_RE.search(name)
+            or any(
+                marker in compact
+                for marker in (
+                    "authorization",
+                    "cookie",
+                    "password",
+                    "passwd",
+                    "secret",
+                    "signature",
+                    "token",
+                    "apikey",
+                )
+            )
+            or lowered in seen
+        ):
+            continue
+        seen.add(lowered)
+        result.append(name)
+        if len(result) >= _MAX_PARAMETER_NAMES:
+            break
+    return result
+
+
+def is_nginx_noise_route(route_key: str) -> bool:
+    """Suppress Nginx/C# edge traffic that rarely indicates an app incident."""
+    method, _, path = route_key.partition(" ")
+    path = path or "/"
+    if method.upper() == "OPTIONS" or path == "/":
+        return True
+    return bool(
+        _NGINX_STATIC_PATH_RE.search(path)
+        or _NGINX_REPOSITORY_PATH_RE.search(path)
+    )
+
+
+def route_4xx_threshold(
+    source: str,
+    *,
+    nginx_min_count: int = 100,
+    nginx_min_rate: float = 0.30,
+    ingress_min_count: int = 20,
+    ingress_min_rate: float = 0.10,
+) -> tuple[int, float]:
+    """Return source-specific interface 4xx thresholds."""
+    if source == "ingress":
+        return ingress_min_count, ingress_min_rate
+    return nginx_min_count, nginx_min_rate
 
 
 def aggregate_metrics(metrics: list[AccessMetric]) -> dict[tuple[str, str], AccessWindow]:
@@ -431,6 +577,11 @@ def detect_incidents(
 def detect_route_incidents(
     route_metrics: list[AccessRouteMetric],
     windows: dict[tuple[str, str], AccessWindow] | None = None,
+    *,
+    nginx_min_count: int = 100,
+    nginx_min_rate: float = 0.30,
+    ingress_min_count: int = 20,
+    ingress_min_rate: float = 0.10,
 ) -> list[AccessIncident]:
     """
     Detect concentrated 4xx failures hidden by healthy site-wide traffic.
@@ -451,12 +602,17 @@ def detect_route_incidents(
                 status_4xx=metric.status_4xx,
                 status_5xx=metric.status_5xx,
                 p95_ms=metric.p95_ms,
+                status_counts=dict(metric.status_counts),
             )
             continue
         current.request_count += metric.request_count
         current.status_4xx += metric.status_4xx
         current.status_5xx += metric.status_5xx
         current.p95_ms = max(current.p95_ms, metric.p95_ms)
+        for status, count in metric.status_counts.items():
+            current.status_counts[status] = (
+                current.status_counts.get(status, 0) + count
+            )
 
     incidents: list[AccessIncident] = []
     for metric in combined.values():
@@ -466,16 +622,21 @@ def detect_route_incidents(
         route_path = metric.route_key.partition(" ")[2]
         if _KNOWN_PROBE_PATH_RE.search(route_path):
             continue
-        concentrated = (
-            metric.request_count >= 20
-            and metric.status_4xx >= 10
-            and metric.rate_4xx >= 0.10
+        if metric.source == "nginx" and is_nginx_noise_route(metric.route_key):
+            continue
+        min_count, min_rate = route_4xx_threshold(
+            metric.source,
+            nginx_min_count=nginx_min_count,
+            nginx_min_rate=nginx_min_rate,
+            ingress_min_count=ingress_min_count,
+            ingress_min_rate=ingress_min_rate,
         )
-        high_volume = (
-            metric.status_4xx >= 100
-            and metric.rate_4xx >= 0.10
+        qualifies = (
+            metric.request_count >= min_count
+            and metric.status_4xx >= min_count
+            and metric.rate_4xx >= min_rate
         )
-        if not (concentrated or high_volume):
+        if not qualifies:
             continue
         incidents.append(
             AccessIncident(
@@ -490,6 +651,7 @@ def detect_route_incidents(
                 status_5xx=metric.status_5xx,
                 p95_ms=metric.p95_ms,
                 route_key=metric.route_key,
+                status_counts=dict(metric.status_counts),
             )
         )
 

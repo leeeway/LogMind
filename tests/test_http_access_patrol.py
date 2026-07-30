@@ -13,6 +13,8 @@ from logmind.domain.http_access.models import (
     aggregate_metrics,
     detect_incidents,
     detect_route_incidents,
+    extract_body_field_names,
+    extract_query_parameter_names,
     is_allowed_site,
     normalize_request,
 )
@@ -24,6 +26,7 @@ from logmind.domain.http_access.router import (
 from logmind.domain.http_access.service import HttpAccessService
 from logmind.domain.http_access.state import HttpAccessAlertState
 from logmind.domain.http_access.tasks import (
+    _attach_samples,
     _parse_ai_summaries,
     _run_http_access_patrol,
     build_http_access_notification,
@@ -183,7 +186,7 @@ def test_latency_ignores_windows_dominated_by_4xx():
     ) == []
 
 
-def test_route_4xx_detects_concentration_hidden_by_site_traffic():
+def test_nginx_route_4xx_uses_higher_threshold():
     incidents = detect_route_incidents(
         [
             AccessRouteMetric(
@@ -205,10 +208,67 @@ def test_route_4xx_detects_concentration_hidden_by_site_traffic():
         ]
     )
 
+    assert incidents == []
+
+
+def test_ingress_route_4xx_detects_java_interface_failure():
+    incidents = detect_route_incidents(
+        [
+            AccessRouteMetric(
+                source="ingress",
+                site="interface.tong.gyyx.cn",
+                route_key="GET /v1/account/GetAccountBindInfoByUserId",
+                request_count=339,
+                status_4xx=296,
+                status_counts={400: 296},
+            )
+        ]
+    )
+
     assert len(incidents) == 1
-    assert incidents[0].route_key == "GET /notice/noread/{uuid}/"
-    assert incidents[0].current_value == 19 / 116
-    assert "GET /notice/noread/{uuid}/" in incidents[0].key
+    assert incidents[0].status_counts == {400: 296}
+
+
+def test_nginx_route_4xx_still_detects_high_volume_csharp_api_failure():
+    incidents = detect_route_incidents(
+        [
+            AccessRouteMetric(
+                source="nginx",
+                site="interface.security.gyyx.cn",
+                route_key="POST /user/authphone/",
+                request_count=220,
+                status_4xx=110,
+                status_counts={400: 110},
+            )
+        ]
+    )
+
+    assert len(incidents) == 1
+    assert incidents[0].route_key == "POST /user/authphone/"
+
+
+def test_nginx_route_4xx_filters_static_options_root_and_git_noise():
+    route_keys = [
+        "GET /qibao/Images/9609.jpg",
+        "OPTIONS /Bargain/NoReadCount",
+        "GET /",
+        "GET /base/repository.git/info/refs",
+        "GET /video/file.data.m3u8",
+    ]
+
+    assert detect_route_incidents(
+        [
+            AccessRouteMetric(
+                source="nginx",
+                site="static.gyyx.cn",
+                route_key=route_key,
+                request_count=500,
+                status_4xx=500,
+                status_counts={404: 500},
+            )
+            for route_key in route_keys
+        ]
+    ) == []
 
 
 def test_route_4xx_ignores_single_400():
@@ -356,7 +416,15 @@ def test_route_aggregation_handles_many_server_names_in_one_query():
                                     "route": "GET /notice/noread/{uuid}/",
                                 },
                                 "doc_count": 49,
-                                "status_4xx": {"doc_count": 49},
+                                "status_4xx": {
+                                    "doc_count": 49,
+                                    "status_codes": {
+                                        "buckets": [
+                                            {"key": 400, "doc_count": 45},
+                                            {"key": 404, "doc_count": 4},
+                                        ]
+                                    },
+                                },
                                 "status_5xx": {"doc_count": 0},
                                 "latency": {"values": {"95.0": 2.0}},
                             },
@@ -390,12 +458,21 @@ def test_route_aggregation_handles_many_server_names_in_one_query():
 
     assert len(metrics) == 1
     assert metrics[0].route_key == "GET /notice/noread/{uuid}/"
+    assert metrics[0].status_counts == {400: 45, 404: 4}
     assert len(es.search_calls) == 1
     body = es.search_calls[0]["body"]
     assert body["query"]["bool"]["filter"][1]["terms"][
         "server_name.keyword"
     ] == ["api.qibao.tjlong.cn", "pigeon.gyyx.cn"]
     assert "lm_route_key" in body["runtime_mappings"]
+    assert body["aggs"]["by_site_route"]["aggs"]["status_4xx"]["aggs"] == {
+        "status_codes": {
+            "terms": {
+                "field": "lm_status_code",
+                "size": 10,
+            }
+        }
+    }
 
 
 def test_route_candidates_skip_rejected_sites_and_apply_capacity_limit(
@@ -431,19 +508,19 @@ def test_route_candidates_skip_rejected_sites_and_apply_capacity_limit(
             source="nginx",
             site="a.gyyx.cn",
             request_count=1000,
-            status_4xx=50,
+            status_4xx=150,
         ),
         ("nginx", "b.gyyx.cn"): AccessWindow(
             source="nginx",
             site="b.gyyx.cn",
             request_count=1000,
-            status_4xx=40,
+            status_4xx=140,
         ),
         ("nginx", "c.gyyx.cn"): AccessWindow(
             source="nginx",
             site="c.gyyx.cn",
             request_count=1000,
-            status_4xx=30,
+            status_4xx=130,
         ),
     }
 
@@ -535,7 +612,12 @@ def test_sample_fetch_never_requests_ip_or_sensitive_body(monkeypatch):
                                 "status": "400",
                                 "request": (
                                     "GET /notice/noread/4547978a-cb6b-45d3-b0db-"
-                                    "58ec0ee4b614/?sign=secret HTTP/1.1"
+                                    "58ec0ee4b614/?userId=123&timestamp=456"
+                                    "&sign=secret HTTP/1.1"
+                                ),
+                                "request_body": (
+                                    '{"accountId":"123","profile":{"region":"cn"},'
+                                    '"password":"do-not-retain"}'
                                 ),
                                 "request_time": "0.001",
                                 "upstream_status": "400",
@@ -568,17 +650,41 @@ def test_sample_fetch_never_requests_ip_or_sensitive_body(monkeypatch):
 
     assert samples[0].route == "/notice/noread/{uuid}/"
     assert "secret" not in samples[0].route
+    assert samples[0].query_parameters == ["userId", "timestamp"]
+    assert samples[0].body_fields == [
+        "accountId",
+        "profile",
+        "profile.region",
+    ]
+    ai_sample = samples[0].to_ai_dict()
+    assert "do-not-retain" not in str(ai_sample)
+    assert "secret" not in str(ai_sample)
     source_fields = es.search_calls[0]["body"]["_source"]
     assert "remote_addr" not in source_fields
     assert "client_ip" not in source_fields
-    assert "request_body" not in source_fields
+    assert "request_body" in source_fields
     assert "http_Authorization" not in source_fields
     body = es.search_calls[0]["body"]
-    assert body["query"]["bool"]["filter"][-1] == {
+    assert body["query"]["bool"]["filter"][-2] == {
         "terms": {
             "lm_route_key": ["GET /notice/noread/{uuid}/"]
         }
     }
+    assert body["query"]["bool"]["filter"][-1] == {
+        "range": {"lm_status_code": {"gte": 400, "lt": 500}}
+    }
+
+
+def test_parameter_extractors_keep_names_only_and_drop_sensitive_fields():
+    query_names = extract_query_parameter_names(
+        "GET /user/check?userId=123&authToken=secret&locale=zh-CN HTTP/1.1"
+    )
+    body_names = extract_body_field_names(
+        "phone=13800000000&code=123456&access_token=secret"
+    )
+
+    assert query_names == ["userId", "locale"]
+    assert body_names == ["phone", "code"]
 
 
 def test_ai_summary_rejects_unsupported_database_claims():
@@ -690,6 +796,7 @@ def test_route_notification_names_each_interface_without_redundant_main_route():
             baseline_value=0,
             status_4xx=22,
             route_key="POST /statistics/operatorrecord",
+            status_counts={400: 22},
         ),
         AccessIncident(
             source="nginx",
@@ -701,6 +808,7 @@ def test_route_notification_names_each_interface_without_redundant_main_route():
             baseline_value=0,
             status_4xx=19,
             route_key="GET /notice/noread/{uuid}/",
+            status_counts={400: 19},
         ),
     ]
 
@@ -711,9 +819,99 @@ def test_route_notification_names_each_interface_without_redundant_main_route():
         time_to=_utc() + timedelta(minutes=5),
     )
 
-    assert "接口异常: POST /statistics/operatorrecord，4xx 22/219" in message
-    assert "接口异常: GET /notice/noread/{uuid}/，4xx 19/116" in message
+    assert "接口异常: POST /statistics/operatorrecord，400 22/219" in message
+    assert "接口异常: GET /notice/noread/{uuid}/，400 19/116" in message
+    assert "Nginx/C#" in message
     assert "- 主要接口:" not in message
+
+
+def test_ingress_400_notification_includes_only_safe_parameter_names():
+    incident = AccessIncident(
+        source="ingress",
+        site="interface.tong.gyyx.cn",
+        kind="route_4xx",
+        priority="P1",
+        request_count=339,
+        current_value=296 / 339,
+        baseline_value=0,
+        status_4xx=296,
+        route_key="GET /v1/account/GetAccountBindInfoByUserId",
+        status_counts={400: 296},
+        samples=[
+            AccessSample(
+                timestamp="2026-07-30T14:00:00Z",
+                method="GET",
+                route="/v1/account/GetAccountBindInfoByUserId",
+                status=400,
+                request_time_ms=5,
+                query_parameters=["userId", "locale"],
+                body_fields=["accountType"],
+            )
+        ],
+    )
+
+    message = build_http_access_notification(
+        [incident],
+        [],
+        time_from=_utc(),
+        time_to=_utc() + timedelta(minutes=5),
+    )
+
+    assert "Ingress/Java" in message
+    assert "查询参数字段: userId、locale" in message
+    assert "请求体字段: accountType" in message
+    assert "400 296/339" in message
+    assert "123" not in message
+
+
+def test_samples_are_bound_to_the_matching_route():
+    class SampleService:
+        async def fetch_samples(self, **_kwargs):
+            return [
+                AccessSample(
+                    timestamp="2026-07-30T14:00:00Z",
+                    method="GET",
+                    route="/route/a",
+                    status=400,
+                    request_time_ms=1,
+                    query_parameters=["fieldA"],
+                ),
+                AccessSample(
+                    timestamp="2026-07-30T14:00:01Z",
+                    method="POST",
+                    route="/route/b",
+                    status=400,
+                    request_time_ms=1,
+                    body_fields=["fieldB"],
+                ),
+            ]
+
+    incidents = [
+        AccessIncident(
+            source="ingress",
+            site="api.gyyx.cn",
+            kind="route_4xx",
+            priority="P1",
+            request_count=100,
+            current_value=0.5,
+            baseline_value=0,
+            route_key=route_key,
+        )
+        for route_key in ("GET /route/a", "POST /route/b")
+    ]
+
+    asyncio.run(
+        _attach_samples(
+            SampleService(),
+            incidents,
+            time_from=_utc(),
+            time_to=_utc() + timedelta(minutes=5),
+            sample_size=20,
+        )
+    )
+
+    assert incidents[0].samples[0].query_parameters == ["fieldA"]
+    assert incidents[1].samples[0].body_fields == ["fieldB"]
 
 
 class _FakeRedis:

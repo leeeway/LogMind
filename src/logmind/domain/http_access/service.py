@@ -17,10 +17,13 @@ from logmind.domain.http_access.models import (
     AccessRouteMetric,
     AccessSample,
     AccessWindow,
+    extract_body_field_names,
+    extract_query_parameter_names,
     is_allowed_site,
     is_rejected_traffic_window,
     normalize_request,
     normalize_site,
+    route_4xx_threshold,
     safe_float,
     safe_int,
 )
@@ -428,8 +431,32 @@ class HttpAccessService:
         """
         candidate_windows: dict[str, list[AccessWindow]] = {}
         rejected_site_count = 0
+        settings = get_settings()
         for window in windows.values():
-            if window.status_4xx < 10:
+            min_count, _min_rate = route_4xx_threshold(
+                window.source,
+                nginx_min_count=getattr(
+                    settings,
+                    "http_access_nginx_4xx_min_count",
+                    100,
+                ),
+                nginx_min_rate=getattr(
+                    settings,
+                    "http_access_nginx_4xx_min_rate",
+                    0.30,
+                ),
+                ingress_min_count=getattr(
+                    settings,
+                    "http_access_ingress_4xx_min_count",
+                    20,
+                ),
+                ingress_min_rate=getattr(
+                    settings,
+                    "http_access_ingress_4xx_min_rate",
+                    0.10,
+                ),
+            )
+            if window.status_4xx < min_count:
                 continue
             if is_rejected_traffic_window(window):
                 rejected_site_count += 1
@@ -443,7 +470,6 @@ class HttpAccessService:
                 )
             return []
 
-        settings = get_settings()
         max_candidates = getattr(
             settings,
             "http_access_max_route_candidate_sites",
@@ -589,7 +615,15 @@ class HttpAccessService:
                                             "lt": 500,
                                         }
                                     }
-                                }
+                                },
+                                "aggs": {
+                                    "status_codes": {
+                                        "terms": {
+                                            "field": "lm_status_code",
+                                            "size": 10,
+                                        }
+                                    }
+                                },
                             },
                             "has_4xx": {
                                 "bucket_selector": {
@@ -617,6 +651,15 @@ class HttpAccessService:
                 )
                 if status_4xx <= 0:
                     continue
+                status_counts = {
+                    safe_int(item.get("key")): int(item.get("doc_count", 0))
+                    for item in (
+                        bucket.get("status_4xx", {})
+                        .get("status_codes", {})
+                        .get("buckets", [])
+                    )
+                    if 400 <= safe_int(item.get("key")) < 500
+                }
                 route_metrics.append(
                     AccessRouteMetric(
                         source=source,
@@ -624,6 +667,7 @@ class HttpAccessService:
                         route_key=route_key,
                         request_count=int(bucket.get("doc_count", 0)),
                         status_4xx=status_4xx,
+                        status_counts=status_counts,
                     )
                 )
             after_key = aggregation.get("after_key")
@@ -860,7 +904,17 @@ class HttpAccessService:
         ]
         if route_keys:
             filters.append({"terms": {"lm_route_key": route_keys[:3]}})
-        if prefer_latency:
+            filters.append(
+                {
+                    "range": {
+                        "lm_status_code": {
+                            "gte": 400,
+                            "lt": 500,
+                        }
+                    }
+                }
+            )
+        elif prefer_latency:
             filters.append(
                 {
                     "range": {
@@ -882,6 +936,7 @@ class HttpAccessService:
                 "@timestamp",
                 "status",
                 "request",
+                "request_body",
                 "request_time",
                 "upstream_status",
                 "upstream_response_time",
@@ -957,6 +1012,12 @@ class HttpAccessService:
                     upstream_status=upstream_status_value or None,
                     upstream_time_ms=upstream_time_ms,
                     upstream_addr=str(raw.get("upstream_addr") or "")[:120],
+                    query_parameters=extract_query_parameter_names(
+                        raw.get("request")
+                    ),
+                    body_fields=extract_body_field_names(
+                        raw.get("request_body")
+                    ),
                 )
             )
         return samples

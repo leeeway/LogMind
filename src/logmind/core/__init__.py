@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     http_access_dedup_minutes: int = 30
     http_access_notification_cooldown_minutes: int = 30
     http_access_max_route_candidate_sites: int = 20
+    http_access_nginx_4xx_min_count: int = 100
+    http_access_nginx_4xx_min_rate: float = 0.30
+    http_access_ingress_4xx_min_count: int = 20
+    http_access_ingress_4xx_min_rate: float = 0.10
     http_access_run_history_limit: int = 288
     http_access_max_notification_sites: int = 10
     http_access_sample_size: int = 20
@@ -158,6 +162,8 @@ class Settings(BaseSettings):
         "http_access_dedup_minutes",
         "http_access_notification_cooldown_minutes",
         "http_access_max_route_candidate_sites",
+        "http_access_nginx_4xx_min_count",
+        "http_access_ingress_4xx_min_count",
         "http_access_run_history_limit",
         "http_access_max_notification_sites",
         "http_access_sample_size",
@@ -166,6 +172,16 @@ class Settings(BaseSettings):
     def validate_positive_minutes(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("minute settings must be greater than 0")
+        return v
+
+    @field_validator(
+        "http_access_nginx_4xx_min_rate",
+        "http_access_ingress_4xx_min_rate",
+    )
+    @classmethod
+    def validate_http_access_rate(cls, v: float) -> float:
+        if not 0 < v <= 1:
+            raise ValueError("HTTP access rate thresholds must be in (0, 1]")
         return v
 
 

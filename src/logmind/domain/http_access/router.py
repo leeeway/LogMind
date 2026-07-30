@@ -36,6 +36,24 @@ async def get_http_access_patrol_status() -> dict:
         "max_route_candidate_sites": (
             settings.http_access_max_route_candidate_sites
         ),
+        "route_4xx_thresholds": {
+            "nginx_csharp": {
+                "min_count": getattr(
+                    settings, "http_access_nginx_4xx_min_count", 100
+                ),
+                "min_rate": getattr(
+                    settings, "http_access_nginx_4xx_min_rate", 0.30
+                ),
+            },
+            "ingress_java": {
+                "min_count": getattr(
+                    settings, "http_access_ingress_4xx_min_count", 20
+                ),
+                "min_rate": getattr(
+                    settings, "http_access_ingress_4xx_min_rate", 0.10
+                ),
+            },
+        },
         "run_history_limit": settings.http_access_run_history_limit,
         "baseline": {
             "days": settings.http_access_baseline_days,

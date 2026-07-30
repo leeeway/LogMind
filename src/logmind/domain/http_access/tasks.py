@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -21,6 +21,7 @@ from logmind.domain.http_access.models import (
     detect_incidents,
     detect_route_incidents,
     is_rejected_traffic_window,
+    route_4xx_threshold,
 )
 from logmind.domain.http_access.service import http_access_service
 from logmind.domain.http_access.state import http_access_alert_state
@@ -121,7 +122,30 @@ async def _run_http_access_patrol(
     route_eligible_by_source: dict[str, int] = defaultdict(int)
     route_rejected_site_count = 0
     for window in windows.values():
-        if window.status_4xx < 10:
+        min_count, _min_rate = route_4xx_threshold(
+            window.source,
+            nginx_min_count=getattr(
+                settings,
+                "http_access_nginx_4xx_min_count",
+                100,
+            ),
+            nginx_min_rate=getattr(
+                settings,
+                "http_access_nginx_4xx_min_rate",
+                0.30,
+            ),
+            ingress_min_count=getattr(
+                settings,
+                "http_access_ingress_4xx_min_count",
+                20,
+            ),
+            ingress_min_rate=getattr(
+                settings,
+                "http_access_ingress_4xx_min_rate",
+                0.10,
+            ),
+        )
+        if window.status_4xx < min_count:
             continue
         if is_rejected_traffic_window(window):
             route_rejected_site_count += 1
@@ -143,7 +167,30 @@ async def _run_http_access_patrol(
             time_from=time_from,
             time_to=time_to,
         )
-    route_incidents = detect_route_incidents(route_metrics, windows)
+    route_incidents = detect_route_incidents(
+        route_metrics,
+        windows,
+        nginx_min_count=getattr(
+            settings,
+            "http_access_nginx_4xx_min_count",
+            100,
+        ),
+        nginx_min_rate=getattr(
+            settings,
+            "http_access_nginx_4xx_min_rate",
+            0.30,
+        ),
+        ingress_min_count=getattr(
+            settings,
+            "http_access_ingress_4xx_min_count",
+            20,
+        ),
+        ingress_min_rate=getattr(
+            settings,
+            "http_access_ingress_4xx_min_rate",
+            0.10,
+        ),
+    )
     if route_incidents:
         incidents.extend(route_incidents)
     try:
@@ -427,7 +474,15 @@ async def _attach_samples(
         else:
             sample_map[group] = samples
     for incident in incidents:
-        incident.samples = sample_map.get((incident.source, incident.site), [])
+        samples = sample_map.get((incident.source, incident.site), [])
+        if incident.route_key:
+            incident.samples = [
+                sample
+                for sample in samples
+                if f"{sample.method} {sample.route}" == incident.route_key
+            ]
+        else:
+            incident.samples = samples
 
 
 async def _resolve_tenant_id() -> str | None:
@@ -494,6 +549,7 @@ async def _attach_ai_summaries(
                 "current_value": round(incident.current_value, 6),
                 "baseline_value": round(incident.baseline_value, 6),
                 "status_4xx": incident.status_4xx,
+                "status_counts": incident.status_counts,
                 "status_5xx": incident.status_5xx,
                 "gateway_5xx": incident.gateway_5xx,
                 "upstream_5xx": incident.upstream_5xx,
@@ -507,6 +563,9 @@ async def _attach_ai_summaries(
 
     system_prompt = (
         "你只分析给定的 Nginx/Ingress HTTP access 聚合指标和脱敏样本。"
+        "source=nginx通常对应C#站点，source=ingress通常对应Kubernetes Java站点，"
+        "但这只用于给出排查方向，不能据此臆测应用异常。query_parameters和"
+        "body_fields仅是脱敏后的参数字段名，可用于指出缺少或校验失败的字段范围。"
         "不得推断数据库写入失败、SQL截断、DataIntegrityViolationException、"
         "C#/.NET异常或任何输入中不存在的应用内部故障。"
         "upstream出现5xx时可判断为后端/upstream异常；外层5xx且无upstream证据时"
@@ -651,8 +710,6 @@ def build_http_access_notification(
             f"{sample.method} {sample.route}" for sample in samples if sample.route
         ]
         if not explicit_routes and sample_routes:
-            from collections import Counter
-
             top_route = Counter(sample_routes).most_common(1)[0][0]
             lines.append(f"- 主要接口: {top_route}")
         upstreams = [
@@ -665,10 +722,36 @@ def build_http_access_notification(
             )
         ]
         if upstreams:
-            from collections import Counter
-
             lines.append(
                 f"- 异常upstream: {Counter(upstreams).most_common(1)[0][0]}"
+            )
+        query_parameters = [
+            name
+            for sample in samples
+            for name in sample.query_parameters
+        ]
+        body_fields = [
+            name
+            for sample in samples
+            for name in sample.body_fields
+        ]
+        has_4xx_incident = any(
+            item.kind in {"http_4xx", "route_4xx"} for item in site_incidents
+        )
+        if has_4xx_incident and query_parameters:
+            lines.append(
+                "- 查询参数字段: "
+                + "、".join(
+                    name
+                    for name, _count in Counter(query_parameters).most_common(8)
+                )
+            )
+        if has_4xx_incident and body_fields:
+            lines.append(
+                "- 请求体字段: "
+                + "、".join(
+                    name for name, _count in Counter(body_fields).most_common(8)
+                )
             )
         ai_summaries = list(
             dict.fromkeys(
@@ -715,8 +798,9 @@ def _incident_metric_text(incident: AccessIncident) -> str:
             f"平时{incident.baseline_value * 100:.2f}%）"
         )
     if incident.kind == "route_4xx":
+        status_label = _dominant_status_label(incident)
         return (
-            f"接口异常: {incident.route_key}，4xx "
+            f"接口异常: {incident.route_key}，{status_label} "
             f"{incident.status_4xx}/{incident.request_count}"
             f"（{incident.current_value * 100:.2f}%）"
         )
@@ -740,7 +824,26 @@ def _deterministic_diagnosis(incidents: list[AccessIncident]) -> str:
     ):
         return "网关无法正常连接后端，检查路由、端口和服务实例是否可达。"
     if any(item.kind in {"http_4xx", "route_4xx"} for item in incidents):
-        return "请求参数或业务校验失败增多，先检查对应接口的返回内容。"
+        status_counts: defaultdict[int, int] = defaultdict(int)
+        for incident in incidents:
+            for status, count in incident.status_counts.items():
+                status_counts[status] += count
+        dominant_status = (
+            max(status_counts, key=status_counts.get) if status_counts else 0
+        )
+        return {
+            400: "400明显增多，结合上方参数字段检查必填项、格式和业务校验日志。",
+            401: "认证失败增多，检查凭证是否过期以及认证服务状态。",
+            403: "权限拒绝增多，检查账号权限、鉴权策略和来源限制。",
+            404: "接口404增多，检查Java路由、服务版本和Ingress路径配置。",
+            405: "请求方法不被支持，检查客户端Method和后端接口映射。",
+            406: "服务无法接受请求格式，检查Accept、Content-Type及协商规则。",
+            408: "客户端请求超时增多，检查网络质量和请求发送是否完整。",
+            429: "请求被限流，检查调用量、限流策略和客户端重试。",
+        }.get(
+            dominant_status,
+            "接口4xx增多，结合参数字段和对应应用校验日志定位。",
+        )
     if any(item.kind == "latency" for item in incidents):
         return "成功请求持续变慢，优先检查后端处理耗时和网关排队。"
     if any(item.kind == "traffic_drop" for item in incidents):
@@ -755,7 +858,29 @@ def _duration_text(milliseconds: float) -> str:
 
 
 def _display_source(source: str) -> str:
-    return "Ingress" if source == "ingress" else "Nginx"
+    return "Ingress/Java" if source == "ingress" else "Nginx/C#"
+
+
+def _dominant_status_label(incident: AccessIncident) -> str:
+    counts = {
+        status: count
+        for status, count in incident.status_counts.items()
+        if 400 <= status < 500 and count > 0
+    }
+    if not counts:
+        counts = dict(
+            Counter(
+                sample.status
+                for sample in incident.samples
+                if 400 <= sample.status < 500
+            )
+        )
+    if not counts:
+        return "4xx"
+    status, count = max(counts.items(), key=lambda item: item[1])
+    if count >= incident.status_4xx * 0.80:
+        return str(status)
+    return f"4xx（主要{status}）"
 
 
 def _display_kind(kind: str) -> str:
