@@ -13,6 +13,7 @@ from logmind.domain.http_access.models import AccessIncident, AccessRecovery
 logger = get_logger(__name__)
 
 _STATE_KEY = "logmind:http_access:alert_state:v1"
+_SUMMARY_LAST_SENT_KEY = "logmind:http_access:summary:last_sent:v1"
 _STATE_TTL_SECONDS = 14 * 24 * 60 * 60
 _PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
 
@@ -163,6 +164,48 @@ class HttpAccessAlertState:
         except Exception as exc:
             logger.warning("http_access_state_save_failed", error=str(exc))
 
+    async def can_send_summary(
+        self,
+        incidents: list[AccessIncident],
+        *,
+        now: datetime,
+    ) -> bool:
+        """Globally rate-limit P1 summaries while allowing P0 immediately."""
+        if any(incident.priority == "P0" for incident in incidents):
+            return True
+        cooldown = timedelta(
+            minutes=getattr(
+                get_settings(),
+                "http_access_notification_cooldown_minutes",
+                30,
+            )
+        )
+        try:
+            raw = await self.redis.get(_SUMMARY_LAST_SENT_KEY)
+        except Exception as exc:
+            logger.warning("http_access_summary_cooldown_load_failed", error=str(exc))
+            return True
+        last_sent = _parse_datetime(_decode_redis_value(raw))
+        return last_sent is None or now - last_sent >= cooldown
+
+    async def mark_summary_sent(self, *, now: datetime) -> None:
+        cooldown_seconds = (
+            getattr(
+                get_settings(),
+                "http_access_notification_cooldown_minutes",
+                30,
+            )
+            * 60
+        )
+        try:
+            await self.redis.setex(
+                _SUMMARY_LAST_SENT_KEY,
+                cooldown_seconds,
+                now.isoformat(),
+            )
+        except Exception as exc:
+            logger.warning("http_access_summary_cooldown_save_failed", error=str(exc))
+
 
 def _parse_datetime(value: object) -> datetime | None:
     if not value:
@@ -174,6 +217,12 @@ def _parse_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed
+
+
+def _decode_redis_value(value: object) -> object:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return value
 
 
 def _is_escalation(current: str, previous: str) -> bool:

@@ -20,6 +20,10 @@ _HOST_RE = re.compile(
     r"[a-z]{2,63}$",
     re.IGNORECASE,
 )
+_KNOWN_PROBE_PATH_RE = re.compile(
+    r"(?i)(?:^|/)(?:nuclei(?:\.svg)?|\.env|\.git|wp-admin|wp-login\.php|"
+    r"phpinfo\.php|vendor/phpunit|actuator/env)(?:/|$)"
+)
 
 
 @dataclass(slots=True)
@@ -76,6 +80,18 @@ class AccessWindow:
     @property
     def rate_5xx(self) -> float:
         return self.status_5xx / self.request_count if self.request_count else 0.0
+
+    @property
+    def successful_count(self) -> int:
+        return max(0, self.request_count - self.status_4xx - self.status_5xx)
+
+    @property
+    def success_rate(self) -> float:
+        return (
+            self.successful_count / self.request_count
+            if self.request_count
+            else 0.0
+        )
 
 
 @dataclass(slots=True)
@@ -315,7 +331,6 @@ def detect_incidents(
         baseline = baselines.get(key)
         baseline_ready = bool(baseline and baseline.is_ready)
         baseline_5xx = baseline.rate_5xx if baseline else 0.0
-        baseline_4xx = baseline.rate_4xx if baseline else 0.0
         baseline_p95 = baseline.p95_ms if baseline else 0.0
 
         p0_5xx = (
@@ -354,7 +369,8 @@ def detect_incidents(
             )
 
         if (
-            window.request_count >= 100
+            window.successful_count >= 100
+            and window.success_rate >= 0.80
             and baseline_ready
             and baseline_p95 > 0
             and window.p95_ms >= 2000
@@ -371,27 +387,6 @@ def detect_incidents(
                     baseline_value=baseline_p95,
                     status_4xx=window.status_4xx,
                     status_5xx=window.status_5xx,
-                    p95_ms=window.p95_ms,
-                )
-            )
-
-        if (
-            window.request_count >= 500
-            and window.status_4xx >= 500
-            and window.rate_4xx >= 0.20
-            and baseline_ready
-            and window.rate_4xx >= max(0.20, baseline_4xx * 5)
-        ):
-            incidents.append(
-                AccessIncident(
-                    source=window.source,
-                    site=window.site,
-                    kind="http_4xx",
-                    priority="P1",
-                    request_count=window.request_count,
-                    current_value=window.rate_4xx,
-                    baseline_value=baseline_4xx,
-                    status_4xx=window.status_4xx,
                     p95_ms=window.p95_ms,
                 )
             )
@@ -430,12 +425,13 @@ def detect_incidents(
 
 def detect_route_incidents(
     route_metrics: list[AccessRouteMetric],
+    windows: dict[tuple[str, str], AccessWindow] | None = None,
 ) -> list[AccessIncident]:
     """
     Detect concentrated 4xx failures hidden by healthy site-wide traffic.
 
-    This cold-start guard complements the stricter site-wide baseline rule.
-    A single 400 can never qualify.
+    This finds a failing interface inside an otherwise useful site. Windows
+    dominated by rejected scan traffic and single 400 responses never qualify.
     """
     combined: dict[tuple[str, str, str], AccessRouteMetric] = {}
     for metric in route_metrics:
@@ -459,6 +455,16 @@ def detect_route_incidents(
 
     incidents: list[AccessIncident] = []
     for metric in combined.values():
+        site_window = (windows or {}).get((metric.source, metric.site))
+        if (
+            site_window
+            and site_window.request_count >= 100
+            and site_window.rate_4xx >= 0.80
+        ):
+            continue
+        route_path = metric.route_key.partition(" ")[2]
+        if _KNOWN_PROBE_PATH_RE.search(route_path):
+            continue
         concentrated = (
             metric.request_count >= 20
             and metric.status_4xx >= 10

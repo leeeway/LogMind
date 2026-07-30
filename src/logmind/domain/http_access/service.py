@@ -339,12 +339,24 @@ class HttpAccessService:
                                     }
                                 }
                             },
-                            "latency": {
-                                "percentiles": {
-                                    "field": "lm_request_time_ms",
-                                    "percents": [50, 95, 99],
-                                    "keyed": True,
-                                }
+                            "successful": {
+                                "filter": {
+                                    "range": {
+                                        "lm_status_code": {
+                                            "gte": 200,
+                                            "lt": 400,
+                                        }
+                                    }
+                                },
+                                "aggs": {
+                                    "latency": {
+                                        "percentiles": {
+                                            "field": "lm_request_time_ms",
+                                            "percents": [50, 95, 99],
+                                            "keyed": True,
+                                        }
+                                    }
+                                },
                             },
                         },
                     }
@@ -365,7 +377,11 @@ class HttpAccessService:
                     float(minute_ms) / 1000.0,
                     tz=UTC,
                 )
-                latency_values = bucket.get("latency", {}).get("values", {})
+                latency_values = (
+                    bucket.get("successful", {})
+                    .get("latency", {})
+                    .get("values", {})
+                )
                 metrics.append(
                     AccessMetric(
                         source=source,
@@ -783,6 +799,17 @@ class HttpAccessService:
         ]
         if route_keys:
             filters.append({"terms": {"lm_route_key": route_keys[:3]}})
+        if prefer_latency:
+            filters.append(
+                {
+                    "range": {
+                        "lm_status_code": {
+                            "gte": 200,
+                            "lt": 400,
+                        }
+                    }
+                }
+            )
 
         body = {
             "size": min(max(size, 1), 20),

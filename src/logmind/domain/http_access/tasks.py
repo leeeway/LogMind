@@ -93,19 +93,8 @@ async def _run_http_access_patrol(
             time_from=time_from,
             time_to=time_to,
         )
-    route_incidents = detect_route_incidents(route_metrics)
+    route_incidents = detect_route_incidents(route_metrics, windows)
     if route_incidents:
-        route_sites = {
-            (incident.source, incident.site) for incident in route_incidents
-        }
-        incidents = [
-            incident
-            for incident in incidents
-            if not (
-                incident.kind == "http_4xx"
-                and (incident.source, incident.site) in route_sites
-            )
-        ]
         incidents.extend(route_incidents)
     try:
         persisted = await service.persist_metrics(metrics)
@@ -124,6 +113,7 @@ async def _run_http_access_patrol(
         "notification_incident_count": len(batch.due),
         "recovery_count": len(batch.recoveries),
         "notification_sent": False,
+        "notification_throttled": False,
         "shadow_mode": not settings.http_access_notification_enabled,
     }
 
@@ -150,6 +140,16 @@ async def _run_http_access_patrol(
             sites=sorted({incident.site for incident in batch.due})[:20],
             **result,
         )
+        return result
+
+    can_send_summary = getattr(alert_state, "can_send_summary", None)
+    if callable(can_send_summary) and not await can_send_summary(
+        batch.due,
+        now=time_to,
+    ):
+        await alert_state.save(batch, delivered=False)
+        result["notification_throttled"] = True
+        logger.info("http_access_notification_throttled", **result)
         return result
 
     display_incidents, omitted_sites = _select_notification_incidents(
@@ -184,6 +184,9 @@ async def _run_http_access_patrol(
     )
     delivered = await _send_notification(message)
     await alert_state.save(batch, delivered=delivered)
+    mark_summary_sent = getattr(alert_state, "mark_summary_sent", None)
+    if delivered and callable(mark_summary_sent):
+        await mark_summary_sent(now=time_to)
     result["notification_sent"] = delivered
 
     if tenant_id:
@@ -372,6 +375,12 @@ async def _attach_ai_summaries(
                 "anomaly_type": incident.kind,
                 "priority": incident.priority,
                 "request_count": incident.request_count,
+                "successful_request_count": max(
+                    0,
+                    incident.request_count
+                    - incident.status_4xx
+                    - incident.status_5xx,
+                ),
                 "current_value": round(incident.current_value, 6),
                 "baseline_value": round(incident.baseline_value, 6),
                 "status_4xx": incident.status_4xx,
@@ -392,8 +401,10 @@ async def _attach_ai_summaries(
         "C#/.NET异常或任何输入中不存在的应用内部故障。"
         "upstream出现5xx时可判断为后端/upstream异常；外层5xx且无upstream证据时"
         "只能判断为网关路由、连接或上游不可达；上下游均400且耗时低时只能判断为"
-        "客户端参数或业务校验异常。证据不足时明确写“仅能确认访问层现象”。"
-        "返回严格JSON：{\"items\":[{\"key\":\"原key\",\"summary\":\"不超过100字\"}]}。"
+        "客户端参数或业务校验异常。证据不足时写清楚应先检查哪一项，"
+        "不要复述指标，不使用“访问层现象”等晦涩套话。"
+        "使用运维人员一眼能看懂的中文，不超过60字。"
+        "返回严格JSON：{\"items\":[{\"key\":\"原key\",\"summary\":\"结论和动作\"}]}。"
     )
     request = ChatRequest(
         messages=[
@@ -435,7 +446,7 @@ def _parse_ai_summaries(content: str) -> dict[str, str]:
         if not isinstance(item, dict):
             continue
         key = str(item.get("key", ""))
-        summary = " ".join(str(item.get("summary", "")).split())[:160]
+        summary = " ".join(str(item.get("summary", "")).split())[:80]
         if (
             key
             and summary
@@ -491,9 +502,9 @@ def build_http_access_notification(
     local_from = _to_local(time_from)
     local_to = _to_local(time_to)
     lines = [
-        f"## {icon} HTTP访问异常汇总",
-        f"**时间**: {local_from:%Y-%m-%d %H:%M} ~ {local_to:%H:%M}",
-        f"**异常站点**: P0 {p0_count}个 / P1 {p1_count}个",
+        f"## {icon} HTTP访问告警",
+        f"**时间窗口**: {local_from:%Y-%m-%d %H:%M} ~ {local_to:%H:%M}",
+        f"**需要关注**: P0 {p0_count}个，P1 {p1_count}个",
         "",
     ]
 
@@ -555,9 +566,9 @@ def build_http_access_notification(
             )
         )
         if ai_summaries:
-            lines.append(f"- AI判断: {ai_summaries[0]}")
+            lines.append(f"- 结论: {ai_summaries[0]}")
         else:
-            lines.append(f"- 判断: {_deterministic_diagnosis(site_incidents)}")
+            lines.append(f"- 结论: {_deterministic_diagnosis(site_incidents)}")
         lines.append("")
 
     if omitted_sites:
@@ -578,49 +589,59 @@ def build_http_access_notification(
 
 def _incident_metric_text(incident: AccessIncident) -> str:
     if incident.kind == "http_5xx":
-        baseline = incident.baseline_value * 100
+        baseline_text = (
+            f"平时{incident.baseline_value * 100:.2f}%"
+            if incident.baseline_value > 0
+            else "暂无历史基线"
+        )
         return (
-            f"5xx {incident.status_5xx}/{incident.request_count}"
-            f"（{incident.current_value * 100:.2f}%，基线{baseline:.2f}%）"
+            f"服务错误: {incident.status_5xx}/{incident.request_count}"
+            f"（{incident.current_value * 100:.2f}%，{baseline_text}）"
         )
     if incident.kind == "http_4xx":
         return (
-            f"4xx {incident.status_4xx}/{incident.request_count}"
+            f"请求被拒绝: {incident.status_4xx}/{incident.request_count}"
             f"（{incident.current_value * 100:.2f}%，"
-            f"基线{incident.baseline_value * 100:.2f}%）"
+            f"平时{incident.baseline_value * 100:.2f}%）"
         )
     if incident.kind == "route_4xx":
         return (
-            f"{incident.route_key} · 4xx "
+            f"接口异常: {incident.route_key}，4xx "
             f"{incident.status_4xx}/{incident.request_count}"
             f"（{incident.current_value * 100:.2f}%）"
         )
     if incident.kind == "latency":
         return (
-            f"p95 {incident.current_value:.0f}ms"
-            f"（基线{incident.baseline_value:.0f}ms）"
+            f"响应变慢: 成功请求P95 {_duration_text(incident.current_value)}"
+            f"（平时{_duration_text(incident.baseline_value)}，已连续10分钟）"
         )
     return (
-        f"请求量 {incident.current_value:.0f}"
-        f"（基线{incident.baseline_value:.0f}/5分钟）"
+        f"流量骤降: 当前{incident.current_value:.0f}次"
+        f"（平时{incident.baseline_value:.0f}次/5分钟）"
     )
 
 
 def _deterministic_diagnosis(incidents: list[AccessIncident]) -> str:
     if any(item.upstream_5xx > 0 for item in incidents):
-        return "upstream 已返回5xx，优先检查对应后端服务。"
+        return "后端服务已返回5xx，优先检查对应服务实例和最近发布。"
     if any(
         item.gateway_5xx > 0 and item.upstream_5xx == 0
         for item in incidents
     ):
-        return "网关出现502/503/504但缺少upstream 5xx证据，检查路由、连接和上游可达性。"
+        return "网关无法正常连接后端，检查路由、端口和服务实例是否可达。"
     if any(item.kind in {"http_4xx", "route_4xx"} for item in incidents):
-        return "客户端参数或业务校验失败显著增加，检查主要接口的请求约束。"
+        return "请求参数或业务校验失败增多，先检查对应接口的返回内容。"
     if any(item.kind == "latency" for item in incidents):
-        return "访问层延迟显著高于历史基线，结合upstream耗时检查后端或网关排队。"
+        return "成功请求持续变慢，优先检查后端处理耗时和网关排队。"
     if any(item.kind == "traffic_drop" for item in incidents):
-        return "站点流量连续低于历史基线，检查入口可用性和日志采集状态。"
-    return "仅能确认访问层统计异常，暂无应用内部故障证据。"
+        return "访问量持续骤降，检查入口可用性和日志采集是否中断。"
+    return "访问指标异常，先检查主要接口和对应后端服务。"
+
+
+def _duration_text(milliseconds: float) -> str:
+    if milliseconds >= 1000:
+        return f"{milliseconds / 1000:.1f}秒"
+    return f"{milliseconds:.0f}毫秒"
 
 
 def _display_source(source: str) -> str:

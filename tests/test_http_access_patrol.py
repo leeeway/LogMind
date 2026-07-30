@@ -150,6 +150,33 @@ def test_latency_requires_a_nonzero_ready_baseline():
     ) == []
 
 
+def test_latency_ignores_windows_dominated_by_4xx():
+    window = aggregate_metrics(
+        [
+            AccessMetric(
+                source="nginx",
+                site="zeus-mobile-ops.gyyx.cn",
+                minute=_utc(),
+                request_count=1000,
+                status_4xx=900,
+                p95_ms=56045,
+            )
+        ]
+    )
+    baseline = AccessBaseline(
+        source="nginx",
+        site="zeus-mobile-ops.gyyx.cn",
+        sample_count=100,
+        request_count=1000,
+        p95_ms=500,
+    )
+
+    assert detect_incidents(
+        window,
+        {("nginx", "zeus-mobile-ops.gyyx.cn"): baseline},
+    ) == []
+
+
 def test_route_4xx_detects_concentration_hidden_by_site_traffic():
     incidents = detect_route_incidents(
         [
@@ -192,6 +219,45 @@ def test_route_4xx_ignores_single_400():
     ) == []
 
 
+def test_route_4xx_ignores_known_security_probe_paths():
+    assert detect_route_incidents(
+        [
+            AccessRouteMetric(
+                source="nginx",
+                site="zeus-mobile-ops.gyyx.cn",
+                route_key="GET /nuclei.svg",
+                request_count=100,
+                status_4xx=100,
+            )
+        ]
+    ) == []
+
+
+def test_route_4xx_ignores_site_dominated_by_rejected_scan_traffic():
+    metric = AccessRouteMetric(
+        source="nginx",
+        site="zeus-mobile-ops.gyyx.cn",
+        route_key="GET /index.php",
+        request_count=72,
+        status_4xx=72,
+    )
+    windows = {
+        ("nginx", "zeus-mobile-ops.gyyx.cn"): aggregate_metrics(
+            [
+                AccessMetric(
+                    source="nginx",
+                    site="zeus-mobile-ops.gyyx.cn",
+                    minute=_utc(),
+                    request_count=13938,
+                    status_4xx=13684,
+                )
+            ]
+        )[("nginx", "zeus-mobile-ops.gyyx.cn")]
+    }
+
+    assert detect_route_incidents([metric], windows) == []
+
+
 class _FakeIndices:
     async def exists(self, **_kwargs):
         return False
@@ -225,11 +291,13 @@ def test_composite_aggregation_counts_more_than_ten_thousand_documents():
                                 "status_5xx": {"doc_count": 40},
                                 "gateway_5xx": {"doc_count": 20},
                                 "upstream_5xx": {"doc_count": 10},
-                                "latency": {
-                                    "values": {
-                                        "50.0": 10.0,
-                                        "95.0": 50.0,
-                                        "99.0": 100.0,
+                                "successful": {
+                                    "latency": {
+                                        "values": {
+                                            "50.0": 10.0,
+                                            "95.0": 50.0,
+                                            "99.0": 100.0,
+                                        }
                                     }
                                 },
                             }
@@ -259,6 +327,9 @@ def test_composite_aggregation_counts_more_than_ten_thousand_documents():
         body["aggs"]["by_minute_site"]["composite"]["size"]
         == 1000
     )
+    assert body["aggs"]["by_minute_site"]["aggs"]["successful"]["filter"] == {
+        "range": {"lm_status_code": {"gte": 200, "lt": 400}}
+    }
 
 
 def test_route_aggregation_handles_many_server_names_in_one_query():
@@ -439,7 +510,7 @@ def test_notification_groups_sites_and_omits_internal_metadata_and_secrets():
         time_to=_utc() + timedelta(minutes=5),
     )
 
-    assert message.count("HTTP访问异常汇总") == 1
+    assert message.count("HTTP访问告警") == 1
     assert "api.qibao.tjlong.cn" in message
     assert "pigeon.gyyx.cn" in message
     assert "GET /notice/noread/{uuid}/" in message
@@ -503,20 +574,20 @@ def test_route_notification_names_each_interface_without_redundant_main_route():
         time_to=_utc() + timedelta(minutes=5),
     )
 
-    assert "POST /statistics/operatorrecord · 4xx 22/219" in message
-    assert "GET /notice/noread/{uuid}/ · 4xx 19/116" in message
+    assert "接口异常: POST /statistics/operatorrecord，4xx 22/219" in message
+    assert "接口异常: GET /notice/noread/{uuid}/，4xx 19/116" in message
     assert "- 主要接口:" not in message
 
 
 class _FakeRedis:
     def __init__(self):
-        self.value = None
+        self.values = {}
 
-    async def get(self, _key):
-        return self.value
+    async def get(self, key):
+        return self.values.get(key)
 
-    async def setex(self, _key, _ttl, value):
-        self.value = value
+    async def setex(self, key, _ttl, value):
+        self.values[key] = value
 
 
 def test_traffic_drop_requires_two_windows_and_recovery_requires_two():
@@ -583,6 +654,55 @@ def test_latency_requires_two_consecutive_windows():
             now=_utc() + timedelta(minutes=5),
         )
         assert [item.key for item in second.due] == [incident.key]
+
+    asyncio.run(scenario())
+
+
+def test_p1_summary_has_global_cooldown_but_p0_bypasses(monkeypatch):
+    settings = SimpleNamespace(
+        http_access_dedup_minutes=30,
+        http_access_notification_cooldown_minutes=30,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.http_access.state.get_settings",
+        lambda: settings,
+    )
+    state = HttpAccessAlertState(redis=_FakeRedis())
+    p1 = AccessIncident(
+        source="nginx",
+        site="creator-ops.gyyx.cn",
+        kind="latency",
+        priority="P1",
+        request_count=500,
+        current_value=2200,
+        baseline_value=300,
+    )
+    p0 = AccessIncident(
+        source="nginx",
+        site="api.gyyx.cn",
+        kind="http_5xx",
+        priority="P0",
+        request_count=1000,
+        current_value=0.1,
+        baseline_value=0.001,
+        status_5xx=100,
+    )
+
+    async def scenario():
+        assert await state.can_send_summary([p1], now=_utc())
+        await state.mark_summary_sent(now=_utc())
+        assert not await state.can_send_summary(
+            [p1],
+            now=_utc() + timedelta(minutes=5),
+        )
+        assert await state.can_send_summary(
+            [p1],
+            now=_utc() + timedelta(minutes=30),
+        )
+        assert await state.can_send_summary(
+            [p0],
+            now=_utc() + timedelta(minutes=5),
+        )
 
     asyncio.run(scenario())
 

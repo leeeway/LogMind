@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     http_access_metrics_retention_days: int = 90
     http_access_baseline_days: int = 7
     http_access_dedup_minutes: int = 30
+    http_access_notification_cooldown_minutes: int = 30
     http_access_max_notification_sites: int = 10
     http_access_sample_size: int = 20
 
@@ -189,6 +190,7 @@ class Settings(BaseSettings):
         "http_access_metrics_retention_days",
         "http_access_baseline_days",
         "http_access_dedup_minutes",
+        "http_access_notification_cooldown_minutes",
         "http_access_max_notification_sites",
         "http_access_sample_size",
     )
