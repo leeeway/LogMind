@@ -66,7 +66,11 @@ class HttpAccessAlertState:
         for key, incident in current_by_key.items():
             old = previous.get(key, {})
             streak = int(old.get("streak", 0)) + 1
-            required_streak = 2 if incident.kind == "traffic_drop" else 1
+            required_streak = (
+                2
+                if incident.kind in {"traffic_drop", "latency"}
+                else 1
+            )
             was_active = bool(old.get("active", False))
             active = was_active or streak >= required_streak
             last_notified = _parse_datetime(old.get("last_notified"))
@@ -90,6 +94,7 @@ class HttpAccessAlertState:
                 "site": incident.site,
                 "kind": incident.kind,
                 "priority": incident.priority,
+                "route_key": incident.route_key,
                 "active": active,
                 "streak": streak,
                 "normal_streak": 0,
@@ -111,6 +116,7 @@ class HttpAccessAlertState:
                         site=str(old.get("site", "")),
                         kind=str(old.get("kind", "")),
                         priority=str(old.get("priority", "P1")),
+                        route_key=str(old.get("route_key", "")),
                     )
                 )
                 continue

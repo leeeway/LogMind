@@ -19,6 +19,7 @@ from logmind.domain.http_access.models import (
     AccessRecovery,
     aggregate_metrics,
     detect_incidents,
+    detect_route_incidents,
 )
 from logmind.domain.http_access.service import http_access_service
 from logmind.domain.http_access.state import http_access_alert_state
@@ -83,7 +84,29 @@ async def _run_http_access_patrol(
     except Exception as exc:
         baselines = {}
         logger.warning("http_access_baseline_load_failed", error=str(exc))
-    incidents = detect_incidents(aggregate_metrics(metrics), baselines)
+    windows = aggregate_metrics(metrics)
+    incidents = detect_incidents(windows, baselines)
+    route_metrics = []
+    if any(window.status_4xx >= 10 for window in windows.values()):
+        route_metrics = await service.collect_route_metrics(
+            windows,
+            time_from=time_from,
+            time_to=time_to,
+        )
+    route_incidents = detect_route_incidents(route_metrics)
+    if route_incidents:
+        route_sites = {
+            (incident.source, incident.site) for incident in route_incidents
+        }
+        incidents = [
+            incident
+            for incident in incidents
+            if not (
+                incident.kind == "http_4xx"
+                and (incident.source, incident.site) in route_sites
+            )
+        ]
+        incidents.extend(route_incidents)
     try:
         persisted = await service.persist_metrics(metrics)
     except Exception as exc:
@@ -96,6 +119,7 @@ async def _run_http_access_patrol(
         "time_to": time_to.isoformat(),
         "metric_count": len(metrics),
         "persisted_metric_count": persisted,
+        "route_metric_count": len(route_metrics),
         "incident_count": len(incidents),
         "notification_incident_count": len(batch.due),
         "recovery_count": len(batch.recoveries),
@@ -103,7 +127,18 @@ async def _run_http_access_patrol(
         "shadow_mode": not settings.http_access_notification_enabled,
     }
 
-    if not batch.due and not batch.recoveries:
+    notification_recoveries = (
+        batch.recoveries
+        if getattr(
+            settings,
+            "http_access_recovery_notification_enabled",
+            False,
+        )
+        else []
+    )
+    result["notification_recovery_count"] = len(notification_recoveries)
+
+    if not batch.due and not notification_recoveries:
         await alert_state.save(batch, delivered=True)
         logger.info("http_access_patrol_normal", **result)
         return result
@@ -140,7 +175,7 @@ async def _run_http_access_patrol(
 
     message = build_http_access_notification(
         display_incidents,
-        batch.recoveries,
+        notification_recoveries,
         time_from=time_from,
         time_to=time_to,
         omitted_sites=omitted_sites,
@@ -157,7 +192,7 @@ async def _run_http_access_patrol(
                 tenant_id=tenant_id,
                 message=message,
                 incidents=display_incidents,
-                recoveries=batch.recoveries,
+                recoveries=notification_recoveries,
                 delivered=delivered,
                 fired_at=time_to,
             )
@@ -188,9 +223,19 @@ def _select_notification_incidents(
         ),
     )
     selected_sites = set(ranked_sites[:max_sites])
-    selected = [
-        incident for incident in incidents if incident.site in selected_sites
-    ]
+    selected = []
+    for site in ranked_sites:
+        if site not in selected_sites:
+            continue
+        selected.extend(
+            sorted(
+                by_site[site],
+                key=lambda item: (
+                    _PRIORITY_RANK.get(item.priority, 9),
+                    -item.impact,
+                ),
+            )[:3]
+        )
     return selected, max(0, len(ranked_sites) - len(selected_sites))
 
 
@@ -227,6 +272,20 @@ async def _attach_samples(
         )
         for group in groups
     }
+    route_keys = {
+        group: [
+            item.route_key
+            for item in incidents
+            if (item.source, item.site) == group and item.route_key
+        ]
+        if all(
+            item.kind == "route_4xx"
+            for item in incidents
+            if (item.source, item.site) == group
+        )
+        else []
+        for group in groups
+    }
     results = await asyncio.gather(
         *[
             service.fetch_samples(
@@ -236,6 +295,7 @@ async def _attach_samples(
                 time_to=time_to,
                 size=sample_size,
                 prefer_latency=prefer_latency[(source, site)],
+                route_keys=route_keys[(source, site)],
             )
             for source, site in groups
         ],
@@ -319,6 +379,7 @@ async def _attach_ai_summaries(
                 "gateway_5xx": incident.gateway_5xx,
                 "upstream_5xx": incident.upstream_5xx,
                 "p95_ms": round(incident.p95_ms, 3),
+                "route": incident.route_key,
                 "samples": [
                     sample.to_ai_dict() for sample in incident.samples[:5]
                 ],
@@ -457,13 +518,22 @@ def build_http_access_notification(
             for incident in site_incidents
             for sample in incident.samples
         ]
-        routes = [
+        explicit_routes = [
+            incident.route_key
+            for incident in sorted(
+                site_incidents,
+                key=lambda item: -item.impact,
+            )
+            if incident.route_key
+        ]
+        sample_routes = [
             f"{sample.method} {sample.route}" for sample in samples if sample.route
         ]
-        if routes:
+        if not explicit_routes and sample_routes:
             from collections import Counter
 
-            lines.append(f"- 主要接口: {Counter(routes).most_common(1)[0][0]}")
+            top_route = Counter(sample_routes).most_common(1)[0][0]
+            lines.append(f"- 主要接口: {top_route}")
         upstreams = [
             sample.upstream_addr
             for sample in samples
@@ -519,6 +589,12 @@ def _incident_metric_text(incident: AccessIncident) -> str:
             f"（{incident.current_value * 100:.2f}%，"
             f"基线{incident.baseline_value * 100:.2f}%）"
         )
+    if incident.kind == "route_4xx":
+        return (
+            f"{incident.route_key} · 4xx "
+            f"{incident.status_4xx}/{incident.request_count}"
+            f"（{incident.current_value * 100:.2f}%）"
+        )
     if incident.kind == "latency":
         return (
             f"p95 {incident.current_value:.0f}ms"
@@ -538,7 +614,7 @@ def _deterministic_diagnosis(incidents: list[AccessIncident]) -> str:
         for item in incidents
     ):
         return "网关出现502/503/504但缺少upstream 5xx证据，检查路由、连接和上游可达性。"
-    if any(item.kind == "http_4xx" for item in incidents):
+    if any(item.kind in {"http_4xx", "route_4xx"} for item in incidents):
         return "客户端参数或业务校验失败显著增加，检查主要接口的请求约束。"
     if any(item.kind == "latency" for item in incidents):
         return "访问层延迟显著高于历史基线，结合upstream耗时检查后端或网关排队。"
@@ -555,6 +631,7 @@ def _display_kind(kind: str) -> str:
     return {
         "http_5xx": "5xx",
         "http_4xx": "4xx",
+        "route_4xx": "接口4xx",
         "latency": "延迟",
         "traffic_drop": "流量",
     }.get(kind, kind)

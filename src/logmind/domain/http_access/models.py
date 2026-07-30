@@ -79,6 +79,23 @@ class AccessWindow:
 
 
 @dataclass(slots=True)
+class AccessRouteMetric:
+    """Current-window aggregation for one normalized method/route."""
+
+    source: str
+    site: str
+    route_key: str
+    request_count: int
+    status_4xx: int = 0
+    status_5xx: int = 0
+    p95_ms: float = 0.0
+
+    @property
+    def rate_4xx(self) -> float:
+        return self.status_4xx / self.request_count if self.request_count else 0.0
+
+
+@dataclass(slots=True)
 class AccessBaseline:
     """Historical per-window baseline for one source/site."""
 
@@ -141,18 +158,20 @@ class AccessIncident:
     gateway_5xx: int = 0
     upstream_5xx: int = 0
     p95_ms: float = 0.0
+    route_key: str = ""
     samples: list[AccessSample] = field(default_factory=list)
     ai_summary: str = ""
 
     @property
     def key(self) -> str:
-        return f"{self.source}|{self.site}|{self.kind}"
+        suffix = f"|{self.route_key}" if self.route_key else ""
+        return f"{self.source}|{self.site}|{self.kind}{suffix}"
 
     @property
     def impact(self) -> float:
         if self.kind == "http_5xx":
             return float(self.status_5xx)
-        if self.kind == "http_4xx":
+        if self.kind in {"http_4xx", "route_4xx"}:
             return float(self.status_4xx)
         if self.kind == "latency":
             return self.p95_ms
@@ -160,6 +179,8 @@ class AccessIncident:
 
     @property
     def top_route(self) -> str:
+        if self.route_key:
+            return self.route_key
         routes = [
             f"{sample.method} {sample.route}"
             for sample in self.samples
@@ -189,10 +210,12 @@ class AccessRecovery:
     site: str
     kind: str
     priority: str
+    route_key: str = ""
 
     @property
     def key(self) -> str:
-        return f"{self.source}|{self.site}|{self.kind}"
+        suffix = f"|{self.route_key}" if self.route_key else ""
+        return f"{self.source}|{self.site}|{self.kind}{suffix}"
 
 
 def normalize_site(value: object) -> str:
@@ -332,12 +355,10 @@ def detect_incidents(
 
         if (
             window.request_count >= 100
+            and baseline_ready
+            and baseline_p95 > 0
             and window.p95_ms >= 2000
-            and (
-                not baseline_ready
-                or baseline_p95 <= 0
-                or window.p95_ms >= baseline_p95 * 3
-            )
+            and window.p95_ms >= baseline_p95 * 3
         ):
             incidents.append(
                 AccessIncident(
@@ -404,6 +425,70 @@ def detect_incidents(
             item.source,
             item.kind,
         ),
+    )
+
+
+def detect_route_incidents(
+    route_metrics: list[AccessRouteMetric],
+) -> list[AccessIncident]:
+    """
+    Detect concentrated 4xx failures hidden by healthy site-wide traffic.
+
+    This cold-start guard complements the stricter site-wide baseline rule.
+    A single 400 can never qualify.
+    """
+    combined: dict[tuple[str, str, str], AccessRouteMetric] = {}
+    for metric in route_metrics:
+        key = (metric.source, metric.site, metric.route_key)
+        current = combined.get(key)
+        if current is None:
+            combined[key] = AccessRouteMetric(
+                source=metric.source,
+                site=metric.site,
+                route_key=metric.route_key,
+                request_count=metric.request_count,
+                status_4xx=metric.status_4xx,
+                status_5xx=metric.status_5xx,
+                p95_ms=metric.p95_ms,
+            )
+            continue
+        current.request_count += metric.request_count
+        current.status_4xx += metric.status_4xx
+        current.status_5xx += metric.status_5xx
+        current.p95_ms = max(current.p95_ms, metric.p95_ms)
+
+    incidents: list[AccessIncident] = []
+    for metric in combined.values():
+        concentrated = (
+            metric.request_count >= 20
+            and metric.status_4xx >= 10
+            and metric.rate_4xx >= 0.10
+        )
+        high_volume = (
+            metric.status_4xx >= 100
+            and metric.rate_4xx >= 0.10
+        )
+        if not (concentrated or high_volume):
+            continue
+        incidents.append(
+            AccessIncident(
+                source=metric.source,
+                site=metric.site,
+                kind="route_4xx",
+                priority="P1",
+                request_count=metric.request_count,
+                current_value=metric.rate_4xx,
+                baseline_value=0.0,
+                status_4xx=metric.status_4xx,
+                status_5xx=metric.status_5xx,
+                p95_ms=metric.p95_ms,
+                route_key=metric.route_key,
+            )
+        )
+
+    return sorted(
+        incidents,
+        key=lambda item: (-item.impact, item.site, item.source, item.route_key),
     )
 
 

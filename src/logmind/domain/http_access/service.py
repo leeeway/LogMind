@@ -14,7 +14,9 @@ from logmind.core.logging import get_logger
 from logmind.domain.http_access.models import (
     AccessBaseline,
     AccessMetric,
+    AccessRouteMetric,
     AccessSample,
+    AccessWindow,
     is_allowed_site,
     normalize_request,
     normalize_site,
@@ -108,6 +110,73 @@ _RUNTIME_MAPPINGS = {
                         catch (Exception ignored) {}
                     }
                 }
+            """,
+        },
+    },
+}
+
+_ROUTE_RUNTIME_MAPPINGS = {
+    **_RUNTIME_MAPPINGS,
+    "lm_route_key": {
+        "type": "keyword",
+        "script": {
+            "source": """
+                String method = "UNKNOWN";
+                String path = "/";
+                if (params._source.containsKey('lm_http_method')
+                        && params._source.lm_http_method != null) {
+                    method = params._source.lm_http_method.toString().toUpperCase();
+                }
+                if (params._source.containsKey('lm_route')
+                        && params._source.lm_route != null) {
+                    path = params._source.lm_route.toString();
+                } else if (params._source.containsKey('request')
+                        && params._source.request != null) {
+                    String request = params._source.request.toString().trim();
+                    String[] parts = request.splitOnToken(' ');
+                    if (parts.length >= 2) {
+                        method = parts[0].toUpperCase();
+                        path = parts[1];
+                    } else if (parts.length == 1) {
+                        path = parts[0];
+                    }
+                    int queryAt = path.indexOf('?');
+                    if (queryAt >= 0) path = path.substring(0, queryAt);
+                    int fragmentAt = path.indexOf('#');
+                    if (fragmentAt >= 0) path = path.substring(0, fragmentAt);
+                    if (!path.startsWith('/')) path = '/' + path;
+                    boolean trailingSlash = path.endsWith("/");
+                    String[] segments = path.splitOnToken('/');
+                    StringBuilder normalized = new StringBuilder();
+                    for (String segment : segments) {
+                        if (segment.length() == 0) continue;
+                        boolean numeric = true;
+                        for (int i = 0; i < segment.length(); i++) {
+                            int code = (int)segment.charAt(i);
+                            if (code < 48 || code > 57) {
+                                numeric = false;
+                                break;
+                            }
+                        }
+                        boolean uuid = segment.length() == 36
+                            && segment.substring(8, 9).equals("-")
+                            && segment.substring(13, 14).equals("-")
+                            && segment.substring(18, 19).equals("-")
+                            && segment.substring(23, 24).equals("-");
+                        normalized.append('/');
+                        normalized.append(
+                            uuid ? '{uuid}' : numeric ? '{id}' : segment
+                        );
+                    }
+                    path = normalized.length() == 0
+                        ? '/' : normalized.toString();
+                    if (trailingSlash && !path.equals("/")) {
+                        path += "/";
+                    }
+                }
+                if (method.length() > 16) method = method.substring(0, 16);
+                if (path.length() > 500) path = path.substring(0, 500);
+                emit(method + ' ' + path);
             """,
         },
     },
@@ -327,6 +396,201 @@ class HttpAccessService:
 
         return metrics
 
+    async def collect_route_metrics(
+        self,
+        windows: dict[tuple[str, str], AccessWindow],
+        *,
+        time_from: datetime,
+        time_to: datetime,
+    ) -> list[AccessRouteMetric]:
+        """
+        Aggregate routes only for sites with a meaningful 4xx candidate.
+
+        There is at most one route aggregation per configured source index,
+        rather than one Elasticsearch query or Celery task per server_name.
+        """
+        candidates_by_source: dict[str, set[str]] = {}
+        for window in windows.values():
+            if window.status_4xx < 10:
+                continue
+            candidates_by_source.setdefault(window.source, set()).add(window.site)
+        if not candidates_by_source:
+            return []
+
+        settings = get_settings()
+        queries = [
+            (
+                index_name,
+                source_name_for_index(index_name),
+                sorted(
+                    candidates_by_source.get(
+                        source_name_for_index(index_name),
+                        set(),
+                    )
+                ),
+            )
+            for index_name in settings.http_access_index_list
+            if candidates_by_source.get(source_name_for_index(index_name))
+        ]
+        results = await asyncio.gather(
+            *[
+                self._collect_route_source(
+                    index_name=index_name,
+                    source=source,
+                    sites=sites,
+                    time_from=time_from,
+                    time_to=time_to,
+                )
+                for index_name, source, sites in queries
+            ],
+            return_exceptions=True,
+        )
+
+        route_metrics: list[AccessRouteMetric] = []
+        failures: list[str] = []
+        for (index_name, _source, _sites), result in zip(
+            queries,
+            results,
+            strict=True,
+        ):
+            if isinstance(result, Exception):
+                failures.append(index_name)
+                logger.error(
+                    "http_access_route_collection_failed",
+                    index=index_name,
+                    error=str(result),
+                )
+                continue
+            route_metrics.extend(result)
+        if failures:
+            raise RuntimeError(
+                "HTTP access route collection incomplete for: "
+                + ", ".join(failures)
+            )
+        return route_metrics
+
+    async def _collect_route_source(
+        self,
+        *,
+        index_name: str,
+        source: str,
+        sites: list[str],
+        time_from: datetime,
+        time_to: datetime,
+    ) -> list[AccessRouteMetric]:
+        after_key: dict | None = None
+        route_metrics: list[AccessRouteMetric] = []
+        while True:
+            composite: dict[str, Any] = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [
+                    {
+                        "site": {
+                            "terms": {
+                                "field": "server_name.keyword",
+                                "order": "asc",
+                            }
+                        }
+                    },
+                    {
+                        "route": {
+                            "terms": {
+                                "field": "lm_route_key",
+                                "order": "asc",
+                            }
+                        }
+                    },
+                ],
+            }
+            if after_key:
+                composite["after"] = after_key
+            body = {
+                "size": 0,
+                "track_total_hits": False,
+                "runtime_mappings": _ROUTE_RUNTIME_MAPPINGS,
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {
+                                "range": {
+                                    "@timestamp": {
+                                        "gte": time_from.isoformat(),
+                                        "lt": time_to.isoformat(),
+                                    }
+                                }
+                            },
+                            {"terms": {"server_name.keyword": sites}},
+                        ]
+                    }
+                },
+                "aggs": {
+                    "by_site_route": {
+                        "composite": composite,
+                        "aggs": {
+                            "status_4xx": {
+                                "filter": {
+                                    "range": {
+                                        "lm_status_code": {
+                                            "gte": 400,
+                                            "lt": 500,
+                                        }
+                                    }
+                                }
+                            },
+                            "status_5xx": {
+                                "filter": {
+                                    "range": {
+                                        "lm_status_code": {
+                                            "gte": 500,
+                                            "lt": 600,
+                                        }
+                                    }
+                                }
+                            },
+                            "latency": {
+                                "percentiles": {
+                                    "field": "lm_request_time_ms",
+                                    "percents": [95],
+                                    "keyed": True,
+                                }
+                            },
+                        },
+                    }
+                },
+            }
+            response = await self.es.search(index=index_name, body=body)
+            aggregation = (
+                response.get("aggregations", {}).get("by_site_route", {})
+            )
+            for bucket in aggregation.get("buckets", []):
+                key = bucket.get("key", {})
+                route_key = str(key.get("route") or "")[:520]
+                if not route_key or route_key == "UNKNOWN /":
+                    continue
+                route_metrics.append(
+                    AccessRouteMetric(
+                        source=source,
+                        site=normalize_site(key.get("site")),
+                        route_key=route_key,
+                        request_count=int(bucket.get("doc_count", 0)),
+                        status_4xx=int(
+                            bucket.get("status_4xx", {}).get("doc_count", 0)
+                        ),
+                        status_5xx=int(
+                            bucket.get("status_5xx", {}).get("doc_count", 0)
+                        ),
+                        p95_ms=safe_float(
+                            bucket.get("latency", {})
+                            .get("values", {})
+                            .get("95.0")
+                        ),
+                    )
+                )
+            after_key = aggregation.get("after_key")
+            if not after_key:
+                break
+        return route_metrics
+
     async def ensure_metrics_index(self) -> None:
         settings = get_settings()
         index_name = settings.http_access_metrics_index
@@ -494,6 +758,7 @@ class HttpAccessService:
         time_to: datetime,
         size: int = 20,
         prefer_latency: bool = False,
+        route_keys: list[str] | None = None,
     ) -> list[AccessSample]:
         """Fetch privacy-safe representative events for one anomalous site."""
         settings = get_settings()
@@ -505,10 +770,26 @@ class HttpAccessService:
         if not matching_indices:
             return []
 
+        filters: list[dict[str, Any]] = [
+            {
+                "range": {
+                    "@timestamp": {
+                        "gte": time_from.isoformat(),
+                        "lt": time_to.isoformat(),
+                    }
+                }
+            },
+            {"term": {"server_name.keyword": site}},
+        ]
+        if route_keys:
+            filters.append({"terms": {"lm_route_key": route_keys[:3]}})
+
         body = {
             "size": min(max(size, 1), 20),
             "track_total_hits": False,
-            "runtime_mappings": _RUNTIME_MAPPINGS,
+            "runtime_mappings": (
+                _ROUTE_RUNTIME_MAPPINGS if route_keys else _RUNTIME_MAPPINGS
+            ),
             "_source": [
                 "@timestamp",
                 "status",
@@ -526,17 +807,7 @@ class HttpAccessService:
             ],
             "query": {
                 "bool": {
-                    "filter": [
-                        {
-                            "range": {
-                                "@timestamp": {
-                                    "gte": time_from.isoformat(),
-                                    "lt": time_to.isoformat(),
-                                }
-                            }
-                        },
-                        {"term": {"server_name.keyword": site}},
-                    ]
+                    "filter": filters
                 }
             },
             "sort": (
@@ -656,28 +927,32 @@ class HttpAccessService:
                     int fragmentAt = path.indexOf('#');
                     if (fragmentAt >= 0) path = path.substring(0, fragmentAt);
                     if (!path.startsWith('/')) path = '/' + path;
+                    boolean trailingSlash = path.endsWith("/");
                     String[] segments = path.splitOnToken('/');
                     StringBuilder normalized = new StringBuilder();
                     for (String segment : segments) {
                         if (segment.length() == 0) continue;
                         boolean numeric = true;
                         for (int i = 0; i < segment.length(); i++) {
-                            char ch = segment.charAt(i);
-                            if (ch < '0' || ch > '9') {
+                            int code = (int)segment.charAt(i);
+                            if (code < 48 || code > 57) {
                                 numeric = false;
                                 break;
                             }
                         }
                         boolean uuid = segment.length() == 36
-                            && segment.charAt(8) == '-'
-                            && segment.charAt(13) == '-'
-                            && segment.charAt(18) == '-'
-                            && segment.charAt(23) == '-';
+                            && segment.substring(8, 9).equals("-")
+                            && segment.substring(13, 14).equals("-")
+                            && segment.substring(18, 19).equals("-")
+                            && segment.substring(23, 24).equals("-");
                         normalized.append('/');
                         normalized.append(uuid ? '{uuid}' : numeric ? '{id}' : segment);
                     }
                     ctx.lm_route = normalized.length() == 0
                         ? '/' : normalized.toString();
+                    if (trailingSlash && !ctx.lm_route.equals("/")) {
+                        ctx.lm_route += "/";
+                    }
                 }
             }
         """

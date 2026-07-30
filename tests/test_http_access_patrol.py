@@ -6,9 +6,12 @@ from logmind.domain.http_access.models import (
     AccessBaseline,
     AccessIncident,
     AccessMetric,
+    AccessRecovery,
+    AccessRouteMetric,
     AccessSample,
     aggregate_metrics,
     detect_incidents,
+    detect_route_incidents,
     is_allowed_site,
     normalize_request,
 )
@@ -119,6 +122,76 @@ def test_detects_5xx_latency_and_uses_source_specific_baselines():
     assert all(item.priority in {"P0", "P1"} for item in incidents)
 
 
+def test_latency_requires_a_nonzero_ready_baseline():
+    window = aggregate_metrics(
+        [
+            AccessMetric(
+                source="nginx",
+                site="activity.gyyx.cn",
+                minute=_utc(),
+                request_count=500,
+                p95_ms=3200,
+            )
+        ]
+    )
+
+    assert detect_incidents(window, {}) == []
+    assert detect_incidents(
+        window,
+        {
+            ("nginx", "activity.gyyx.cn"): AccessBaseline(
+                source="nginx",
+                site="activity.gyyx.cn",
+                sample_count=100,
+                request_count=500,
+                p95_ms=0,
+            )
+        },
+    ) == []
+
+
+def test_route_4xx_detects_concentration_hidden_by_site_traffic():
+    incidents = detect_route_incidents(
+        [
+            AccessRouteMetric(
+                source="nginx",
+                site="api.qibao.tjlong.cn",
+                route_key="GET /notice/noread/{uuid}/",
+                request_count=116,
+                status_4xx=19,
+                p95_ms=2,
+            ),
+            AccessRouteMetric(
+                source="nginx",
+                site="api.qibao.tjlong.cn",
+                route_key="GET /healthy",
+                request_count=5000,
+                status_4xx=0,
+                p95_ms=8,
+            ),
+        ]
+    )
+
+    assert len(incidents) == 1
+    assert incidents[0].route_key == "GET /notice/noread/{uuid}/"
+    assert incidents[0].current_value == 19 / 116
+    assert "GET /notice/noread/{uuid}/" in incidents[0].key
+
+
+def test_route_4xx_ignores_single_400():
+    assert detect_route_incidents(
+        [
+            AccessRouteMetric(
+                source="nginx",
+                site="api.qibao.tjlong.cn",
+                route_key="GET /notice/noread/{uuid}/",
+                request_count=1,
+                status_4xx=1,
+            )
+        ]
+    ) == []
+
+
 class _FakeIndices:
     async def exists(self, **_kwargs):
         return False
@@ -188,6 +261,60 @@ def test_composite_aggregation_counts_more_than_ten_thousand_documents():
     )
 
 
+def test_route_aggregation_handles_many_server_names_in_one_query():
+    es = _FakeEs(
+        [
+            {
+                "aggregations": {
+                    "by_site_route": {
+                        "buckets": [
+                            {
+                                "key": {
+                                    "site": "api.qibao.tjlong.cn",
+                                    "route": "GET /notice/noread/{uuid}/",
+                                },
+                                "doc_count": 49,
+                                "status_4xx": {"doc_count": 49},
+                                "status_5xx": {"doc_count": 0},
+                                "latency": {"values": {"95.0": 2.0}},
+                            },
+                            {
+                                "key": {
+                                    "site": "pigeon.gyyx.cn",
+                                    "route": "GET /alarm/current/list",
+                                },
+                                "doc_count": 1000,
+                                "status_4xx": {"doc_count": 0},
+                                "status_5xx": {"doc_count": 0},
+                                "latency": {"values": {"95.0": 6.0}},
+                            },
+                        ]
+                    }
+                }
+            }
+        ]
+    )
+    service = HttpAccessService(es=es)
+
+    metrics = asyncio.run(
+        service._collect_route_source(
+            index_name="nginx-log-json",
+            source="nginx",
+            sites=["api.qibao.tjlong.cn", "pigeon.gyyx.cn"],
+            time_from=_utc(),
+            time_to=_utc() + timedelta(minutes=5),
+        )
+    )
+
+    assert len(metrics) == 2
+    assert len(es.search_calls) == 1
+    body = es.search_calls[0]["body"]
+    assert body["query"]["bool"]["filter"][1]["terms"][
+        "server_name.keyword"
+    ] == ["api.qibao.tjlong.cn", "pigeon.gyyx.cn"]
+    assert "lm_route_key" in body["runtime_mappings"]
+
+
 def test_sample_fetch_never_requests_ip_or_sensitive_body(monkeypatch):
     es = _FakeEs(
         [
@@ -227,6 +354,7 @@ def test_sample_fetch_never_requests_ip_or_sensitive_body(monkeypatch):
             time_from=_utc(),
             time_to=_utc() + timedelta(minutes=5),
             prefer_latency=False,
+            route_keys=["GET /notice/noread/{uuid}/"],
         )
     )
 
@@ -237,6 +365,12 @@ def test_sample_fetch_never_requests_ip_or_sensitive_body(monkeypatch):
     assert "client_ip" not in source_fields
     assert "request_body" not in source_fields
     assert "http_Authorization" not in source_fields
+    body = es.search_calls[0]["body"]
+    assert body["query"]["bool"]["filter"][-1] == {
+        "terms": {
+            "lm_route_key": ["GET /notice/noread/{uuid}/"]
+        }
+    }
 
 
 def test_ai_summary_rejects_unsupported_database_claims():
@@ -336,6 +470,44 @@ def test_same_site_from_nginx_and_ingress_counts_as_one_site():
     assert _count_priority_sites(incidents) == (0, 1)
 
 
+def test_route_notification_names_each_interface_without_redundant_main_route():
+    incidents = [
+        AccessIncident(
+            source="nginx",
+            site="api.qibao.tjlong.cn",
+            kind="route_4xx",
+            priority="P1",
+            request_count=219,
+            current_value=22 / 219,
+            baseline_value=0,
+            status_4xx=22,
+            route_key="POST /statistics/operatorrecord",
+        ),
+        AccessIncident(
+            source="nginx",
+            site="api.qibao.tjlong.cn",
+            kind="route_4xx",
+            priority="P1",
+            request_count=116,
+            current_value=19 / 116,
+            baseline_value=0,
+            status_4xx=19,
+            route_key="GET /notice/noread/{uuid}/",
+        ),
+    ]
+
+    message = build_http_access_notification(
+        incidents,
+        [],
+        time_from=_utc(),
+        time_to=_utc() + timedelta(minutes=5),
+    )
+
+    assert "POST /statistics/operatorrecord · 4xx 22/219" in message
+    assert "GET /notice/noread/{uuid}/ · 4xx 19/116" in message
+    assert "- 主要接口:" not in message
+
+
 class _FakeRedis:
     def __init__(self):
         self.value = None
@@ -388,6 +560,33 @@ def test_traffic_drop_requires_two_windows_and_recovery_requires_two():
     asyncio.run(scenario())
 
 
+def test_latency_requires_two_consecutive_windows():
+    redis = _FakeRedis()
+    state = HttpAccessAlertState(redis=redis)
+    incident = AccessIncident(
+        source="nginx",
+        site="activity.gyyx.cn",
+        kind="latency",
+        priority="P1",
+        request_count=500,
+        current_value=3200,
+        baseline_value=300,
+        p95_ms=3200,
+    )
+
+    async def scenario():
+        first = await state.evaluate([incident], now=_utc())
+        assert first.due == []
+        await state.save(first, delivered=True)
+        second = await state.evaluate(
+            [incident],
+            now=_utc() + timedelta(minutes=5),
+        )
+        assert [item.key for item in second.due] == [incident.key]
+
+    asyncio.run(scenario())
+
+
 class _ShadowService:
     async def collect_window(self, _time_from, _time_to):
         return []
@@ -436,6 +635,61 @@ def test_global_patrol_normal_path_does_not_open_business_line_db(monkeypatch):
 
     assert result["incident_count"] == 0
     assert result["notification_sent"] is False
+
+
+class _RecoveryOnlyState(_ShadowState):
+    async def evaluate(self, _incidents, **kwargs):
+        from logmind.domain.http_access.state import AccessNotificationBatch
+
+        return AccessNotificationBatch(
+            due=[],
+            recoveries=[
+                AccessRecovery(
+                    source="nginx",
+                    site="api.elves.gyyx.cn",
+                    kind="latency",
+                    priority="P1",
+                )
+            ],
+            next_state={},
+            previous_state={},
+            evaluated_at=kwargs["now"],
+        )
+
+
+def test_recovery_notification_is_disabled_by_default(monkeypatch):
+    settings = SimpleNamespace(
+        http_access_window_minutes=5,
+        http_access_baseline_days=7,
+        http_access_notification_enabled=True,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.http_access.tasks.get_settings",
+        lambda: settings,
+    )
+    sent_messages = []
+
+    async def fake_send(message):
+        sent_messages.append(message)
+        return True
+
+    monkeypatch.setattr(
+        "logmind.domain.http_access.tasks._send_notification",
+        fake_send,
+    )
+
+    result = asyncio.run(
+        _run_http_access_patrol(
+            now=_utc(),
+            service=_ShadowService(),
+            alert_state=_RecoveryOnlyState(),
+        )
+    )
+
+    assert sent_messages == []
+    assert result["notification_sent"] is False
+    assert result["recovery_count"] == 1
+    assert result["notification_recovery_count"] == 0
 
 
 class _IncidentService:

@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     # This patrol is intentionally independent from the business_line table.
     http_access_patrol_enabled: bool = False
     http_access_notification_enabled: bool = False
+    http_access_recovery_notification_enabled: bool = False
     http_access_ai_enabled: bool = True
     http_access_indexes: str = (
         "nginx-log-json,ingress-nginx-master-external-log"

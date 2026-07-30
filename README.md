@@ -565,16 +565,20 @@ LogMind 内置多层 Token 消耗控制机制，通过 `.env` 配置：
 
 访问巡检与 `business_line` 完全独立，固定聚合
 `nginx-log-json` 和 `ingress-nginx-master-external-log`，按
-`server_name`、来源、状态码和耗时检测异常。启用时建议先静默运行：
+`server_name`、来源、状态码和耗时检测异常。站点 4xx 达到候选量后，
+会在候选站点内继续按标准化接口聚合，不会为大量 `server_name`
+逐个创建任务或逐站查询。启用时建议先静默运行：
 
 ```dotenv
 HTTP_ACCESS_PATROL_ENABLED=true
 HTTP_ACCESS_NOTIFICATION_ENABLED=false
+HTTP_ACCESS_RECOVERY_NOTIFICATION_ENABLED=false
 HTTP_ACCESS_TENANT_ID=<单租户部署可留空>
 ```
 
 确认候选异常正常后，再设置 `HTTP_ACCESS_NOTIFICATION_ENABLED=true`。
-每个5分钟窗口最多发送一条企微汇总；完整配置见 `.env.example`。
+每个5分钟窗口最多发送一条企微汇总；默认不发送单独的绿色恢复通知。
+完整配置见 `.env.example`。
 
 历史索引存在字段类型冲突时，巡检会自动使用运行时字段兼容。后续日志可安装
 标准化 ingest pipeline：
