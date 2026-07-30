@@ -16,10 +16,10 @@ from logmind.core.exceptions import (
     AllProvidersFailedError,
     AuthenticationError,
     AuthorizationError,
+    LogMindError,
     NotFoundError,
     PipelineError,
     ProviderError,
-    LogMindError,
     QuotaExceededError,
 )
 from logmind.core.logging import setup_logging
@@ -39,15 +39,15 @@ async def lifespan(app: FastAPI):
     )
 
     # Import all models to register them with SQLAlchemy
-    import logmind.domain.tenant.models  # noqa: F401
-    import logmind.domain.provider.models  # noqa: F401
-    import logmind.domain.prompt.models  # noqa: F401
-    import logmind.domain.analysis.models  # noqa: F401
     import logmind.domain.alert.models  # noqa: F401
-    import logmind.domain.rag.models  # noqa: F401
+    import logmind.domain.analysis.models  # noqa: F401
+    import logmind.domain.prompt.models  # noqa: F401
 
     # Import provider adapters to trigger registration
     import logmind.domain.provider.adapters  # noqa: F401
+    import logmind.domain.provider.models  # noqa: F401
+    import logmind.domain.rag.models  # noqa: F401
+    import logmind.domain.tenant.models  # noqa: F401
 
     # Initialize database
     from logmind.core.database import init_db
@@ -163,29 +163,31 @@ def _register_routes(app: FastAPI):
         return Response(content=get_metrics_response(), media_type="text/plain")
 
     # Domain routers
-    from logmind.domain.tenant.router import auth_router, biz_router, router as tenant_router
-    from logmind.domain.provider.router import router as provider_router
-    from logmind.domain.prompt.router import router as prompt_router
-    from logmind.domain.log.router import router as log_router
-    from logmind.domain.log.nl_query_router import router as nl_query_router
-    from logmind.domain.analysis.router import router as analysis_router
+    from logmind.domain.alert.context_router import router as alert_context_router
+    from logmind.domain.alert.router import router as alert_router
     from logmind.domain.analysis.known_issues_router import router as known_issues_router
     from logmind.domain.analysis.report_router import router as report_router
-    from logmind.domain.alert.router import router as alert_router
+    from logmind.domain.analysis.rootcause_router import router as rootcause_router
+    from logmind.domain.analysis.router import router as analysis_router
+    from logmind.domain.analysis.timeline_router import router as timeline_router
+    from logmind.domain.chat.router import router as chat_router
+    from logmind.domain.dashboard.heatmap_router import router as heatmap_router
+    from logmind.domain.dashboard.patrol_router import router as patrol_router
+    from logmind.domain.dashboard.pivot_router import router as pivot_router
+    from logmind.domain.dashboard.report_generator import router as weekly_report_router
     from logmind.domain.dashboard.router import router as dashboard_router
     from logmind.domain.dashboard.sla_router import router as sla_router
+    from logmind.domain.dashboard.topology_router import router as topology_router
+    from logmind.domain.http_access.router import router as http_access_router
+    from logmind.domain.log.nl_query_router import router as nl_query_router
+    from logmind.domain.log.replay_router import router as replay_router
+    from logmind.domain.log.router import router as log_router
+    from logmind.domain.prompt.router import router as prompt_router
+    from logmind.domain.provider.router import router as provider_router
     from logmind.domain.rag.router import router as rag_router
     from logmind.domain.tenant.audit_router import router as audit_router
-    from logmind.domain.chat.router import router as chat_router
-    from logmind.domain.dashboard.topology_router import router as topology_router
-    from logmind.domain.analysis.timeline_router import router as timeline_router
-    from logmind.domain.dashboard.heatmap_router import router as heatmap_router
-    from logmind.domain.log.replay_router import router as replay_router
-    from logmind.domain.alert.context_router import router as alert_context_router
-    from logmind.domain.analysis.rootcause_router import router as rootcause_router
-    from logmind.domain.dashboard.report_generator import router as weekly_report_router
-    from logmind.domain.dashboard.pivot_router import router as pivot_router
-    from logmind.domain.dashboard.patrol_router import router as patrol_router
+    from logmind.domain.tenant.router import auth_router, biz_router
+    from logmind.domain.tenant.router import router as tenant_router
 
     api_router.include_router(auth_router)
     api_router.include_router(tenant_router)
@@ -198,6 +200,7 @@ def _register_routes(app: FastAPI):
     api_router.include_router(known_issues_router)
     api_router.include_router(report_router)
     api_router.include_router(alert_router)
+    api_router.include_router(http_access_router)
     api_router.include_router(dashboard_router)
     api_router.include_router(sla_router)
     api_router.include_router(rag_router)

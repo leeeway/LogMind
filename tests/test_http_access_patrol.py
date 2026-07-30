@@ -15,6 +15,7 @@ from logmind.domain.http_access.models import (
     is_allowed_site,
     normalize_request,
 )
+from logmind.domain.http_access.router import get_http_access_patrol_status
 from logmind.domain.http_access.service import HttpAccessService
 from logmind.domain.http_access.state import HttpAccessAlertState
 from logmind.domain.http_access.tasks import (
@@ -263,6 +264,11 @@ class _FakeIndices:
         return False
 
 
+class _ExistingIndices:
+    async def exists(self, **_kwargs):
+        return True
+
+
 class _FakeEs:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -384,6 +390,66 @@ def test_route_aggregation_handles_many_server_names_in_one_query():
         "server_name.keyword"
     ] == ["api.qibao.tjlong.cn", "pigeon.gyyx.cn"]
     assert "lm_route_key" in body["runtime_mappings"]
+
+
+def test_baseline_uses_same_time_slots_and_medians(monkeypatch):
+    es = _FakeEs(
+        [
+            {
+                "aggregations": {
+                    "by_source_site": {
+                        "buckets": [
+                            {
+                                "key": {
+                                    "source": "nginx",
+                                    "site": "creator-ops.gyyx.cn",
+                                },
+                                "samples": {"value": 240},
+                                "request_median": {
+                                    "values": {"50.0": 20.0}
+                                },
+                                "request_sum": {"value": 2400},
+                                "status_4xx_sum": {"value": 24},
+                                "status_5xx_sum": {"value": 12},
+                                "p95_median": {
+                                    "values": {"50.0": 180.0}
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        ]
+    )
+    es.indices = _ExistingIndices()
+    monkeypatch.setattr(
+        "logmind.domain.http_access.service.get_settings",
+        lambda: SimpleNamespace(
+            http_access_metrics_index="logmind-http-access-metrics-v1",
+            http_access_baseline_slot_minutes=60,
+        ),
+    )
+    service = HttpAccessService(es=es)
+
+    baselines = asyncio.run(
+        service.load_baselines(
+            before=_utc(hour=7, minute=45),
+            window_minutes=5,
+            days=7,
+        )
+    )
+
+    baseline = baselines[("nginx", "creator-ops.gyyx.cn")]
+    assert baseline.request_count == 100
+    assert baseline.p95_ms == 180
+    assert baseline.rate_5xx == 0.005
+    assert baseline.sample_count == 4
+    assert baseline.is_ready
+    query = es.search_calls[0]["body"]["query"]["bool"]
+    assert len(query["should"]) == 7
+    first_range = query["should"][0]["range"]["minute"]
+    assert first_range["gte"] == "2026-07-29T07:15:00+00:00"
+    assert first_range["lt"] == "2026-07-29T08:15:00+00:00"
 
 
 def test_sample_fetch_never_requests_ip_or_sensitive_body(monkeypatch):
@@ -589,6 +655,19 @@ class _FakeRedis:
     async def setex(self, key, _ttl, value):
         self.values[key] = value
 
+    async def set(self, key, value, *, ex=None, nx=False):
+        del ex
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    async def eval(self, _script, _numkeys, key, token):
+        if self.values.get(key) != token:
+            return 0
+        del self.values[key]
+        return 1
+
 
 def test_traffic_drop_requires_two_windows_and_recovery_requires_two():
     redis = _FakeRedis()
@@ -658,7 +737,9 @@ def test_latency_requires_two_consecutive_windows():
     asyncio.run(scenario())
 
 
-def test_p1_summary_has_global_cooldown_but_p0_bypasses(monkeypatch):
+def test_summary_reservation_is_atomic_and_p0_bypasses_p1_cooldown(
+    monkeypatch,
+):
     settings = SimpleNamespace(
         http_access_dedup_minutes=30,
         http_access_notification_cooldown_minutes=30,
@@ -689,20 +770,40 @@ def test_p1_summary_has_global_cooldown_but_p0_bypasses(monkeypatch):
     )
 
     async def scenario():
-        assert await state.can_send_summary([p1], now=_utc())
-        await state.mark_summary_sent(now=_utc())
-        assert not await state.can_send_summary(
-            [p1],
-            now=_utc() + timedelta(minutes=5),
-        )
-        assert await state.can_send_summary(
-            [p1],
-            now=_utc() + timedelta(minutes=30),
-        )
-        assert await state.can_send_summary(
-            [p0],
-            now=_utc() + timedelta(minutes=5),
-        )
+        p1_lease = await state.reserve_summary([p1])
+        assert p1_lease is not None
+        assert await state.reserve_summary([p1]) is None
+
+        await state.finish_summary(p1_lease, delivered=False)
+        retry_lease = await state.reserve_summary([p1])
+        assert retry_lease is not None
+        await state.finish_summary(retry_lease, delivered=True)
+        assert await state.reserve_summary([p1]) is None
+
+        p0_lease = await state.reserve_summary([p0])
+        assert p0_lease is not None
+        assert await state.reserve_summary([p0]) is None
+
+    asyncio.run(scenario())
+
+
+def test_patrol_lease_and_run_snapshot_are_shared_in_redis():
+    state = HttpAccessAlertState(redis=_FakeRedis())
+
+    async def scenario():
+        lease = await state.acquire_patrol_lease(ttl_seconds=300)
+        assert lease is not None
+        assert await state.acquire_patrol_lease(ttl_seconds=300) is None
+        await state.release_patrol_lease(lease)
+        assert await state.acquire_patrol_lease(ttl_seconds=300) is not None
+
+        snapshot = {
+            "run_status": "normal",
+            "metric_count": 12,
+            "notification_sent": False,
+        }
+        await state.save_run_snapshot(snapshot)
+        assert await state.get_run_snapshot() == snapshot
 
     asyncio.run(scenario())
 
@@ -909,3 +1010,47 @@ def test_patrol_sends_exactly_one_message_for_multiple_sites(monkeypatch):
     assert len(sent_messages) == 1
     assert "api.qibao.tjlong.cn" in sent_messages[0]
     assert "pigeon.gyyx.cn" in sent_messages[0]
+
+
+def test_http_access_status_exposes_safe_settings_and_last_run(monkeypatch):
+    settings = SimpleNamespace(
+        http_access_patrol_enabled=True,
+        http_access_notification_enabled=False,
+        http_access_recovery_notification_enabled=False,
+        http_access_ai_enabled=True,
+        http_access_window_minutes=5,
+        http_access_notification_cooldown_minutes=30,
+        http_access_baseline_days=7,
+        http_access_baseline_slot_minutes=60,
+        http_access_index_list=(
+            "nginx-log-json",
+            "ingress-nginx-master-external-log",
+        ),
+    )
+    monkeypatch.setattr(
+        "logmind.domain.http_access.router.get_settings",
+        lambda: settings,
+    )
+
+    async def fake_snapshot():
+        return {
+            "run_status": "normal",
+            "metric_count": 42,
+        }
+
+    monkeypatch.setattr(
+        "logmind.domain.http_access.router."
+        "http_access_alert_state.get_run_snapshot",
+        fake_snapshot,
+    )
+
+    status = asyncio.run(get_http_access_patrol_status())
+
+    assert status["mode"] == "shadow"
+    assert status["baseline"] == {
+        "days": 7,
+        "same_time_slot_minutes": 60,
+    }
+    assert status["last_run"]["metric_count"] == 42
+    assert "webhook_url" not in status
+    assert "tenant_id" not in status

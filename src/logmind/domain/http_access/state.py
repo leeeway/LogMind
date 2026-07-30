@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -13,8 +14,12 @@ from logmind.domain.http_access.models import AccessIncident, AccessRecovery
 logger = get_logger(__name__)
 
 _STATE_KEY = "logmind:http_access:alert_state:v1"
-_SUMMARY_LAST_SENT_KEY = "logmind:http_access:summary:last_sent:v1"
+_PATROL_LEASE_KEY = "logmind:http_access:patrol:lease:v1"
+_SUMMARY_COOLDOWN_KEY = "logmind:http_access:summary:last_sent:v1"
+_SUMMARY_P0_LEASE_KEY = "logmind:http_access:summary:p0:lease:v1"
+_RUN_SNAPSHOT_KEY = "logmind:http_access:last_run:v1"
 _STATE_TTL_SECONDS = 14 * 24 * 60 * 60
+_RUN_SNAPSHOT_TTL_SECONDS = 7 * 24 * 60 * 60
 _PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
 
 
@@ -25,6 +30,12 @@ class AccessNotificationBatch:
     next_state: dict[str, dict]
     previous_state: dict[str, dict]
     evaluated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AccessLease:
+    key: str
+    token: str
 
 
 class HttpAccessAlertState:
@@ -164,47 +175,107 @@ class HttpAccessAlertState:
         except Exception as exc:
             logger.warning("http_access_state_save_failed", error=str(exc))
 
-    async def can_send_summary(
+    async def acquire_patrol_lease(self, *, ttl_seconds: int) -> AccessLease | None:
+        """Prevent overlapping Beat deliveries or multiple workers from running."""
+        return await self._acquire_lease(
+            _PATROL_LEASE_KEY,
+            ttl_seconds=max(60, ttl_seconds),
+        )
+
+    async def release_patrol_lease(self, lease: AccessLease) -> None:
+        await self._release_lease(lease)
+
+    async def reserve_summary(
         self,
         incidents: list[AccessIncident],
-        *,
-        now: datetime,
-    ) -> bool:
-        """Globally rate-limit P1 summaries while allowing P0 immediately."""
-        if any(incident.priority == "P0" for incident in incidents):
-            return True
-        cooldown = timedelta(
-            minutes=getattr(
-                get_settings(),
-                "http_access_notification_cooldown_minutes",
-                30,
-            )
-        )
-        try:
-            raw = await self.redis.get(_SUMMARY_LAST_SENT_KEY)
-        except Exception as exc:
-            logger.warning("http_access_summary_cooldown_load_failed", error=str(exc))
-            return True
-        last_sent = _parse_datetime(_decode_redis_value(raw))
-        return last_sent is None or now - last_sent >= cooldown
+    ) -> AccessLease | None:
+        """
+        Atomically reserve one summary delivery.
 
-    async def mark_summary_sent(self, *, now: datetime) -> None:
-        cooldown_seconds = (
-            getattr(
+        P1 uses the global cooldown key. P0 bypasses that cooldown but still
+        receives a short lease so concurrent workers cannot duplicate it.
+        """
+        is_p0 = any(incident.priority == "P0" for incident in incidents)
+        key = _SUMMARY_P0_LEASE_KEY if is_p0 else _SUMMARY_COOLDOWN_KEY
+        ttl_seconds = (
+            60
+            if is_p0
+            else getattr(
                 get_settings(),
                 "http_access_notification_cooldown_minutes",
                 30,
             )
             * 60
         )
+        return await self._acquire_lease(
+            key,
+            ttl_seconds=ttl_seconds,
+        )
+
+    async def finish_summary(
+        self,
+        lease: AccessLease,
+        *,
+        delivered: bool,
+    ) -> None:
+        # Successful reservations intentionally live until their TTL expires.
+        if not delivered:
+            await self._release_lease(lease)
+
+    async def save_run_snapshot(self, result: dict) -> None:
         try:
             await self.redis.setex(
-                _SUMMARY_LAST_SENT_KEY,
-                cooldown_seconds,
-                now.isoformat(),
+                _RUN_SNAPSHOT_KEY,
+                _RUN_SNAPSHOT_TTL_SECONDS,
+                json.dumps(result, ensure_ascii=False),
             )
         except Exception as exc:
-            logger.warning("http_access_summary_cooldown_save_failed", error=str(exc))
+            logger.warning("http_access_run_snapshot_save_failed", error=str(exc))
+
+    async def get_run_snapshot(self) -> dict:
+        try:
+            raw = await self.redis.get(_RUN_SNAPSHOT_KEY)
+            parsed = json.loads(raw) if raw else {}
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            logger.warning("http_access_run_snapshot_load_failed", error=str(exc))
+            return {}
+
+    async def _acquire_lease(
+        self,
+        key: str,
+        *,
+        ttl_seconds: int,
+    ) -> AccessLease | None:
+        token = secrets.token_urlsafe(18)
+        try:
+            acquired = await self.redis.set(
+                key,
+                token,
+                ex=ttl_seconds,
+                nx=True,
+            )
+        except Exception as exc:
+            logger.warning("http_access_lease_acquire_failed", key=key, error=str(exc))
+            # Redis failure must not suppress a real alert.
+            return AccessLease(key="", token="")
+        return AccessLease(key=key, token=token) if acquired else None
+
+    async def _release_lease(self, lease: AccessLease) -> None:
+        if not lease.key or not lease.token:
+            return
+        script = (
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('del', KEYS[1]) else return 0 end"
+        )
+        try:
+            await self.redis.eval(script, 1, lease.key, lease.token)
+        except Exception as exc:
+            logger.warning(
+                "http_access_lease_release_failed",
+                key=lease.key,
+                error=str(exc),
+            )
 
 
 def _parse_datetime(value: object) -> datetime | None:
@@ -217,12 +288,6 @@ def _parse_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed
-
-
-def _decode_redis_value(value: object) -> object:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore")
-    return value
 
 
 def _is_escalation(current: str, previous: str) -> bool:

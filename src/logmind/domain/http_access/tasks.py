@@ -41,7 +41,7 @@ def scheduled_http_access_patrol():
     if not settings.http_access_patrol_enabled:
         logger.info("http_access_patrol_disabled")
         return
-    run_async(_run_http_access_patrol())
+    run_async(_run_scheduled_http_access_patrol())
 
 
 @celery_app.task(name="logmind.domain.http_access.tasks.cleanup_http_access_metrics")
@@ -55,6 +55,37 @@ def cleanup_http_access_metrics():
 async def _cleanup_http_access_metrics() -> None:
     deleted = await http_access_service.cleanup_metrics()
     logger.info("http_access_metrics_cleanup_completed", deleted=deleted)
+
+
+async def _run_scheduled_http_access_patrol() -> dict[str, Any]:
+    """Run one patrol under a distributed lease shared by all workers."""
+    settings = get_settings()
+    lease = await http_access_alert_state.acquire_patrol_lease(
+        ttl_seconds=settings.http_access_window_minutes * 60,
+    )
+    if lease is None:
+        result = {
+            "run_status": "skipped_overlap",
+            "notification_sent": False,
+            "completed_at": datetime.now(UTC).isoformat(),
+        }
+        await http_access_alert_state.save_run_snapshot(result)
+        logger.info("http_access_patrol_overlap_skipped")
+        return result
+    try:
+        return await _run_http_access_patrol()
+    except Exception as exc:
+        await http_access_alert_state.save_run_snapshot(
+            {
+                "run_status": "failed",
+                "notification_sent": False,
+                "error": str(exc)[:300],
+                "completed_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        raise
+    finally:
+        await http_access_alert_state.release_patrol_lease(lease)
 
 
 async def _run_http_access_patrol(
@@ -131,7 +162,7 @@ async def _run_http_access_patrol(
     if not batch.due and not notification_recoveries:
         await alert_state.save(batch, delivered=True)
         logger.info("http_access_patrol_normal", **result)
-        return result
+        return await _finalize_patrol_result(alert_state, result, "normal")
 
     if not settings.http_access_notification_enabled:
         await alert_state.save(batch, delivered=False)
@@ -140,17 +171,17 @@ async def _run_http_access_patrol(
             sites=sorted({incident.site for incident in batch.due})[:20],
             **result,
         )
-        return result
+        return await _finalize_patrol_result(alert_state, result, "shadow")
 
-    can_send_summary = getattr(alert_state, "can_send_summary", None)
-    if callable(can_send_summary) and not await can_send_summary(
-        batch.due,
-        now=time_to,
-    ):
+    reservation = None
+    reserve_summary = getattr(alert_state, "reserve_summary", None)
+    if callable(reserve_summary):
+        reservation = await reserve_summary(batch.due)
+    if callable(reserve_summary) and reservation is None:
         await alert_state.save(batch, delivered=False)
         result["notification_throttled"] = True
         logger.info("http_access_notification_throttled", **result)
-        return result
+        return await _finalize_patrol_result(alert_state, result, "throttled")
 
     display_incidents, omitted_sites = _select_notification_incidents(
         batch.due,
@@ -182,11 +213,17 @@ async def _run_http_access_patrol(
         total_p0_sites=total_p0_sites,
         total_p1_sites=total_p1_sites,
     )
-    delivered = await _send_notification(message)
+    try:
+        delivered = await _send_notification(message)
+    except Exception:
+        finish_summary = getattr(alert_state, "finish_summary", None)
+        if reservation is not None and callable(finish_summary):
+            await finish_summary(reservation, delivered=False)
+        raise
     await alert_state.save(batch, delivered=delivered)
-    mark_summary_sent = getattr(alert_state, "mark_summary_sent", None)
-    if delivered and callable(mark_summary_sent):
-        await mark_summary_sent(now=time_to)
+    finish_summary = getattr(alert_state, "finish_summary", None)
+    if reservation is not None and callable(finish_summary):
+        await finish_summary(reservation, delivered=delivered)
     result["notification_sent"] = delivered
 
     if tenant_id:
@@ -203,6 +240,20 @@ async def _run_http_access_patrol(
             logger.error("http_access_history_persist_failed", error=str(exc))
 
     logger.info("http_access_patrol_completed", **result)
+    status = "notified" if delivered else "notification_failed"
+    return await _finalize_patrol_result(alert_state, result, status)
+
+
+async def _finalize_patrol_result(
+    alert_state,
+    result: dict[str, Any],
+    status: str,
+) -> dict[str, Any]:
+    result["run_status"] = status
+    result["completed_at"] = datetime.now(UTC).isoformat()
+    save_snapshot = getattr(alert_state, "save_run_snapshot", None)
+    if callable(save_snapshot):
+        await save_snapshot(result)
     return result
 
 

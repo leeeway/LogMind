@@ -676,11 +676,30 @@ class HttpAccessService:
         window_minutes: int,
         days: int = 7,
     ) -> dict[tuple[str, str], AccessBaseline]:
-        """Load all source/site baselines from the compact metric index."""
+        """Load robust same-time-of-day baselines from the metric index."""
         settings = get_settings()
         index_name = settings.http_access_metrics_index
         if not await self.es.indices.exists(index=index_name):
             return {}
+
+        slot_minutes = max(
+            window_minutes,
+            getattr(settings, "http_access_baseline_slot_minutes", 60),
+        )
+        half_slot = timedelta(minutes=slot_minutes / 2)
+        comparable_ranges = []
+        for day_offset in range(1, days + 1):
+            center = before - timedelta(days=day_offset)
+            comparable_ranges.append(
+                {
+                    "range": {
+                        "minute": {
+                            "gte": (center - half_slot).isoformat(),
+                            "lt": (center + half_slot).isoformat(),
+                        }
+                    }
+                }
+            )
 
         after_key: dict | None = None
         baselines: dict[tuple[str, str], AccessBaseline] = {}
@@ -699,11 +718,9 @@ class HttpAccessService:
                 "size": 0,
                 "track_total_hits": False,
                 "query": {
-                    "range": {
-                        "minute": {
-                            "gte": (before - timedelta(days=days)).isoformat(),
-                            "lt": before.isoformat(),
-                        }
+                    "bool": {
+                        "should": comparable_ranges,
+                        "minimum_should_match": 1,
                     }
                 },
                 "aggs": {
@@ -711,11 +728,23 @@ class HttpAccessService:
                         "composite": composite,
                         "aggs": {
                             "samples": {"value_count": {"field": "minute"}},
-                            "request_avg": {"avg": {"field": "request_count"}},
+                            "request_median": {
+                                "percentiles": {
+                                    "field": "request_count",
+                                    "percents": [50],
+                                    "keyed": True,
+                                }
+                            },
                             "request_sum": {"sum": {"field": "request_count"}},
                             "status_4xx_sum": {"sum": {"field": "status_4xx"}},
                             "status_5xx_sum": {"sum": {"field": "status_5xx"}},
-                            "p95_avg": {"avg": {"field": "p95_ms"}},
+                            "p95_median": {
+                                "percentiles": {
+                                    "field": "p95_ms",
+                                    "percents": [50],
+                                    "keyed": True,
+                                }
+                            },
                         },
                     }
                 },
@@ -742,21 +771,29 @@ class HttpAccessService:
                     if request_sum
                     else 0.0
                 )
+                comparable_day_count = int(
+                    safe_float(bucket.get("samples", {}).get("value"))
+                    // slot_minutes
+                )
                 baselines[(source, site)] = AccessBaseline(
                     source=source,
                     site=site,
-                    sample_count=int(
-                        safe_float(bucket.get("samples", {}).get("value"))
-                    ),
+                    sample_count=comparable_day_count,
                     request_count=(
                         safe_float(
-                            bucket.get("request_avg", {}).get("value")
+                            bucket.get("request_median", {})
+                            .get("values", {})
+                            .get("50.0")
                         )
                         * window_minutes
                     ),
                     rate_4xx=rate_4xx,
                     rate_5xx=rate_5xx,
-                    p95_ms=safe_float(bucket.get("p95_avg", {}).get("value")),
+                    p95_ms=safe_float(
+                        bucket.get("p95_median", {})
+                        .get("values", {})
+                        .get("50.0")
+                    ),
                 )
 
             after_key = aggregation.get("after_key")
