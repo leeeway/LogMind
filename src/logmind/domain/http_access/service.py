@@ -1,0 +1,714 @@
+"""Elasticsearch collection and metric storage for global HTTP access patrol."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from elasticsearch.helpers import async_bulk
+
+from logmind.core.config import get_settings
+from logmind.core.logging import get_logger
+from logmind.domain.http_access.models import (
+    AccessBaseline,
+    AccessMetric,
+    AccessSample,
+    is_allowed_site,
+    normalize_request,
+    normalize_site,
+    safe_float,
+    safe_int,
+)
+
+logger = get_logger(__name__)
+
+_COMPOSITE_PAGE_SIZE = 1000
+_INGEST_PIPELINE_ID = "logmind-http-access-normalize-v1"
+
+# Historical data has text/long mapping conflicts. Runtime fields read from
+# _source so one query works across all existing data-stream backing indices.
+_RUNTIME_MAPPINGS = {
+    "lm_status_code": {
+        "type": "long",
+        "script": {
+            "source": """
+                def value = params._source.containsKey('lm_http_status_code')
+                    ? params._source.lm_http_status_code : params._source.status;
+                if (value != null) {
+                    String raw = value.toString().trim();
+                    if (raw.contains(',')) {
+                        raw = raw.substring(raw.lastIndexOf(',') + 1).trim();
+                    }
+                    if (raw.length() > 0 && raw != '-') {
+                        try { emit(Long.parseLong(raw)); } catch (Exception ignored) {}
+                    }
+                }
+            """,
+        },
+    },
+    "lm_upstream_status_code": {
+        "type": "long",
+        "script": {
+            "source": """
+                def value = params._source.containsKey('lm_upstream_status_code')
+                    ? params._source.lm_upstream_status_code : params._source.upstream_status;
+                if (value != null) {
+                    String raw = value.toString().trim();
+                    if (raw.contains(',')) {
+                        raw = raw.substring(raw.lastIndexOf(',') + 1).trim();
+                    }
+                    if (raw.length() > 0 && raw != '-') {
+                        try { emit(Long.parseLong(raw)); } catch (Exception ignored) {}
+                    }
+                }
+            """,
+        },
+    },
+    "lm_request_time_ms": {
+        "type": "double",
+        "script": {
+            "source": """
+                if (params._source.containsKey('lm_request_time_ms')
+                        && params._source.lm_request_time_ms != null) {
+                    try {
+                        emit(Double.parseDouble(
+                            params._source.lm_request_time_ms.toString()
+                        ));
+                    } catch (Exception ignored) {}
+                } else if (params._source.request_time != null) {
+                    try {
+                        emit(Double.parseDouble(
+                            params._source.request_time.toString()
+                        ) * 1000.0);
+                    } catch (Exception ignored) {}
+                }
+            """,
+        },
+    },
+    "lm_upstream_time_ms": {
+        "type": "double",
+        "script": {
+            "source": """
+                if (params._source.containsKey('lm_upstream_time_ms')
+                        && params._source.lm_upstream_time_ms != null) {
+                    try {
+                        emit(Double.parseDouble(
+                            params._source.lm_upstream_time_ms.toString()
+                        ));
+                    } catch (Exception ignored) {}
+                } else if (params._source.upstream_response_time != null) {
+                    String raw = params._source.upstream_response_time.toString().trim();
+                    if (raw.contains(',')) {
+                        raw = raw.substring(raw.lastIndexOf(',') + 1).trim();
+                    }
+                    if (raw.length() > 0 && raw != '-') {
+                        try { emit(Double.parseDouble(raw) * 1000.0); }
+                        catch (Exception ignored) {}
+                    }
+                }
+            """,
+        },
+    },
+}
+
+
+def source_name_for_index(index_name: str) -> str:
+    return "ingress" if "ingress" in index_name.lower() else "nginx"
+
+
+class HttpAccessService:
+    """Collect raw access aggregates and maintain the compact metric index."""
+
+    def __init__(self, es=None):
+        self._es = es
+
+    @property
+    def es(self):
+        if self._es is None:
+            from logmind.core.elasticsearch import get_es_client
+
+            self._es = get_es_client()
+        return self._es
+
+    async def collect_window(
+        self,
+        time_from: datetime,
+        time_to: datetime,
+    ) -> list[AccessMetric]:
+        """Collect all source/site/minute buckets from both configured indices."""
+        settings = get_settings()
+        index_names = settings.http_access_index_list
+        tasks = [
+            self._collect_source(
+                index_name=index_name,
+                source=source_name_for_index(index_name),
+                time_from=time_from,
+                time_to=time_to,
+                allowed_suffixes=settings.http_access_allowed_suffix_list,
+            )
+            for index_name in index_names
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        metrics: list[AccessMetric] = []
+        failures: list[str] = []
+        for index_name, result in zip(index_names, results, strict=True):
+            if isinstance(result, Exception):
+                failures.append(index_name)
+                logger.error(
+                    "http_access_source_collection_failed",
+                    index=index_name,
+                    error=str(result),
+                )
+                continue
+            metrics.extend(result)
+        if failures:
+            raise RuntimeError(
+                "HTTP access collection incomplete for: " + ", ".join(failures)
+            )
+
+        logger.info(
+            "http_access_window_collected",
+            time_from=time_from.isoformat(),
+            time_to=time_to.isoformat(),
+            metric_count=len(metrics),
+            source_count=len(index_names),
+        )
+        return metrics
+
+    async def _collect_source(
+        self,
+        *,
+        index_name: str,
+        source: str,
+        time_from: datetime,
+        time_to: datetime,
+        allowed_suffixes: tuple[str, ...],
+    ) -> list[AccessMetric]:
+        after_key: dict | None = None
+        metrics: list[AccessMetric] = []
+
+        while True:
+            composite: dict[str, Any] = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [
+                    {
+                        "minute": {
+                            "date_histogram": {
+                                "field": "@timestamp",
+                                "fixed_interval": "1m",
+                                "order": "asc",
+                            }
+                        }
+                    },
+                    {
+                        "site": {
+                            "terms": {
+                                "field": "server_name.keyword",
+                                "order": "asc",
+                            }
+                        }
+                    },
+                ],
+            }
+            if after_key:
+                composite["after"] = after_key
+
+            body = {
+                "size": 0,
+                "track_total_hits": False,
+                "runtime_mappings": _RUNTIME_MAPPINGS,
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {
+                                "range": {
+                                    "@timestamp": {
+                                        "gte": time_from.isoformat(),
+                                        "lt": time_to.isoformat(),
+                                    }
+                                }
+                            },
+                            {"exists": {"field": "server_name.keyword"}},
+                        ]
+                    }
+                },
+                "aggs": {
+                    "by_minute_site": {
+                        "composite": composite,
+                        "aggs": {
+                            "status_4xx": {
+                                "filter": {
+                                    "range": {
+                                        "lm_status_code": {"gte": 400, "lt": 500}
+                                    }
+                                }
+                            },
+                            "status_5xx": {
+                                "filter": {
+                                    "range": {
+                                        "lm_status_code": {"gte": 500, "lt": 600}
+                                    }
+                                }
+                            },
+                            "gateway_5xx": {
+                                "filter": {
+                                    "terms": {
+                                        "lm_status_code": [502, 503, 504]
+                                    }
+                                }
+                            },
+                            "upstream_5xx": {
+                                "filter": {
+                                    "range": {
+                                        "lm_upstream_status_code": {
+                                            "gte": 500,
+                                            "lt": 600,
+                                        }
+                                    }
+                                }
+                            },
+                            "latency": {
+                                "percentiles": {
+                                    "field": "lm_request_time_ms",
+                                    "percents": [50, 95, 99],
+                                    "keyed": True,
+                                }
+                            },
+                        },
+                    }
+                },
+            }
+            response = await self.es.search(index=index_name, body=body)
+            aggregation = (
+                response.get("aggregations", {}).get("by_minute_site", {})
+            )
+            for bucket in aggregation.get("buckets", []):
+                site = normalize_site(bucket.get("key", {}).get("site"))
+                if not is_allowed_site(site, allowed_suffixes):
+                    continue
+                minute_ms = bucket.get("key", {}).get("minute")
+                if minute_ms is None:
+                    continue
+                minute = datetime.fromtimestamp(
+                    float(minute_ms) / 1000.0,
+                    tz=UTC,
+                )
+                latency_values = bucket.get("latency", {}).get("values", {})
+                metrics.append(
+                    AccessMetric(
+                        source=source,
+                        site=site,
+                        minute=minute,
+                        request_count=int(bucket.get("doc_count", 0)),
+                        status_4xx=int(
+                            bucket.get("status_4xx", {}).get("doc_count", 0)
+                        ),
+                        status_5xx=int(
+                            bucket.get("status_5xx", {}).get("doc_count", 0)
+                        ),
+                        gateway_5xx=int(
+                            bucket.get("gateway_5xx", {}).get("doc_count", 0)
+                        ),
+                        upstream_5xx=int(
+                            bucket.get("upstream_5xx", {}).get("doc_count", 0)
+                        ),
+                        p50_ms=safe_float(latency_values.get("50.0")),
+                        p95_ms=safe_float(latency_values.get("95.0")),
+                        p99_ms=safe_float(latency_values.get("99.0")),
+                    )
+                )
+
+            after_key = aggregation.get("after_key")
+            if not after_key:
+                break
+
+        return metrics
+
+    async def ensure_metrics_index(self) -> None:
+        settings = get_settings()
+        index_name = settings.http_access_metrics_index
+        if await self.es.indices.exists(index=index_name):
+            return
+        mappings = {
+            "dynamic": "strict",
+            "properties": {
+                "source": {"type": "keyword"},
+                "site": {"type": "keyword"},
+                "minute": {"type": "date"},
+                "request_count": {"type": "long"},
+                "status_4xx": {"type": "long"},
+                "status_5xx": {"type": "long"},
+                "gateway_5xx": {"type": "long"},
+                "upstream_5xx": {"type": "long"},
+                "p50_ms": {"type": "double"},
+                "p95_ms": {"type": "double"},
+                "p99_ms": {"type": "double"},
+            },
+        }
+        try:
+            await self.es.indices.create(
+                index=index_name,
+                mappings=mappings,
+                settings={"index": {"number_of_shards": 1}},
+            )
+            logger.info("http_access_metrics_index_created", index=index_name)
+        except Exception as exc:
+            # Multiple workers may race on first startup.
+            if "resource_already_exists_exception" not in str(exc):
+                raise
+
+    async def persist_metrics(self, metrics: list[AccessMetric]) -> int:
+        if not metrics:
+            return 0
+        await self.ensure_metrics_index()
+        index_name = get_settings().http_access_metrics_index
+        actions = []
+        for metric in metrics:
+            raw_id = f"{metric.source}|{metric.site}|{metric.minute.isoformat()}"
+            actions.append(
+                {
+                    "_op_type": "index",
+                    "_index": index_name,
+                    "_id": hashlib.sha256(raw_id.encode()).hexdigest(),
+                    "_source": metric.to_document(),
+                }
+            )
+        success, errors = await async_bulk(
+            self.es,
+            actions,
+            raise_on_error=False,
+            raise_on_exception=False,
+        )
+        if errors:
+            logger.warning(
+                "http_access_metric_bulk_partial_failure",
+                failures=len(errors),
+            )
+        return int(success)
+
+    async def load_baselines(
+        self,
+        *,
+        before: datetime,
+        window_minutes: int,
+        days: int = 7,
+    ) -> dict[tuple[str, str], AccessBaseline]:
+        """Load all source/site baselines from the compact metric index."""
+        settings = get_settings()
+        index_name = settings.http_access_metrics_index
+        if not await self.es.indices.exists(index=index_name):
+            return {}
+
+        after_key: dict | None = None
+        baselines: dict[tuple[str, str], AccessBaseline] = {}
+        while True:
+            composite: dict[str, Any] = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [
+                    {"source": {"terms": {"field": "source"}}},
+                    {"site": {"terms": {"field": "site"}}},
+                ],
+            }
+            if after_key:
+                composite["after"] = after_key
+
+            body = {
+                "size": 0,
+                "track_total_hits": False,
+                "query": {
+                    "range": {
+                        "minute": {
+                            "gte": (before - timedelta(days=days)).isoformat(),
+                            "lt": before.isoformat(),
+                        }
+                    }
+                },
+                "aggs": {
+                    "by_source_site": {
+                        "composite": composite,
+                        "aggs": {
+                            "samples": {"value_count": {"field": "minute"}},
+                            "request_avg": {"avg": {"field": "request_count"}},
+                            "request_sum": {"sum": {"field": "request_count"}},
+                            "status_4xx_sum": {"sum": {"field": "status_4xx"}},
+                            "status_5xx_sum": {"sum": {"field": "status_5xx"}},
+                            "p95_avg": {"avg": {"field": "p95_ms"}},
+                        },
+                    }
+                },
+            }
+            response = await self.es.search(index=index_name, body=body)
+            aggregation = (
+                response.get("aggregations", {}).get("by_source_site", {})
+            )
+            for bucket in aggregation.get("buckets", []):
+                source = str(bucket.get("key", {}).get("source", ""))
+                site = str(bucket.get("key", {}).get("site", ""))
+                request_sum = safe_float(
+                    bucket.get("request_sum", {}).get("value")
+                )
+                rate_4xx = (
+                    safe_float(bucket.get("status_4xx_sum", {}).get("value"))
+                    / request_sum
+                    if request_sum
+                    else 0.0
+                )
+                rate_5xx = (
+                    safe_float(bucket.get("status_5xx_sum", {}).get("value"))
+                    / request_sum
+                    if request_sum
+                    else 0.0
+                )
+                baselines[(source, site)] = AccessBaseline(
+                    source=source,
+                    site=site,
+                    sample_count=int(
+                        safe_float(bucket.get("samples", {}).get("value"))
+                    ),
+                    request_count=(
+                        safe_float(
+                            bucket.get("request_avg", {}).get("value")
+                        )
+                        * window_minutes
+                    ),
+                    rate_4xx=rate_4xx,
+                    rate_5xx=rate_5xx,
+                    p95_ms=safe_float(bucket.get("p95_avg", {}).get("value")),
+                )
+
+            after_key = aggregation.get("after_key")
+            if not after_key:
+                break
+
+        return baselines
+
+    async def fetch_samples(
+        self,
+        *,
+        source: str,
+        site: str,
+        time_from: datetime,
+        time_to: datetime,
+        size: int = 20,
+        prefer_latency: bool = False,
+    ) -> list[AccessSample]:
+        """Fetch privacy-safe representative events for one anomalous site."""
+        settings = get_settings()
+        matching_indices = [
+            index_name
+            for index_name in settings.http_access_index_list
+            if source_name_for_index(index_name) == source
+        ]
+        if not matching_indices:
+            return []
+
+        body = {
+            "size": min(max(size, 1), 20),
+            "track_total_hits": False,
+            "runtime_mappings": _RUNTIME_MAPPINGS,
+            "_source": [
+                "@timestamp",
+                "status",
+                "request",
+                "request_time",
+                "upstream_status",
+                "upstream_response_time",
+                "upstream_addr",
+                "lm_http_status_code",
+                "lm_upstream_status_code",
+                "lm_request_time_ms",
+                "lm_upstream_time_ms",
+                "lm_http_method",
+                "lm_route",
+            ],
+            "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": time_from.isoformat(),
+                                    "lt": time_to.isoformat(),
+                                }
+                            }
+                        },
+                        {"term": {"server_name.keyword": site}},
+                    ]
+                }
+            },
+            "sort": (
+                [
+                    {"lm_request_time_ms": {"order": "desc"}},
+                    {"lm_status_code": {"order": "desc"}},
+                    {"@timestamp": {"order": "desc"}},
+                ]
+                if prefer_latency
+                else [
+                    {"lm_status_code": {"order": "desc"}},
+                    {"lm_request_time_ms": {"order": "desc"}},
+                    {"@timestamp": {"order": "desc"}},
+                ]
+            ),
+        }
+        response = await self.es.search(
+            index=",".join(matching_indices),
+            body=body,
+        )
+        samples: list[AccessSample] = []
+        for hit in response.get("hits", {}).get("hits", []):
+            raw = hit.get("_source", {})
+            method = str(raw.get("lm_http_method") or "").upper()[:16]
+            route = str(raw.get("lm_route") or "")[:500]
+            if not method or not route:
+                method, route = normalize_request(raw.get("request"))
+            request_time_ms = (
+                safe_float(raw.get("lm_request_time_ms"))
+                or safe_float(raw.get("request_time")) * 1000.0
+            )
+            upstream_time_raw = raw.get("lm_upstream_time_ms")
+            if upstream_time_raw is None:
+                upstream_time_raw = raw.get("upstream_response_time")
+                upstream_time_ms = (
+                    _last_numeric(upstream_time_raw) * 1000.0
+                    if upstream_time_raw not in (None, "", "-")
+                    else None
+                )
+            else:
+                upstream_time_ms = safe_float(upstream_time_raw)
+
+            status = safe_int(
+                raw.get("lm_http_status_code", raw.get("status"))
+            )
+            upstream_status_value = safe_int(
+                raw.get(
+                    "lm_upstream_status_code",
+                    raw.get("upstream_status"),
+                )
+            )
+            samples.append(
+                AccessSample(
+                    timestamp=str(raw.get("@timestamp", ""))[:40],
+                    method=method,
+                    route=route,
+                    status=status,
+                    request_time_ms=request_time_ms,
+                    upstream_status=upstream_status_value or None,
+                    upstream_time_ms=upstream_time_ms,
+                    upstream_addr=str(raw.get("upstream_addr") or "")[:120],
+                )
+            )
+        return samples
+
+    async def cleanup_metrics(self, *, now: datetime | None = None) -> int:
+        """Delete compact metrics beyond the configured retention period."""
+        settings = get_settings()
+        index_name = settings.http_access_metrics_index
+        if not await self.es.indices.exists(index=index_name):
+            return 0
+        current = now or datetime.now(UTC)
+        cutoff = current - timedelta(days=settings.http_access_metrics_retention_days)
+        response = await self.es.delete_by_query(
+            index=index_name,
+            body={"query": {"range": {"minute": {"lt": cutoff.isoformat()}}}},
+            conflicts="proceed",
+            refresh=False,
+        )
+        return int(response.get("deleted", 0))
+
+    async def install_ingest_pipeline(self) -> None:
+        """
+        Install, but do not attach, the canonical normalization pipeline.
+
+        Attaching a default pipeline to existing organization-owned data-stream
+        templates is intentionally an explicit deployment operation.
+        """
+        script_source = """
+            def parseLongSafe(def value) {
+                if (value == null) return null;
+                String raw = value.toString().trim();
+                if (raw.contains(',')) raw = raw.substring(raw.lastIndexOf(',') + 1).trim();
+                if (raw.length() == 0 || raw == '-') return null;
+                try { return Long.parseLong(raw); } catch (Exception ignored) { return null; }
+            }
+            def parseMsSafe(def value) {
+                if (value == null) return null;
+                String raw = value.toString().trim();
+                if (raw.contains(',')) raw = raw.substring(raw.lastIndexOf(',') + 1).trim();
+                if (raw.length() == 0 || raw == '-') return null;
+                try { return Double.parseDouble(raw) * 1000.0; }
+                catch (Exception ignored) { return null; }
+            }
+            ctx.lm_http_status_code = parseLongSafe(ctx.status);
+            ctx.lm_upstream_status_code = parseLongSafe(ctx.upstream_status);
+            ctx.lm_request_time_ms = parseMsSafe(ctx.request_time);
+            ctx.lm_upstream_time_ms = parseMsSafe(ctx.upstream_response_time);
+            if (ctx.request != null) {
+                String request = ctx.request.toString().trim();
+                String[] parts = request.splitOnToken(' ');
+                if (parts.length >= 2) {
+                    ctx.lm_http_method = parts[0].toUpperCase();
+                    String path = parts[1];
+                    int queryAt = path.indexOf('?');
+                    if (queryAt >= 0) path = path.substring(0, queryAt);
+                    int fragmentAt = path.indexOf('#');
+                    if (fragmentAt >= 0) path = path.substring(0, fragmentAt);
+                    if (!path.startsWith('/')) path = '/' + path;
+                    String[] segments = path.splitOnToken('/');
+                    StringBuilder normalized = new StringBuilder();
+                    for (String segment : segments) {
+                        if (segment.length() == 0) continue;
+                        boolean numeric = true;
+                        for (int i = 0; i < segment.length(); i++) {
+                            char ch = segment.charAt(i);
+                            if (ch < '0' || ch > '9') {
+                                numeric = false;
+                                break;
+                            }
+                        }
+                        boolean uuid = segment.length() == 36
+                            && segment.charAt(8) == '-'
+                            && segment.charAt(13) == '-'
+                            && segment.charAt(18) == '-'
+                            && segment.charAt(23) == '-';
+                        normalized.append('/');
+                        normalized.append(uuid ? '{uuid}' : numeric ? '{id}' : segment);
+                    }
+                    ctx.lm_route = normalized.length() == 0
+                        ? '/' : normalized.toString();
+                }
+            }
+        """
+        await self.es.ingest.put_pipeline(
+            id=_INGEST_PIPELINE_ID,
+            processors=[{"script": {"lang": "painless", "source": script_source}}],
+            description=(
+                "LogMind canonical numeric fields for Nginx/Ingress access logs"
+            ),
+        )
+
+    async def install_canonical_mappings(self) -> None:
+        """Add canonical fields to current backing indices without reindexing."""
+        properties = {
+            "lm_http_status_code": {"type": "long"},
+            "lm_upstream_status_code": {"type": "long"},
+            "lm_request_time_ms": {"type": "double"},
+            "lm_upstream_time_ms": {"type": "double"},
+            "lm_http_method": {"type": "keyword"},
+            "lm_route": {"type": "keyword", "ignore_above": 500},
+        }
+        for index_name in get_settings().http_access_index_list:
+            await self.es.indices.put_mapping(
+                index=index_name,
+                properties=properties,
+            )
+
+
+http_access_service = HttpAccessService()
+
+
+def _last_numeric(value: object) -> float:
+    raw = str(value or "").rsplit(",", 1)[-1].strip()
+    return safe_float(raw)

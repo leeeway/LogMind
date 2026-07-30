@@ -34,6 +34,7 @@ celery_app.conf.update(
     task_routes={
         "logmind.domain.analysis.tasks.*": {"queue": "analysis"},
         "logmind.domain.alert.tasks.*": {"queue": "alert"},
+        "logmind.domain.http_access.tasks.*": {"queue": "alert"},
         "logmind.domain.dashboard.tasks.*": {"queue": "alert"},
         "logmind.domain.rag.tasks.*": {"queue": "rag"},
     },
@@ -43,6 +44,7 @@ celery_app.conf.update(
 celery_app.autodiscover_tasks([
     "logmind.domain.analysis",
     "logmind.domain.alert",
+    "logmind.domain.http_access",
     "logmind.domain.dashboard",
     "logmind.domain.rag",
 ])
@@ -54,6 +56,17 @@ celery_app.conf.beat_schedule = {
     "scheduled-log-patrol": {
         "task": "logmind.domain.alert.tasks.scheduled_log_patrol",
         "schedule": crontab(minute=f"*/{settings.effective_patrol_interval_minutes}"),
+        "options": {"queue": "alert"},
+    },
+    # Global Nginx/Ingress patrol. The task itself is a no-op until enabled.
+    "scheduled-http-access-patrol": {
+        "task": "logmind.domain.http_access.tasks.scheduled_http_access_patrol",
+        "schedule": crontab(minute=f"*/{settings.http_access_window_minutes}"),
+        "options": {"queue": "alert"},
+    },
+    "cleanup-http-access-metrics": {
+        "task": "logmind.domain.http_access.tasks.cleanup_http_access_metrics",
+        "schedule": crontab(hour=3, minute=30),
         "options": {"queue": "alert"},
     },
     # Cleanup old analysis tasks — daily at 3 AM

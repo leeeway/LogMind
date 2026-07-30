@@ -561,6 +561,32 @@ LogMind 内置多层 Token 消耗控制机制，通过 `.env` 配置：
 > **关闭 Agent 不影响分析功能**，只影响分析深度。设置 `ANALYSIS_AGENT_ENABLED=false` 可立即降低 Token 消耗 30-50%。  
 > **向量语义去重**可单独开关，不影响 MD5 指纹去重。两层级联兼顾速度和精度。
 
+### Nginx / Ingress 全局访问巡检
+
+访问巡检与 `business_line` 完全独立，固定聚合
+`nginx-log-json` 和 `ingress-nginx-master-external-log`，按
+`server_name`、来源、状态码和耗时检测异常。启用时建议先静默运行：
+
+```dotenv
+HTTP_ACCESS_PATROL_ENABLED=true
+HTTP_ACCESS_NOTIFICATION_ENABLED=false
+HTTP_ACCESS_TENANT_ID=<单租户部署可留空>
+```
+
+确认候选异常正常后，再设置 `HTTP_ACCESS_NOTIFICATION_ENABLED=true`。
+每个5分钟窗口最多发送一条企微汇总；完整配置见 `.env.example`。
+
+历史索引存在字段类型冲突时，巡检会自动使用运行时字段兼容。后续日志可安装
+标准化 ingest pipeline：
+
+```bash
+PYTHONPATH=src python -m logmind.scripts.setup_http_access_ingest
+```
+
+将 Filebeat/Data Stream 配置为使用
+`logmind-http-access-normalize-v1` 后，可增加 `--rollover` 切换到新的
+backing index。安装和 rollover 需要 Elasticsearch 的管理权限。
+
 ---
 
 ## 🚀 快速开始

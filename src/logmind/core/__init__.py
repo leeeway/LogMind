@@ -8,7 +8,7 @@ All sensitive values loaded from environment variables.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -83,6 +83,40 @@ class Settings(BaseSettings):
     wechat_webhook_url: str = ""
     wechat_enabled: bool = False
 
+    # ── Global Nginx / Ingress Access Patrol ─────────────
+    http_access_patrol_enabled: bool = False
+    http_access_notification_enabled: bool = False
+    http_access_ai_enabled: bool = True
+    http_access_indexes: str = (
+        "nginx-log-json,ingress-nginx-master-external-log"
+    )
+    http_access_allowed_suffixes: str = "gyyx.cn,tjlong.cn,wyx.cn,costrip.cn"
+    http_access_window_minutes: int = 5
+    http_access_webhook_url: str = ""
+    http_access_tenant_id: str = ""
+    http_access_metrics_index: str = "logmind-http-access-metrics-v1"
+    http_access_metrics_retention_days: int = 90
+    http_access_baseline_days: int = 7
+    http_access_dedup_minutes: int = 30
+    http_access_max_notification_sites: int = 10
+    http_access_sample_size: int = 20
+
+    @property
+    def http_access_index_list(self) -> tuple[str, ...]:
+        return tuple(
+            item.strip()
+            for item in self.http_access_indexes.split(",")
+            if item.strip()
+        )
+
+    @property
+    def http_access_allowed_suffix_list(self) -> tuple[str, ...]:
+        return tuple(
+            item.strip().lower().lstrip(".")
+            for item in self.http_access_allowed_suffixes.split(",")
+            if item.strip()
+        )
+
     # ── MinIO ────────────────────────────────────────────
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "logmind"
@@ -106,6 +140,24 @@ class Settings(BaseSettings):
         if v.lower() not in allowed:
             raise ValueError(f"severity must be one of {allowed}")
         return v.lower()
+
+    @field_validator(
+        "analysis_cooldown_minutes",
+        "analysis_patrol_interval_minutes",
+        "analysis_anomaly_window_minutes",
+        "analysis_lookback_minutes",
+        "http_access_window_minutes",
+        "http_access_metrics_retention_days",
+        "http_access_baseline_days",
+        "http_access_dedup_minutes",
+        "http_access_max_notification_sites",
+        "http_access_sample_size",
+    )
+    @classmethod
+    def validate_positive_minutes(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("minute settings must be greater than 0")
+        return v
 
 
 @lru_cache

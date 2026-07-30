@@ -87,6 +87,41 @@ class Settings(BaseSettings):
     wechat_webhook_url: str = ""
     wechat_enabled: bool = False
 
+    # ── Global Nginx / Ingress Access Patrol ─────────────
+    # This patrol is intentionally independent from the business_line table.
+    http_access_patrol_enabled: bool = False
+    http_access_notification_enabled: bool = False
+    http_access_ai_enabled: bool = True
+    http_access_indexes: str = (
+        "nginx-log-json,ingress-nginx-master-external-log"
+    )
+    http_access_allowed_suffixes: str = "gyyx.cn,tjlong.cn,wyx.cn,costrip.cn"
+    http_access_window_minutes: int = 5
+    http_access_webhook_url: str = ""
+    http_access_tenant_id: str = ""
+    http_access_metrics_index: str = "logmind-http-access-metrics-v1"
+    http_access_metrics_retention_days: int = 90
+    http_access_baseline_days: int = 7
+    http_access_dedup_minutes: int = 30
+    http_access_max_notification_sites: int = 10
+    http_access_sample_size: int = 20
+
+    @property
+    def http_access_index_list(self) -> tuple[str, ...]:
+        return tuple(
+            item.strip()
+            for item in self.http_access_indexes.split(",")
+            if item.strip()
+        )
+
+    @property
+    def http_access_allowed_suffix_list(self) -> tuple[str, ...]:
+        return tuple(
+            item.strip().lower().lstrip(".")
+            for item in self.http_access_allowed_suffixes.split(",")
+            if item.strip()
+        )
+
     # ── CI/CD Webhook ───────────────────────────────────────
     # HMAC-SHA256 secret for /api/v1/changes/webhook/{tenant_id}.
     # Production rejects unsigned CI webhook requests when this is empty.
@@ -149,6 +184,12 @@ class Settings(BaseSettings):
         "analysis_patrol_interval_minutes",
         "analysis_anomaly_window_minutes",
         "analysis_lookback_minutes",
+        "http_access_window_minutes",
+        "http_access_metrics_retention_days",
+        "http_access_baseline_days",
+        "http_access_dedup_minutes",
+        "http_access_max_notification_sites",
+        "http_access_sample_size",
     )
     @classmethod
     def validate_positive_minutes(cls, v: int) -> int:
@@ -160,12 +201,14 @@ class Settings(BaseSettings):
     @classmethod
     def reject_default_keys(cls, v: str, info) -> str:
         """Prevent production deployment with placeholder keys."""
-        if v.startswith("change-me") or v.startswith("dev-"):
-            if os.getenv("APP_ENV") == "production":
-                raise ValueError(
-                    f"{info.field_name} must be changed from default value "
-                    f"in production! Current value starts with '{v[:12]}...'"
-                )
+        if (
+            v.startswith(("change-me", "dev-"))
+            and os.getenv("APP_ENV") == "production"
+        ):
+            raise ValueError(
+                f"{info.field_name} must be changed from default value "
+                f"in production! Current value starts with '{v[:12]}...'"
+            )
         return v
 
 
