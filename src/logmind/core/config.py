@@ -101,11 +101,15 @@ class Settings(BaseSettings):
     http_access_webhook_url: str = ""
     http_access_tenant_id: str = ""
     http_access_metrics_index: str = "logmind-http-access-metrics-v1"
+    http_access_route_metrics_index: str = (
+        "logmind-http-access-route-metrics-v1"
+    )
     http_access_metrics_retention_days: int = 90
     http_access_baseline_days: int = 7
     http_access_baseline_slot_minutes: int = 60
     http_access_dedup_minutes: int = 30
-    http_access_notification_cooldown_minutes: int = 30
+    http_access_notification_cooldown_minutes: int = 60
+    http_access_repeat_notification_minutes: int = 240
     http_access_max_route_candidate_sites: int = 20
     # Nginx primarily fronts C# and static sites, so use a deliberately higher
     # 4xx threshold than Kubernetes Ingress/Java application interfaces.
@@ -113,8 +117,12 @@ class Settings(BaseSettings):
     http_access_nginx_4xx_min_rate: float = 0.30
     http_access_ingress_4xx_min_count: int = 20
     http_access_ingress_4xx_min_rate: float = 0.10
+    http_access_route_baseline_min_samples: int = 6
+    http_access_route_baseline_min_days: int = 3
+    http_access_route_baseline_rate_multiplier: float = 2.0
+    http_access_route_baseline_rate_delta: float = 0.10
     http_access_run_history_limit: int = 288
-    http_access_max_notification_sites: int = 10
+    http_access_max_notification_sites: int = 5
     http_access_sample_size: int = 20
 
     @property
@@ -201,9 +209,12 @@ class Settings(BaseSettings):
         "http_access_baseline_slot_minutes",
         "http_access_dedup_minutes",
         "http_access_notification_cooldown_minutes",
+        "http_access_repeat_notification_minutes",
         "http_access_max_route_candidate_sites",
         "http_access_nginx_4xx_min_count",
         "http_access_ingress_4xx_min_count",
+        "http_access_route_baseline_min_samples",
+        "http_access_route_baseline_min_days",
         "http_access_run_history_limit",
         "http_access_max_notification_sites",
         "http_access_sample_size",
@@ -217,11 +228,19 @@ class Settings(BaseSettings):
     @field_validator(
         "http_access_nginx_4xx_min_rate",
         "http_access_ingress_4xx_min_rate",
+        "http_access_route_baseline_rate_delta",
     )
     @classmethod
     def validate_http_access_rate(cls, v: float) -> float:
         if not 0 < v <= 1:
             raise ValueError("HTTP access rate thresholds must be in (0, 1]")
+        return v
+
+    @field_validator("http_access_route_baseline_rate_multiplier")
+    @classmethod
+    def validate_http_access_multiplier(cls, v: float) -> float:
+        if v <= 1:
+            raise ValueError("HTTP access baseline multiplier must be > 1")
         return v
 
     @field_validator("secret_key", "jwt_secret_key", "encryption_key")

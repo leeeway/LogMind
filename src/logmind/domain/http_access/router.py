@@ -33,6 +33,11 @@ async def get_http_access_patrol_status() -> dict:
         "notification_cooldown_minutes": (
             settings.http_access_notification_cooldown_minutes
         ),
+        "repeat_notification_minutes": getattr(
+            settings,
+            "http_access_repeat_notification_minutes",
+            240,
+        ),
         "max_route_candidate_sites": (
             settings.http_access_max_route_candidate_sites
         ),
@@ -53,6 +58,33 @@ async def get_http_access_patrol_status() -> dict:
                     settings, "http_access_ingress_4xx_min_rate", 0.10
                 ),
             },
+        },
+        "route_baseline": {
+            "index": getattr(
+                settings,
+                "http_access_route_metrics_index",
+                "logmind-http-access-route-metrics-v1",
+            ),
+            "min_samples": getattr(
+                settings,
+                "http_access_route_baseline_min_samples",
+                6,
+            ),
+            "min_days": getattr(
+                settings,
+                "http_access_route_baseline_min_days",
+                3,
+            ),
+            "rate_multiplier": getattr(
+                settings,
+                "http_access_route_baseline_rate_multiplier",
+                2.0,
+            ),
+            "rate_delta": getattr(
+                settings,
+                "http_access_route_baseline_rate_delta",
+                0.10,
+            ),
         },
         "run_history_limit": settings.http_access_run_history_limit,
         "baseline": {

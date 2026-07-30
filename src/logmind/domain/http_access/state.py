@@ -74,15 +74,24 @@ class HttpAccessAlertState:
         next_state: dict[str, dict] = {}
         due: list[AccessIncident] = []
         recoveries: list[AccessRecovery] = []
-        dedup_delta = timedelta(minutes=get_settings().http_access_dedup_minutes)
+        settings = get_settings()
+        p0_repeat_delta = timedelta(minutes=settings.http_access_dedup_minutes)
+        p1_repeat_delta = timedelta(
+            minutes=getattr(
+                settings,
+                "http_access_repeat_notification_minutes",
+                240,
+            )
+        )
 
         for key, incident in current_by_key.items():
             old = previous.get(key, {})
             streak = int(old.get("streak", 0)) + 1
-            required_streak = (
-                2
-                if incident.kind in {"traffic_drop", "latency"}
-                else 1
+            required_streak = 1 if incident.priority == "P0" else 2
+            incident.observed_minutes = streak * getattr(
+                settings,
+                "http_access_window_minutes",
+                5,
             )
             was_active = bool(old.get("active", False))
             active = was_active or streak >= required_streak
@@ -90,14 +99,23 @@ class HttpAccessAlertState:
 
             should_notify = False
             if active:
+                repeat_delta = (
+                    p0_repeat_delta
+                    if incident.priority == "P0"
+                    else p1_repeat_delta
+                )
                 should_notify = (
                     not was_active
                     or _is_escalation(
                         incident.priority,
                         str(old.get("priority", "P2")),
                     )
+                    or _is_material_worsening(
+                        incident,
+                        float(old.get("impact", 0) or 0),
+                    )
                     or last_notified is None
-                    or current_time - last_notified >= dedup_delta
+                    or current_time - last_notified >= repeat_delta
                 )
             if should_notify:
                 due.append(incident)
@@ -114,6 +132,9 @@ class HttpAccessAlertState:
                 "first_seen": old.get("first_seen") or current_time.isoformat(),
                 "last_seen": current_time.isoformat(),
                 "last_notified": old.get("last_notified"),
+                "impact": round(incident.impact, 6),
+                "current_value": round(incident.current_value, 6),
+                "request_count": incident.request_count,
             }
 
         for key, old in previous.items():
@@ -332,6 +353,26 @@ def _parse_datetime(value: object) -> datetime | None:
 
 def _is_escalation(current: str, previous: str) -> bool:
     return _PRIORITY_RANK.get(current, 9) < _PRIORITY_RANK.get(previous, 9)
+
+
+def _is_material_worsening(
+    incident: AccessIncident,
+    previous_impact: float,
+) -> bool:
+    """Notify before the repeat interval only when user impact clearly grows."""
+    current_impact = incident.impact
+    if previous_impact <= 0 or current_impact <= previous_impact:
+        return False
+    absolute_increase = current_impact - previous_impact
+    minimum_increase = (
+        1000.0
+        if incident.kind == "latency"
+        else max(10.0, previous_impact * 0.25)
+    )
+    return (
+        current_impact >= previous_impact * 1.5
+        and absolute_increase >= minimum_increase
+    )
 
 
 http_access_alert_state = HttpAccessAlertState()

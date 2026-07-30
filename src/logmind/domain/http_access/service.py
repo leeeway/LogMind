@@ -14,6 +14,7 @@ from logmind.core.logging import get_logger
 from logmind.domain.http_access.models import (
     AccessBaseline,
     AccessMetric,
+    AccessRouteBaseline,
     AccessRouteMetric,
     AccessSample,
     AccessWindow,
@@ -155,11 +156,18 @@ _ROUTE_RUNTIME_MAPPINGS = {
                     for (String segment : segments) {
                         if (segment.length() == 0) continue;
                         boolean numeric = true;
+                        boolean hexId = segment.length() >= 16
+                            && segment.length() <= 64;
                         for (int i = 0; i < segment.length(); i++) {
                             int code = (int)segment.charAt(i);
                             if (code < 48 || code > 57) {
                                 numeric = false;
-                                break;
+                            }
+                            boolean hexChar = (code >= 48 && code <= 57)
+                                || (code >= 65 && code <= 70)
+                                || (code >= 97 && code <= 102);
+                            if (!hexChar) {
+                                hexId = false;
                             }
                         }
                         boolean uuid = segment.length() == 36
@@ -169,7 +177,7 @@ _ROUTE_RUNTIME_MAPPINGS = {
                             && segment.substring(23, 24).equals("-");
                         normalized.append('/');
                         normalized.append(
-                            uuid ? '{uuid}' : numeric ? '{id}' : segment
+                            uuid ? '{uuid}' : numeric || hexId ? '{id}' : segment
                         );
                     }
                     path = normalized.length() == 0
@@ -633,6 +641,13 @@ class HttpAccessService:
                                     "script": "params.errors > 0",
                                 }
                             },
+                            "latency": {
+                                "percentiles": {
+                                    "field": "lm_request_time_ms",
+                                    "percents": [95],
+                                    "keyed": True,
+                                }
+                            },
                         },
                     }
                 },
@@ -667,6 +682,11 @@ class HttpAccessService:
                         route_key=route_key,
                         request_count=int(bucket.get("doc_count", 0)),
                         status_4xx=status_4xx,
+                        p95_ms=safe_float(
+                            bucket.get("latency", {})
+                            .get("values", {})
+                            .get("95.0")
+                        ),
                         status_counts=status_counts,
                     )
                 )
@@ -736,6 +756,197 @@ class HttpAccessService:
                 failures=len(errors),
             )
         return int(success)
+
+    async def ensure_route_metrics_index(self) -> None:
+        """Create the compact interface-level history used for noise learning."""
+        settings = get_settings()
+        index_name = settings.http_access_route_metrics_index
+        if await self.es.indices.exists(index=index_name):
+            return
+        mappings = {
+            "dynamic": "strict",
+            "properties": {
+                "source": {"type": "keyword"},
+                "site": {"type": "keyword"},
+                "route_key": {"type": "keyword", "ignore_above": 520},
+                "observed_at": {"type": "date"},
+                "request_count": {"type": "long"},
+                "status_4xx": {"type": "long"},
+                "rate_4xx": {"type": "double"},
+            },
+        }
+        try:
+            await self.es.indices.create(
+                index=index_name,
+                mappings=mappings,
+                settings={"index": {"number_of_shards": 1}},
+            )
+            logger.info(
+                "http_access_route_metrics_index_created",
+                index=index_name,
+            )
+        except Exception as exc:
+            if "resource_already_exists_exception" not in str(exc):
+                raise
+
+    async def persist_route_metrics(
+        self,
+        metrics: list[AccessRouteMetric],
+        *,
+        observed_at: datetime,
+    ) -> int:
+        """Persist one compact record per candidate interface and window."""
+        if not metrics:
+            return 0
+        await self.ensure_route_metrics_index()
+        index_name = get_settings().http_access_route_metrics_index
+        actions = []
+        for metric in metrics:
+            raw_id = (
+                f"{metric.source}|{metric.site}|{metric.route_key}|"
+                f"{observed_at.isoformat()}"
+            )
+            actions.append(
+                {
+                    "_op_type": "index",
+                    "_index": index_name,
+                    "_id": hashlib.sha256(raw_id.encode()).hexdigest(),
+                    "_source": {
+                        "source": metric.source,
+                        "site": metric.site,
+                        "route_key": metric.route_key,
+                        "observed_at": observed_at.isoformat(),
+                        "request_count": metric.request_count,
+                        "status_4xx": metric.status_4xx,
+                        "rate_4xx": round(metric.rate_4xx, 6),
+                    },
+                }
+            )
+        success, errors = await async_bulk(
+            self.es,
+            actions,
+            raise_on_error=False,
+            raise_on_exception=False,
+        )
+        if errors:
+            logger.warning(
+                "http_access_route_metric_bulk_partial_failure",
+                failures=len(errors),
+            )
+        return int(success)
+
+    async def load_route_baselines(
+        self,
+        *,
+        before: datetime,
+        days: int = 7,
+    ) -> dict[tuple[str, str, str], AccessRouteBaseline]:
+        """Read compact route history instead of rescanning raw access logs."""
+        settings = get_settings()
+        index_name = settings.http_access_route_metrics_index
+        if not await self.es.indices.exists(index=index_name):
+            return {}
+
+        after_key: dict | None = None
+        baselines: dict[tuple[str, str, str], AccessRouteBaseline] = {}
+        while True:
+            composite: dict[str, Any] = {
+                "size": _COMPOSITE_PAGE_SIZE,
+                "sources": [
+                    {"source": {"terms": {"field": "source"}}},
+                    {"site": {"terms": {"field": "site"}}},
+                    {"route": {"terms": {"field": "route_key"}}},
+                ],
+            }
+            if after_key:
+                composite["after"] = after_key
+            body = {
+                "size": 0,
+                "track_total_hits": False,
+                "query": {
+                    "range": {
+                        "observed_at": {
+                            "gte": (before - timedelta(days=days)).isoformat(),
+                            "lt": before.isoformat(),
+                        }
+                    }
+                },
+                "aggs": {
+                    "by_route": {
+                        "composite": composite,
+                        "aggs": {
+                            "samples": {
+                                "value_count": {"field": "observed_at"}
+                            },
+                            "days": {
+                                "date_histogram": {
+                                    "field": "observed_at",
+                                    "calendar_interval": "day",
+                                    "min_doc_count": 1,
+                                }
+                            },
+                            "request_median": {
+                                "percentiles": {
+                                    "field": "request_count",
+                                    "percents": [50],
+                                    "keyed": True,
+                                }
+                            },
+                            "status_4xx_median": {
+                                "percentiles": {
+                                    "field": "status_4xx",
+                                    "percents": [50],
+                                    "keyed": True,
+                                }
+                            },
+                            "request_sum": {"sum": {"field": "request_count"}},
+                            "status_4xx_sum": {"sum": {"field": "status_4xx"}},
+                        },
+                    }
+                },
+            }
+            response = await self.es.search(index=index_name, body=body)
+            aggregation = response.get("aggregations", {}).get(
+                "by_route",
+                {},
+            )
+            for bucket in aggregation.get("buckets", []):
+                key = bucket.get("key", {})
+                request_sum = safe_float(
+                    bucket.get("request_sum", {}).get("value")
+                )
+                status_sum = safe_float(
+                    bucket.get("status_4xx_sum", {}).get("value")
+                )
+                baseline = AccessRouteBaseline(
+                    source=str(key.get("source", "")),
+                    site=str(key.get("site", "")),
+                    route_key=str(key.get("route", "")),
+                    sample_count=int(
+                        safe_float(bucket.get("samples", {}).get("value"))
+                    ),
+                    day_count=len(
+                        bucket.get("days", {}).get("buckets", [])
+                    ),
+                    request_count=safe_float(
+                        bucket.get("request_median", {})
+                        .get("values", {})
+                        .get("50.0")
+                    ),
+                    status_4xx=safe_float(
+                        bucket.get("status_4xx_median", {})
+                        .get("values", {})
+                        .get("50.0")
+                    ),
+                    rate_4xx=status_sum / request_sum if request_sum else 0.0,
+                )
+                baselines[
+                    (baseline.source, baseline.site, baseline.route_key)
+                ] = baseline
+            after_key = aggregation.get("after_key")
+            if not after_key:
+                break
+        return baselines
 
     async def load_baselines(
         self,
@@ -1025,18 +1236,30 @@ class HttpAccessService:
     async def cleanup_metrics(self, *, now: datetime | None = None) -> int:
         """Delete compact metrics beyond the configured retention period."""
         settings = get_settings()
-        index_name = settings.http_access_metrics_index
-        if not await self.es.indices.exists(index=index_name):
-            return 0
         current = now or datetime.now(UTC)
         cutoff = current - timedelta(days=settings.http_access_metrics_retention_days)
-        response = await self.es.delete_by_query(
-            index=index_name,
-            body={"query": {"range": {"minute": {"lt": cutoff.isoformat()}}}},
-            conflicts="proceed",
-            refresh=False,
+        deleted = 0
+        targets = (
+            (settings.http_access_metrics_index, "minute"),
+            (settings.http_access_route_metrics_index, "observed_at"),
         )
-        return int(response.get("deleted", 0))
+        for index_name, time_field in targets:
+            if not await self.es.indices.exists(index=index_name):
+                continue
+            response = await self.es.delete_by_query(
+                index=index_name,
+                body={
+                    "query": {
+                        "range": {
+                            time_field: {"lt": cutoff.isoformat()}
+                        }
+                    }
+                },
+                conflicts="proceed",
+                refresh=False,
+            )
+            deleted += int(response.get("deleted", 0))
+        return deleted
 
     async def install_ingest_pipeline(self) -> None:
         """
@@ -1082,11 +1305,18 @@ class HttpAccessService:
                     for (String segment : segments) {
                         if (segment.length() == 0) continue;
                         boolean numeric = true;
+                        boolean hexId = segment.length() >= 16
+                            && segment.length() <= 64;
                         for (int i = 0; i < segment.length(); i++) {
                             int code = (int)segment.charAt(i);
                             if (code < 48 || code > 57) {
                                 numeric = false;
-                                break;
+                            }
+                            boolean hexChar = (code >= 48 && code <= 57)
+                                || (code >= 65 && code <= 70)
+                                || (code >= 97 && code <= 102);
+                            if (!hexChar) {
+                                hexId = false;
                             }
                         }
                         boolean uuid = segment.length() == 36
@@ -1095,7 +1325,9 @@ class HttpAccessService:
                             && segment.substring(18, 19).equals("-")
                             && segment.substring(23, 24).equals("-");
                         normalized.append('/');
-                        normalized.append(uuid ? '{uuid}' : numeric ? '{id}' : segment);
+                        normalized.append(
+                            uuid ? '{uuid}' : numeric || hexId ? '{id}' : segment
+                        );
                     }
                     ctx.lm_route = normalized.length() == 0
                         ? '/' : normalized.toString();

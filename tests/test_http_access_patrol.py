@@ -7,6 +7,7 @@ from logmind.domain.http_access.models import (
     AccessIncident,
     AccessMetric,
     AccessRecovery,
+    AccessRouteBaseline,
     AccessRouteMetric,
     AccessSample,
     AccessWindow,
@@ -47,6 +48,15 @@ def test_normalize_request_removes_sensitive_query_and_resource_ids():
     assert route == "/notice/noread/{uuid}/"
     assert "sign" not in route
     assert "1785391556" not in route
+
+
+def test_normalize_request_collapses_long_hex_resource_ids():
+    method, route = normalize_request(
+        "GET /order/4f8c2f91a47e4b188caa9343d33068ef/detail HTTP/1.1"
+    )
+
+    assert method == "GET"
+    assert route == "/order/{id}/detail"
 
 
 def test_site_filter_rejects_scanner_hosts_and_keeps_enterprise_domains():
@@ -229,6 +239,94 @@ def test_ingress_route_4xx_detects_java_interface_failure():
     assert incidents[0].status_counts == {400: 296}
 
 
+def test_route_4xx_stable_learned_business_response_is_suppressed():
+    metric = AccessRouteMetric(
+        source="ingress",
+        site="interface.tong.gyyx.cn",
+        route_key="GET /v1/account/GetAccountBindInfoByUserId",
+        request_count=339,
+        status_4xx=296,
+        status_counts={400: 296},
+    )
+    baseline = AccessRouteBaseline(
+        source=metric.source,
+        site=metric.site,
+        route_key=metric.route_key,
+        sample_count=12,
+        day_count=4,
+        request_count=350,
+        status_4xx=300,
+        rate_4xx=0.86,
+    )
+
+    incidents = detect_route_incidents(
+        [metric],
+        baselines={(metric.source, metric.site, metric.route_key): baseline},
+    )
+
+    assert incidents == []
+
+
+def test_route_4xx_alerts_when_rate_and_count_both_spike_above_baseline():
+    metric = AccessRouteMetric(
+        source="ingress",
+        site="interface.tong.gyyx.cn",
+        route_key="GET /v1/account/GetAccountBindInfoByUserId",
+        request_count=400,
+        status_4xx=240,
+        status_counts={400: 240},
+    )
+    baseline = AccessRouteBaseline(
+        source=metric.source,
+        site=metric.site,
+        route_key=metric.route_key,
+        sample_count=12,
+        day_count=4,
+        request_count=200,
+        status_4xx=40,
+        rate_4xx=0.20,
+    )
+
+    incidents = detect_route_incidents(
+        [metric],
+        baselines={(metric.source, metric.site, metric.route_key): baseline},
+    )
+
+    assert len(incidents) == 1
+    assert incidents[0].baseline_value == 0.20
+
+
+def test_route_baseline_does_not_learn_a_one_day_persistent_failure():
+    metric = AccessRouteMetric(
+        source="ingress",
+        site="api.gyyx.cn",
+        route_key="POST /order/create",
+        request_count=300,
+        status_4xx=180,
+        status_counts={400: 180},
+    )
+    recent_failure = AccessRouteBaseline(
+        source=metric.source,
+        site=metric.site,
+        route_key=metric.route_key,
+        sample_count=20,
+        day_count=1,
+        request_count=300,
+        status_4xx=180,
+        rate_4xx=0.60,
+    )
+
+    incidents = detect_route_incidents(
+        [metric],
+        baselines={
+            (metric.source, metric.site, metric.route_key): recent_failure
+        },
+    )
+
+    assert len(incidents) == 1
+    assert incidents[0].baseline_value == 0
+
+
 def test_nginx_route_4xx_still_detects_high_volume_csharp_api_failure():
     incidents = detect_route_incidents(
         [
@@ -269,6 +367,45 @@ def test_nginx_route_4xx_filters_static_options_root_and_git_noise():
             for route_key in route_keys
         ]
     ) == []
+
+
+def test_nginx_route_4xx_suppresses_edge_444_and_static_text_files():
+    assert detect_route_incidents(
+        [
+            AccessRouteMetric(
+                source="nginx",
+                site="cdn.gyyx.cn",
+                route_key="GET /robots.txt",
+                request_count=500,
+                status_4xx=500,
+                status_counts={404: 500},
+            ),
+            AccessRouteMetric(
+                source="nginx",
+                site="api.gyyx.cn",
+                route_key="POST /security/check",
+                request_count=500,
+                status_4xx=200,
+                status_counts={444: 200},
+            ),
+        ]
+    ) == []
+
+
+def test_499_requires_higher_volume_than_normal_ingress_4xx():
+    metric = AccessRouteMetric(
+        source="ingress",
+        site="api.gyyx.cn",
+        route_key="POST /report/export",
+        request_count=200,
+        status_4xx=50,
+        status_counts={499: 50},
+    )
+
+    assert detect_route_incidents([metric]) == []
+    metric.status_4xx = 120
+    metric.status_counts = {499: 120}
+    assert len(detect_route_incidents([metric])) == 1
 
 
 def test_route_4xx_ignores_single_400():
@@ -459,6 +596,7 @@ def test_route_aggregation_handles_many_server_names_in_one_query():
     assert len(metrics) == 1
     assert metrics[0].route_key == "GET /notice/noread/{uuid}/"
     assert metrics[0].status_counts == {400: 45, 404: 4}
+    assert metrics[0].p95_ms == 2.0
     assert len(es.search_calls) == 1
     body = es.search_calls[0]["body"]
     assert body["query"]["bool"]["filter"][1]["terms"][
@@ -600,6 +738,71 @@ def test_baseline_uses_same_time_slots_and_medians(monkeypatch):
     assert first_range["lt"] == "2026-07-29T08:15:00+00:00"
 
 
+def test_route_baseline_reads_compact_history_without_raw_log_scan(monkeypatch):
+    es = _FakeEs(
+        [
+            {
+                "aggregations": {
+                    "by_route": {
+                        "buckets": [
+                            {
+                                "key": {
+                                    "source": "ingress",
+                                    "site": "interface.tong.gyyx.cn",
+                                    "route": "GET /v1/account/info",
+                                },
+                                "samples": {"value": 12},
+                                "days": {
+                                    "buckets": [
+                                        {"key_as_string": "2026-07-27"},
+                                        {"key_as_string": "2026-07-28"},
+                                        {"key_as_string": "2026-07-29"},
+                                    ]
+                                },
+                                "request_median": {
+                                    "values": {"50.0": 300}
+                                },
+                                "status_4xx_median": {
+                                    "values": {"50.0": 30}
+                                },
+                                "request_sum": {"value": 3600},
+                                "status_4xx_sum": {"value": 360},
+                            }
+                        ]
+                    }
+                }
+            }
+        ]
+    )
+    es.indices = _ExistingIndices()
+    monkeypatch.setattr(
+        "logmind.domain.http_access.service.get_settings",
+        lambda: SimpleNamespace(
+            http_access_route_metrics_index=(
+                "logmind-http-access-route-metrics-v1"
+            )
+        ),
+    )
+    service = HttpAccessService(es=es)
+
+    baselines = asyncio.run(
+        service.load_route_baselines(before=_utc(), days=7)
+    )
+
+    baseline = baselines[
+        ("ingress", "interface.tong.gyyx.cn", "GET /v1/account/info")
+    ]
+    assert baseline.sample_count == 12
+    assert baseline.day_count == 3
+    assert baseline.request_count == 300
+    assert baseline.status_4xx == 30
+    assert baseline.rate_4xx == 0.10
+    assert es.search_calls[0]["index"] == (
+        "logmind-http-access-route-metrics-v1"
+    )
+    assert "observed_at" in es.search_calls[0]["body"]["query"]["range"]
+
+
 def test_sample_fetch_never_requests_ip_or_sensitive_body(monkeypatch):
     es = _FakeEs(
         [
@@ -687,17 +890,44 @@ def test_parameter_extractors_keep_names_only_and_drop_sensitive_fields():
     assert body_names == ["phone", "code"]
 
 
+def test_body_field_extractor_supports_csharp_xml_and_multipart_shapes():
+    xml_names = extract_body_field_names(
+        "<Request><UserId>123</UserId><Order><ItemId>456</ItemId></Order>"
+        "</Request>"
+    )
+    multipart_names = extract_body_field_names(
+        'Content-Disposition: form-data; name="accountId"\r\n\r\n123'
+    )
+
+    assert xml_names == ["Request", "UserId", "Order", "ItemId"]
+    assert multipart_names == ["accountId"]
+
+
 def test_ai_summary_rejects_unsupported_database_claims():
     content = (
         '{"items":['
         '{"key":"nginx|a.gyyx.cn|http_5xx","summary":"数据库写入失败"},'
-        '{"key":"nginx|b.gyyx.cn|http_5xx","summary":"upstream返回大量502"}'
+        '{"key":"nginx|b.gyyx.cn|http_5xx","summary":"检查upstream大量502及服务实例"}'
         "]}"
     )
 
     assert _parse_ai_summaries(content) == {
-        "nginx|b.gyyx.cn|http_5xx": "upstream返回大量502"
+        "nginx|b.gyyx.cn|http_5xx": "检查upstream大量502及服务实例"
     }
+
+
+def test_ai_summary_rejects_vague_non_actionable_text():
+    assert _parse_ai_summaries(
+        '{"items":[{"key":"ingress|a.gyyx.cn|route_4xx",'
+        '"summary":"访问层存在异常现象"}]}'
+    ) == {}
+
+
+def test_ai_summary_rejects_unproven_internal_dependency_claim():
+    assert _parse_ai_summaries(
+        '{"items":[{"key":"ingress|a.gyyx.cn|latency",'
+        '"summary":"检查Redis连接池耗尽问题"}]}'
+    ) == {}
 
 
 def test_notification_groups_sites_and_omits_internal_metadata_and_secrets():
@@ -976,6 +1206,7 @@ def test_traffic_drop_requires_two_windows_and_recovery_requires_two():
             now=_utc() + timedelta(minutes=5),
         )
         assert [item.key for item in second.due] == [incident.key]
+        assert second.due[0].observed_minutes == 10
         await state.save(second, delivered=True)
 
         first_normal = await state.evaluate(
@@ -1017,6 +1248,102 @@ def test_latency_requires_two_consecutive_windows():
             now=_utc() + timedelta(minutes=5),
         )
         assert [item.key for item in second.due] == [incident.key]
+
+    asyncio.run(scenario())
+
+
+def test_route_p1_requires_two_windows_and_repeats_only_after_four_hours(
+    monkeypatch,
+):
+    settings = SimpleNamespace(
+        http_access_dedup_minutes=30,
+        http_access_repeat_notification_minutes=240,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.http_access.state.get_settings",
+        lambda: settings,
+    )
+    state = HttpAccessAlertState(redis=_FakeRedis())
+    incident = AccessIncident(
+        source="ingress",
+        site="interface.tong.gyyx.cn",
+        kind="route_4xx",
+        priority="P1",
+        request_count=200,
+        current_value=0.5,
+        baseline_value=0.1,
+        status_4xx=100,
+        route_key="GET /v1/account/info",
+    )
+
+    async def scenario():
+        first = await state.evaluate([incident], now=_utc())
+        assert first.due == []
+        await state.save(first, delivered=True)
+
+        second = await state.evaluate(
+            [incident],
+            now=_utc() + timedelta(minutes=5),
+        )
+        assert [item.key for item in second.due] == [incident.key]
+        await state.save(second, delivered=True)
+
+        unchanged = await state.evaluate(
+            [incident],
+            now=_utc() + timedelta(minutes=35),
+        )
+        assert unchanged.due == []
+        await state.save(unchanged, delivered=True)
+
+        repeat = await state.evaluate(
+            [incident],
+            now=_utc() + timedelta(minutes=245),
+        )
+        assert [item.key for item in repeat.due] == [incident.key]
+
+    asyncio.run(scenario())
+
+
+def test_active_p1_notifies_early_only_when_impact_materially_worsens(
+    monkeypatch,
+):
+    settings = SimpleNamespace(
+        http_access_dedup_minutes=30,
+        http_access_repeat_notification_minutes=240,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.http_access.state.get_settings",
+        lambda: settings,
+    )
+    state = HttpAccessAlertState(redis=_FakeRedis())
+
+    def incident(error_count):
+        return AccessIncident(
+            source="ingress",
+            site="api.gyyx.cn",
+            kind="route_4xx",
+            priority="P1",
+            request_count=300,
+            current_value=error_count / 300,
+            baseline_value=0.1,
+            status_4xx=error_count,
+            route_key="POST /order/create",
+        )
+
+    async def scenario():
+        first = await state.evaluate([incident(100)], now=_utc())
+        await state.save(first, delivered=True)
+        second = await state.evaluate(
+            [incident(100)],
+            now=_utc() + timedelta(minutes=5),
+        )
+        await state.save(second, delivered=True)
+
+        worse = await state.evaluate(
+            [incident(160)],
+            now=_utc() + timedelta(minutes=10),
+        )
+        assert len(worse.due) == 1
 
     asyncio.run(scenario())
 
@@ -1224,8 +1551,8 @@ class _IncidentService:
                 site="pigeon.gyyx.cn",
                 minute=_utc(),
                 request_count=500,
-                status_5xx=25,
-                gateway_5xx=25,
+                status_5xx=100,
+                gateway_5xx=100,
                 p95_ms=100,
             ),
         ]

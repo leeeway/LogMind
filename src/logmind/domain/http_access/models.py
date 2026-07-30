@@ -16,6 +16,11 @@ _UUID_SEGMENT_RE = re.compile(
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 _INTEGER_SEGMENT_RE = re.compile(r"^\d+$")
+_HEX_ID_SEGMENT_RE = re.compile(r"(?i)^[0-9a-f]{16,64}$")
+_GENERIC_GUID_SEGMENT_RE = re.compile(
+    r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 _HOST_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z]{2,63}$",
@@ -26,8 +31,9 @@ _KNOWN_PROBE_PATH_RE = re.compile(
     r"phpinfo\.php|vendor/phpunit|actuator/env)(?:/|$)"
 )
 _NGINX_STATIC_PATH_RE = re.compile(
-    r"(?i)\.(?:avif|bmp|css|data|eot|gif|ico|ini|jpe?g|js|m3u8|map|mp3|"
-    r"mp4|otf|pdf|svg|ts|ttf|webp|woff2?|zip)(?:/)?$"
+    r"(?i)\.(?:7z|apk|avif|bin|bmp|css|csv|data|dll|eot|exe|gif|ico|ini|"
+    r"jpe?g|js|m3u8|map|mp3|mp4|otf|patch|pdb|pdf|rar|svg|ts|ttf|txt|"
+    r"wasm|webp|woff2?|xml|zip)(?:/)?$"
 )
 _NGINX_REPOSITORY_PATH_RE = re.compile(
     r"(?i)(?:/info/refs|/git-upload-pack|/git-receive-pack)(?:/)?$"
@@ -136,6 +142,27 @@ class AccessRouteMetric:
 
 
 @dataclass(slots=True)
+class AccessRouteBaseline:
+    """Historical behavior for one normalized interface."""
+
+    source: str
+    site: str
+    route_key: str
+    sample_count: int = 0
+    day_count: int = 0
+    request_count: float = 0.0
+    status_4xx: float = 0.0
+    rate_4xx: float = 0.0
+
+    def is_ready(
+        self,
+        min_samples: int = 6,
+        min_days: int = 3,
+    ) -> bool:
+        return self.sample_count >= min_samples and self.day_count >= min_days
+
+
+@dataclass(slots=True)
 class AccessBaseline:
     """Historical per-window baseline for one source/site."""
 
@@ -204,6 +231,7 @@ class AccessIncident:
     p95_ms: float = 0.0
     route_key: str = ""
     status_counts: dict[int, int] = field(default_factory=dict)
+    observed_minutes: int = 0
     samples: list[AccessSample] = field(default_factory=list)
     ai_summary: str = ""
 
@@ -317,9 +345,15 @@ def normalize_request(request: object) -> tuple[str, str]:
 
     normalized_segments: list[str] = []
     for segment in path.split("/"):
-        if _UUID_SEGMENT_RE.fullmatch(segment):
+        if (
+            _UUID_SEGMENT_RE.fullmatch(segment)
+            or _GENERIC_GUID_SEGMENT_RE.fullmatch(segment)
+        ):
             normalized_segments.append("{uuid}")
-        elif _INTEGER_SEGMENT_RE.fullmatch(segment):
+        elif (
+            _INTEGER_SEGMENT_RE.fullmatch(segment)
+            or _HEX_ID_SEGMENT_RE.fullmatch(segment)
+        ):
             normalized_segments.append("{id}")
         else:
             normalized_segments.append(segment[:160])
@@ -360,25 +394,48 @@ def extract_body_field_names(request_body: object) -> list[str]:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         parsed = None
-    if isinstance(parsed, dict):
+    if isinstance(parsed, (dict, list)):
         return _json_field_names(parsed)
     try:
         names = [name for name, _value in parse_qsl(raw, keep_blank_values=True)]
     except ValueError:
         names = []
-    if names:
-        return _safe_parameter_names(names)
+    safe_form_names = _safe_parameter_names(names)
+    if safe_form_names:
+        return safe_form_names
+    xml_names = [
+        match.group(1)
+        for match in re.finditer(
+            r"<(?!/|!|\?)([A-Za-z_][A-Za-z0-9_.\-]{0,63})(?:\s|>|/)",
+            raw,
+        )
+    ]
+    multipart_names = [
+        match.group(1)
+        for match in re.finditer(
+            r'(?i)\bname=["\']([A-Za-z_][A-Za-z0-9_.\-\[\]]{0,63})["\']',
+            raw,
+        )
+    ]
+    if xml_names or multipart_names:
+        return _safe_parameter_names([*xml_names, *multipart_names])
     return _safe_parameter_names(
         match.group(1)
         for match in re.finditer(r'["\']?([A-Za-z_][\w.\-\[\]]{0,63})["\']?\s*[:=]', raw)
     )
 
 
-def _json_field_names(value: dict) -> list[str]:
+def _json_field_names(value: dict | list) -> list[str]:
     names: list[str] = []
 
     def visit(item: object, prefix: str = "", depth: int = 0) -> None:
-        if not isinstance(item, dict) or depth > 1:
+        if depth > 1:
+            return
+        if isinstance(item, list):
+            for child in item[:3]:
+                visit(child, prefix, depth)
+            return
+        if not isinstance(item, dict):
             return
         for key, child in item.items():
             name = f"{prefix}.{key}" if prefix else str(key)
@@ -577,11 +634,16 @@ def detect_incidents(
 def detect_route_incidents(
     route_metrics: list[AccessRouteMetric],
     windows: dict[tuple[str, str], AccessWindow] | None = None,
+    baselines: dict[tuple[str, str, str], AccessRouteBaseline] | None = None,
     *,
     nginx_min_count: int = 100,
     nginx_min_rate: float = 0.30,
     ingress_min_count: int = 20,
     ingress_min_rate: float = 0.10,
+    baseline_min_samples: int = 6,
+    baseline_min_days: int = 3,
+    baseline_rate_multiplier: float = 2.0,
+    baseline_rate_delta: float = 0.10,
 ) -> list[AccessIncident]:
     """
     Detect concentrated 4xx failures hidden by healthy site-wide traffic.
@@ -631,6 +693,16 @@ def detect_route_incidents(
             ingress_min_count=ingress_min_count,
             ingress_min_rate=ingress_min_rate,
         )
+        dominant_status = (
+            max(metric.status_counts, key=metric.status_counts.get)
+            if metric.status_counts
+            else 0
+        )
+        if metric.source == "nginx" and dominant_status == 444:
+            continue
+        if dominant_status == 499:
+            min_count = max(min_count, 100)
+            min_rate = max(min_rate, 0.20)
         qualifies = (
             metric.request_count >= min_count
             and metric.status_4xx >= min_count
@@ -638,6 +710,31 @@ def detect_route_incidents(
         )
         if not qualifies:
             continue
+        baseline = (baselines or {}).get(
+            (metric.source, metric.site, metric.route_key)
+        )
+        baseline_ready = bool(
+            baseline
+            and baseline.is_ready(
+                baseline_min_samples,
+                baseline_min_days,
+            )
+        )
+        if baseline_ready and baseline:
+            rate_spiked = (
+                metric.rate_4xx
+                >= max(
+                    min_rate,
+                    baseline.rate_4xx * baseline_rate_multiplier,
+                    baseline.rate_4xx + baseline_rate_delta,
+                )
+            )
+            count_spiked = metric.status_4xx >= max(
+                min_count,
+                baseline.status_4xx * 2,
+            )
+            if not (rate_spiked and count_spiked):
+                continue
         incidents.append(
             AccessIncident(
                 source=metric.source,
@@ -646,7 +743,7 @@ def detect_route_incidents(
                 priority="P1",
                 request_count=metric.request_count,
                 current_value=metric.rate_4xx,
-                baseline_value=0.0,
+                baseline_value=baseline.rate_4xx if baseline_ready and baseline else 0.0,
                 status_4xx=metric.status_4xx,
                 status_5xx=metric.status_5xx,
                 p95_ms=metric.p95_ms,

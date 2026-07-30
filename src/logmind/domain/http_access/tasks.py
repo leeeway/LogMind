@@ -31,8 +31,13 @@ logger = get_logger(__name__)
 _DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 _PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
 _FORBIDDEN_UNSUPPORTED_AI_CLAIMS_RE = re.compile(
-    r"数据库|DataIntegrityViolationException|SQL\s*截断|C#|\.NET\s*异常",
+    r"数据库|DataIntegrityViolationException|SQL\s*截断|C#|\.NET\s*异常|"
+    r"Redis|Kafka|ZooKeeper|消息队列|线程池|连接池|NullReference|Exception|"
+    r"内存泄漏|CPU\s*过高|GC\s*异常",
     re.IGNORECASE,
+)
+_ACTIONABLE_AI_SUMMARY_RE = re.compile(
+    r"检查|排查|核对|确认|修复|回滚|扩容|限流|查看|调整|联系"
 )
 
 
@@ -167,9 +172,23 @@ async def _run_http_access_patrol(
             time_from=time_from,
             time_to=time_to,
         )
+    route_baselines = {}
+    load_route_baselines = getattr(service, "load_route_baselines", None)
+    if route_metrics and callable(load_route_baselines):
+        try:
+            route_baselines = await load_route_baselines(
+                before=time_from,
+                days=settings.http_access_baseline_days,
+            )
+        except Exception as exc:
+            logger.warning(
+                "http_access_route_baseline_load_failed",
+                error=str(exc),
+            )
     route_incidents = detect_route_incidents(
         route_metrics,
         windows,
+        route_baselines,
         nginx_min_count=getattr(
             settings,
             "http_access_nginx_4xx_min_count",
@@ -190,6 +209,26 @@ async def _run_http_access_patrol(
             "http_access_ingress_4xx_min_rate",
             0.10,
         ),
+        baseline_min_samples=getattr(
+            settings,
+            "http_access_route_baseline_min_samples",
+            6,
+        ),
+        baseline_min_days=getattr(
+            settings,
+            "http_access_route_baseline_min_days",
+            3,
+        ),
+        baseline_rate_multiplier=getattr(
+            settings,
+            "http_access_route_baseline_rate_multiplier",
+            2.0,
+        ),
+        baseline_rate_delta=getattr(
+            settings,
+            "http_access_route_baseline_rate_delta",
+            0.10,
+        ),
     )
     if route_incidents:
         incidents.extend(route_incidents)
@@ -198,6 +237,19 @@ async def _run_http_access_patrol(
     except Exception as exc:
         persisted = 0
         logger.error("http_access_metric_persist_failed", error=str(exc))
+    persisted_route_metrics = 0
+    persist_route_metrics = getattr(service, "persist_route_metrics", None)
+    if route_metrics and callable(persist_route_metrics):
+        try:
+            persisted_route_metrics = await persist_route_metrics(
+                route_metrics,
+                observed_at=time_to,
+            )
+        except Exception as exc:
+            logger.error(
+                "http_access_route_metric_persist_failed",
+                error=str(exc),
+            )
 
     batch = await alert_state.evaluate(incidents, now=time_to)
     result: dict[str, Any] = {
@@ -205,6 +257,8 @@ async def _run_http_access_patrol(
         "time_to": time_to.isoformat(),
         "metric_count": len(metrics),
         "persisted_metric_count": persisted,
+        "persisted_route_metric_count": persisted_route_metrics,
+        "route_baseline_count": len(route_baselines),
         "route_metric_count": len(route_metrics),
         "route_candidate_site_count": len(
             {(item.source, item.site) for item in route_metrics}
@@ -570,7 +624,8 @@ async def _attach_ai_summaries(
         "C#/.NET异常或任何输入中不存在的应用内部故障。"
         "upstream出现5xx时可判断为后端/upstream异常；外层5xx且无upstream证据时"
         "只能判断为网关路由、连接或上游不可达；上下游均400且耗时低时只能判断为"
-        "客户端参数或业务校验异常。证据不足时写清楚应先检查哪一项，"
+        "客户端参数或业务校验异常；499表示客户端在响应前断开。"
+        "证据不足时写清楚应先检查哪一项，"
         "不要复述指标，不使用“访问层现象”等晦涩套话。"
         "使用运维人员一眼能看懂的中文，不超过60字。"
         "返回严格JSON：{\"items\":[{\"key\":\"原key\",\"summary\":\"结论和动作\"}]}。"
@@ -620,6 +675,7 @@ def _parse_ai_summaries(content: str) -> dict[str, str]:
             key
             and summary
             and not _FORBIDDEN_UNSUPPORTED_AI_CLAIMS_RE.search(summary)
+            and _ACTIONABLE_AI_SUMMARY_RE.search(summary)
         ):
             summaries[key] = summary
     return summaries
@@ -759,9 +815,9 @@ def build_http_access_notification(
             )
         )
         if ai_summaries:
-            lines.append(f"- 结论: {ai_summaries[0]}")
+            lines.append(f"- 建议: {ai_summaries[0]}")
         else:
-            lines.append(f"- 结论: {_deterministic_diagnosis(site_incidents)}")
+            lines.append(f"- 建议: {_deterministic_diagnosis(site_incidents)}")
         lines.append("")
 
     if omitted_sites:
@@ -789,7 +845,8 @@ def _incident_metric_text(incident: AccessIncident) -> str:
         )
         return (
             f"服务错误: {incident.status_5xx}/{incident.request_count}"
-            f"（{incident.current_value * 100:.2f}%，{baseline_text}）"
+            f"（{incident.current_value * 100:.2f}%，{baseline_text}"
+            f"{_observed_text(incident)}）"
         )
     if incident.kind == "http_4xx":
         return (
@@ -799,15 +856,22 @@ def _incident_metric_text(incident: AccessIncident) -> str:
         )
     if incident.kind == "route_4xx":
         status_label = _dominant_status_label(incident)
+        baseline_text = (
+            f"，平时{incident.baseline_value * 100:.2f}%"
+            if incident.baseline_value > 0
+            else ""
+        )
         return (
             f"接口异常: {incident.route_key}，{status_label} "
             f"{incident.status_4xx}/{incident.request_count}"
-            f"（{incident.current_value * 100:.2f}%）"
+            f"（{incident.current_value * 100:.2f}%{baseline_text}"
+            f"{_observed_text(incident)}）"
         )
     if incident.kind == "latency":
         return (
             f"响应变慢: 成功请求P95 {_duration_text(incident.current_value)}"
-            f"（平时{_duration_text(incident.baseline_value)}，已连续10分钟）"
+            f"（平时{_duration_text(incident.baseline_value)}"
+            f"{_observed_text(incident)}）"
         )
     return (
         f"流量骤降: 当前{incident.current_value:.0f}次"
@@ -831,11 +895,18 @@ def _deterministic_diagnosis(incidents: list[AccessIncident]) -> str:
         dominant_status = (
             max(status_counts, key=status_counts.get) if status_counts else 0
         )
+        if dominant_status == 404:
+            if any(item.source == "ingress" for item in incidents):
+                return "404明显增多，检查Ingress路径、Java路由和服务版本是否一致。"
+            return "404明显增多，检查C#路由映射、发布版本和客户端请求路径。"
+        if dominant_status == 499:
+            if max((item.p95_ms for item in incidents), default=0) >= 2000:
+                return "499伴随长耗时，检查后端响应变慢及调用方超时设置。"
+            return "客户端主动断开增多，检查调用方超时、取消请求和网络质量。"
         return {
             400: "400明显增多，结合上方参数字段检查必填项、格式和业务校验日志。",
             401: "认证失败增多，检查凭证是否过期以及认证服务状态。",
             403: "权限拒绝增多，检查账号权限、鉴权策略和来源限制。",
-            404: "接口404增多，检查Java路由、服务版本和Ingress路径配置。",
             405: "请求方法不被支持，检查客户端Method和后端接口映射。",
             406: "服务无法接受请求格式，检查Accept、Content-Type及协商规则。",
             408: "客户端请求超时增多，检查网络质量和请求发送是否完整。",
@@ -855,6 +926,14 @@ def _duration_text(milliseconds: float) -> str:
     if milliseconds >= 1000:
         return f"{milliseconds / 1000:.1f}秒"
     return f"{milliseconds:.0f}毫秒"
+
+
+def _observed_text(incident: AccessIncident) -> str:
+    return (
+        f"，持续{incident.observed_minutes}分钟"
+        if incident.observed_minutes > 0
+        else ""
+    )
 
 
 def _display_source(source: str) -> str:
