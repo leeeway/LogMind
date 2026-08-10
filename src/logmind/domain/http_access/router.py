@@ -3,7 +3,7 @@
 from collections import Counter
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -18,6 +18,9 @@ from logmind.domain.http_access.governance import (
     VALID_ROLES,
 )
 from logmind.domain.http_access.site_config import HttpAccessSiteConfig
+from logmind.domain.http_access.models import aggregate_metrics
+from logmind.domain.http_access.service import http_access_service
+from logmind.domain.http_access.governance import discover_sites
 from logmind.domain.http_access.state import http_access_alert_state
 from logmind.domain.tenant.audit import AuditLog
 
@@ -37,6 +40,11 @@ class SiteConfigUpdate(BaseModel):
 
 class SiteConfigBulkUpdate(SiteConfigUpdate):
     site_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+class SiteDiscoveryRequest(BaseModel):
+    # A short lookback makes first use practical without rescanning history.
+    window_minutes: int = Field(default=60, ge=5, le=240)
 
 
 def _site_payload(item: HttpAccessSiteConfig) -> dict:
@@ -100,6 +108,32 @@ async def list_http_access_sites(
     if source:
         items = [item for item in items if source in item["sources"]]
     return {"items": items, "total": len(items)}
+
+
+@router.post("/sites/discover")
+async def discover_http_access_sites(
+    req: SiteDiscoveryRequest,
+    user: CurrentUser,
+) -> dict:
+    """Discover active hosts for the signed-in tenant without business lines.
+
+    This is intentionally available while the scheduled patrol is in shadow or
+    disabled mode, so operators can govern sites before enabling notifications.
+    """
+    time_to = datetime.now(UTC).replace(second=0, microsecond=0)
+    time_from = time_to - timedelta(minutes=req.window_minutes)
+    metrics = await http_access_service.collect_window(time_from, time_to)
+    configs = await discover_sites(
+        user.tenant_id,
+        aggregate_metrics(metrics),
+        observed_at=time_to,
+    )
+    return {
+        "discovered": len(configs),
+        "metric_count": len(metrics),
+        "time_from": time_from.isoformat(),
+        "time_to": time_to.isoformat(),
+    }
 
 
 @router.patch("/sites/{site_id}")

@@ -8,6 +8,7 @@ export type HttpAccessSite = {
 
 export const httpAccessApi = {
   listSites: (params?: Record<string, string>) => client.get('/http-access/sites', { params }),
+  discoverSites: (window_minutes = 60) => client.post('/http-access/sites/discover', { window_minutes }),
   updateSite: (id: string, data: Partial<HttpAccessSite>) => client.patch(`/http-access/sites/${id}`, data),
   bulkUpdate: (site_ids: string[], data: Record<string, unknown>) => client.patch('/http-access/site-bulk-update', { site_ids, ...data }),
   pending: () => client.get('/http-access/pending'),
