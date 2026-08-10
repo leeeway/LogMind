@@ -86,6 +86,7 @@ const menuItems = [
     label: '运维管理',
     children: [
       { key: '/business-lines', icon: <ClusterOutlined />, label: '服务管理' },
+      { key: '/http-access-sites', icon: <RadarChartOutlined />, label: '访问站点治理' },
       { key: '/weekly-report', icon: <FileTextOutlined />, label: '巡检周报' },
       { key: '/pivot', icon: <TableOutlined />, label: '透视分析' },
       { key: '/dashboard-builder', icon: <AppstoreOutlined />, label: '看板编辑器' },
@@ -157,6 +158,7 @@ const AppLayout: React.FC = () => {
       '/patrol': 'grp-monitor', '/heatmap': 'grp-monitor', '/topology': 'grp-monitor', '/sla': 'grp-monitor', '/correlation': 'grp-monitor', '/alert-fatigue': 'grp-monitor', '/mttr': 'grp-monitor', '/health-scores': 'grp-monitor',
       '/analysis': 'grp-analysis', '/alerts': 'grp-analysis', '/logs': 'grp-analysis', '/live-tail': 'grp-analysis', '/time-travel': 'grp-analysis', '/known-issues': 'grp-analysis', '/error-dna': 'grp-analysis', '/playbooks': 'grp-analysis',
       '/business-lines': 'grp-ops', '/weekly-report': 'grp-ops', '/pivot': 'grp-ops', '/dashboard-builder': 'grp-ops', '/ai-insights': 'grp-ops', '/ai-cost': 'grp-ops', '/ops-efficiency': 'grp-ops',
+      '/http-access-sites': 'grp-ops',
       '/knowledge': 'grp-system', '/settings': 'grp-system',
     };
     const grp = flatMap[selectedKey];

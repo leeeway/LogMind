@@ -69,6 +69,11 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=3, minute=30),
         "options": {"queue": "alert"},
     },
+    "http-access-pending-digest": {
+        "task": "logmind.domain.http_access.tasks.send_http_access_pending_digest",
+        "schedule": crontab(hour=9, minute=30, day_of_week="1-5"),
+        "options": {"queue": "alert"},
+    },
     # Cleanup old analysis tasks — daily at 3 AM
     "cleanup-old-tasks": {
         "task": "logmind.domain.analysis.tasks.cleanup_old_tasks",

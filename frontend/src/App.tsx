@@ -47,6 +47,7 @@ const HealthScorecard = React.lazy(() => import('@/pages/Dashboard/HealthScoreca
 const CostIntelligence = React.lazy(() => import('@/pages/Dashboard/CostIntelligence'));
 const Playbooks = React.lazy(() => import('@/pages/Analysis/Playbooks'));
 const OpsEfficiency = React.lazy(() => import('@/pages/Dashboard/OpsEfficiency'));
+const HttpAccessSites = React.lazy(() => import('@/pages/HttpAccessSites'));
 
 const FullPageSpin: React.FC = () => (
   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
@@ -156,6 +157,7 @@ const App: React.FC = () => {
                 <Route path="ai-cost" element={<CostIntelligence />} />
                 <Route path="playbooks" element={<Playbooks />} />
                 <Route path="ops-efficiency" element={<OpsEfficiency />} />
+                <Route path="http-access-sites" element={<HttpAccessSites />} />
                 <Route path="settings" element={<Settings />} />
               </Route>
             </Routes>

@@ -135,6 +135,7 @@ class AccessRouteMetric:
     status_5xx: int = 0
     p95_ms: float = 0.0
     status_counts: dict[int, int] = field(default_factory=dict)
+    upstream_status_counts: dict[int, int] = field(default_factory=dict)
 
     @property
     def rate_4xx(self) -> float:
@@ -234,6 +235,7 @@ class AccessIncident:
     observed_minutes: int = 0
     samples: list[AccessSample] = field(default_factory=list)
     ai_summary: str = ""
+    site_role: str = "general"
 
     @property
     def key(self) -> str:
@@ -665,6 +667,7 @@ def detect_route_incidents(
                 status_5xx=metric.status_5xx,
                 p95_ms=metric.p95_ms,
                 status_counts=dict(metric.status_counts),
+                upstream_status_counts=dict(metric.upstream_status_counts),
             )
             continue
         current.request_count += metric.request_count
@@ -674,6 +677,10 @@ def detect_route_incidents(
         for status, count in metric.status_counts.items():
             current.status_counts[status] = (
                 current.status_counts.get(status, 0) + count
+            )
+        for status, count in metric.upstream_status_counts.items():
+            current.upstream_status_counts[status] = (
+                current.upstream_status_counts.get(status, 0) + count
             )
 
     incidents: list[AccessIncident] = []
@@ -720,6 +727,29 @@ def detect_route_incidents(
                 baseline_min_days,
             )
         )
+        # For C# sites a quick, upstream-confirmed 400 normally means an
+        # expected parameter/business validation failure.  It is useful as a
+        # baseline signal, but must never page merely because it is frequent.
+        validation_400 = (
+            dominant_status == 400
+            and metric.status_counts.get(400, 0) == metric.status_4xx
+            and metric.upstream_status_counts.get(400, 0) >= metric.status_4xx
+            and metric.p95_ms < 1000
+            and metric.status_5xx == 0
+        )
+        if validation_400:
+            if not baseline_ready or not baseline:
+                continue
+            rate_spiked = (
+                metric.rate_4xx >= baseline.rate_4xx * 3
+                and metric.rate_4xx >= baseline.rate_4xx + 0.20
+            )
+            count_spiked = metric.status_4xx >= max(
+                min_count,
+                baseline.status_4xx * 2,
+            )
+            if not (rate_spiked and count_spiked):
+                continue
         if baseline_ready and baseline:
             rate_spiked = (
                 metric.rate_4xx

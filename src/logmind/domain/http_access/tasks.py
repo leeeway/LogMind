@@ -25,6 +25,11 @@ from logmind.domain.http_access.models import (
 )
 from logmind.domain.http_access.service import http_access_service
 from logmind.domain.http_access.state import http_access_alert_state
+from logmind.domain.http_access.governance import (
+    discover_sites,
+    filter_enabled_incidents,
+    role_for_site,
+)
 
 logger = get_logger(__name__)
 
@@ -57,6 +62,48 @@ def cleanup_http_access_metrics():
     if not get_settings().http_access_patrol_enabled:
         return
     run_async(_cleanup_http_access_metrics())
+
+
+@celery_app.task(name="logmind.domain.http_access.tasks.send_http_access_pending_digest")
+def send_http_access_pending_digest():
+    """Weekday summary of unresolved P1s; realtime P0 stays independent."""
+    if not get_settings().http_access_patrol_enabled:
+        return
+    run_async(_send_http_access_pending_digest())
+
+
+async def _send_http_access_pending_digest() -> bool:
+    now = datetime.now(_DISPLAY_TZ)
+    if now.weekday() >= 5:
+        return False
+    active = await http_access_alert_state.get_active_incidents()
+    pending = [item for item in active if item.get("priority") == "P1"]
+    if not pending:
+        return False
+    pending.sort(key=lambda item: str(item.get("first_seen", "")))
+    lines = ["## 🟡 HTTP访问待处理摘要", f"**时间**: {now:%Y-%m-%d %H:%M}", ""]
+    for item in pending[:10]:
+        first_seen = _parse_state_time(item.get("first_seen"))
+        duration = ""
+        if first_seen:
+            duration = f"，持续{max(5, int((now - first_seen.astimezone(_DISPLAY_TZ)).total_seconds() // 60))}分钟"
+        lines.append(
+            f"- {item.get('site')} · {_display_source(str(item.get('source', 'nginx')))}"
+            f" · {_display_kind(str(item.get('kind', '')))}{duration}"
+        )
+    if len(pending) > 10:
+        lines.append(f"- 另有 {len(pending) - 10} 个待处理问题")
+    delivered = await _send_notification("\n".join(lines))
+    logger.info("http_access_pending_digest_completed", pending_count=len(pending), delivered=delivered)
+    return delivered
+
+
+def _parse_state_time(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
 async def _cleanup_http_access_metrics() -> None:
@@ -123,6 +170,20 @@ async def _run_http_access_patrol(
         baselines = {}
         logger.warning("http_access_baseline_load_failed", error=str(exc))
     windows = aggregate_metrics(metrics)
+    # Discovery is deliberately independent from business_line.  Hosts become
+    # visible immediately but start in observe mode, so discovery can never
+    # create an unexpected production notification.
+    try:
+        tenant_id = await _resolve_tenant_id()
+        site_configs = await discover_sites(
+            tenant_id,
+            windows,
+            observed_at=time_to,
+        )
+    except Exception as exc:
+        tenant_id = None
+        site_configs = {}
+        logger.error("http_access_site_discovery_failed", error=str(exc))
     incidents = detect_incidents(windows, baselines)
     route_eligible_by_source: dict[str, int] = defaultdict(int)
     route_rejected_site_count = 0
@@ -232,6 +293,13 @@ async def _run_http_access_patrol(
     )
     if route_incidents:
         incidents.extend(route_incidents)
+    candidate_incident_count = len(incidents)
+    # If the patrol has no tenant owner it cannot safely apply a tenant policy;
+    # retain legacy global behavior rather than silently dropping a P0.
+    if tenant_id:
+        incidents = filter_enabled_incidents(incidents, site_configs)
+        for incident in incidents:
+            incident.site_role = role_for_site(incident.site, site_configs)
     try:
         persisted = await service.persist_metrics(metrics)
     except Exception as exc:
@@ -266,6 +334,8 @@ async def _run_http_access_patrol(
         "route_rejected_site_count": route_rejected_site_count,
         "route_omitted_site_count": route_omitted_site_count,
         "incident_count": len(incidents),
+        "candidate_incident_count": candidate_incident_count,
+        "suppressed_site_mode_count": candidate_incident_count - len(incidents),
         "incident_site_count": len({item.site for item in incidents}),
         "top_incidents": _build_incident_snapshot(incidents),
         "notification_incident_count": len(batch.due),
@@ -323,11 +393,6 @@ async def _run_http_access_patrol(
         sample_size=settings.http_access_sample_size,
     )
 
-    try:
-        tenant_id = await _resolve_tenant_id()
-    except Exception as exc:
-        tenant_id = None
-        logger.warning("http_access_tenant_resolve_failed", error=str(exc))
     if settings.http_access_ai_enabled and tenant_id and display_incidents:
         await _attach_ai_summaries(display_incidents, tenant_id)
 
@@ -739,7 +804,8 @@ def build_http_access_notification(
         sources = "/".join(
             sorted({_display_source(item.source) for item in site_incidents})
         )
-        lines.append(f"**{index}. {site} [{priority}] · {sources}**")
+        role = next((item.site_role for item in site_incidents if item.site_role), "general")
+        lines.append(f"**{index}. {site} [{priority}] · {sources} · {_display_role(role)}**")
         for incident in sorted(
             site_incidents,
             key=lambda item: (
@@ -938,6 +1004,13 @@ def _observed_text(incident: AccessIncident) -> str:
 
 def _display_source(source: str) -> str:
     return "Ingress/Java" if source == "ingress" else "Nginx/C#"
+
+
+def _display_role(role: str) -> str:
+    return {
+        "app": "APP", "account": "账号", "payment": "支付",
+        "front": "前台", "cdn_download": "CDN/下载", "general": "通用",
+    }.get(role, "通用")
 
 
 def _dominant_status_label(incident: AccessIncident) -> str:

@@ -76,13 +76,6 @@ class HttpAccessAlertState:
         recoveries: list[AccessRecovery] = []
         settings = get_settings()
         p0_repeat_delta = timedelta(minutes=settings.http_access_dedup_minutes)
-        p1_repeat_delta = timedelta(
-            minutes=getattr(
-                settings,
-                "http_access_repeat_notification_minutes",
-                240,
-            )
-        )
 
         for key, incident in current_by_key.items():
             old = previous.get(key, {})
@@ -99,11 +92,6 @@ class HttpAccessAlertState:
 
             should_notify = False
             if active:
-                repeat_delta = (
-                    p0_repeat_delta
-                    if incident.priority == "P0"
-                    else p1_repeat_delta
-                )
                 should_notify = (
                     not was_active
                     or _is_escalation(
@@ -114,8 +102,12 @@ class HttpAccessAlertState:
                         incident,
                         float(old.get("impact", 0) or 0),
                     )
-                    or last_notified is None
-                    or current_time - last_notified >= repeat_delta
+                    # P1 is sent once on confirmation, then remains in the
+                    # pending list/daily digest. P0 retains short dedup.
+                    or (incident.priority == "P0" and (
+                        last_notified is None
+                        or current_time - last_notified >= p0_repeat_delta
+                    ))
                 )
             if should_notify:
                 due.append(incident)
@@ -274,6 +266,15 @@ class HttpAccessAlertState:
         except Exception as exc:
             logger.warning("http_access_run_snapshot_load_failed", error=str(exc))
             return {}
+
+    async def get_active_incidents(self) -> list[dict]:
+        """Return privacy-safe unresolved P1/P0 state for the backend/digest."""
+        state = await self._load()
+        return [
+            {"key": key, **item}
+            for key, item in state.items()
+            if item.get("active") and item.get("priority") in {"P0", "P1"}
+        ]
 
     async def get_run_history(self, *, limit: int = 288) -> list[dict]:
         max_limit = getattr(

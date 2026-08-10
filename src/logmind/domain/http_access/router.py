@@ -2,12 +2,142 @@
 
 from collections import Counter
 
-from fastapi import APIRouter, Query
+import json
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from logmind.core.config import get_settings
+from logmind.core.dependencies import CurrentUser, DBSession
+from logmind.domain.http_access.governance import (
+    CRITICAL_ROLES,
+    VALID_ENVIRONMENTS,
+    VALID_MODES,
+    VALID_ROLES,
+)
+from logmind.domain.http_access.site_config import HttpAccessSiteConfig
 from logmind.domain.http_access.state import http_access_alert_state
+from logmind.domain.tenant.audit import AuditLog
 
 router = APIRouter(prefix="/http-access", tags=["HTTP Access"])
+
+
+class SiteConfigUpdate(BaseModel):
+    environment: str | None = None
+    role: str | None = None
+    monitoring_mode: str | None = None
+    enable_4xx: bool | None = None
+    enable_latency: bool | None = None
+    enable_traffic_drop: bool | None = None
+    owner: str | None = Field(default=None, max_length=100)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SiteConfigBulkUpdate(SiteConfigUpdate):
+    site_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+def _site_payload(item: HttpAccessSiteConfig) -> dict:
+    try:
+        sources = json.loads(item.sources or "[]")
+    except json.JSONDecodeError:
+        sources = []
+    return {
+        "id": item.id, "site": item.site, "sources": sources,
+        "environment": item.environment, "role": item.role,
+        "monitoring_mode": item.monitoring_mode,
+        "enable_4xx": item.enable_4xx, "enable_latency": item.enable_latency,
+        "enable_traffic_drop": item.enable_traffic_drop,
+        "first_seen_at": item.first_seen_at, "last_seen_at": item.last_seen_at,
+        "last_status": item.last_status, "owner": item.owner, "notes": item.notes,
+        "updated_at": item.updated_at,
+    }
+
+
+def _validate_site_changes(values: dict) -> None:
+    if "environment" in values and values["environment"] not in VALID_ENVIRONMENTS:
+        raise HTTPException(422, "environment must be production or test")
+    if "role" in values and values["role"] not in VALID_ROLES:
+        raise HTTPException(422, "invalid site role")
+    if "monitoring_mode" in values and values["monitoring_mode"] not in VALID_MODES:
+        raise HTTPException(422, "monitoring_mode must be observe, enabled or disabled")
+    if values.get("enable_traffic_drop") and values.get("role") not in CRITICAL_ROLES:
+        raise HTTPException(422, "traffic-drop monitoring requires an APP/account/payment/front role")
+
+
+async def _audit_site_change(session, user, item, values: dict) -> None:
+    session.add(AuditLog(
+        tenant_id=user.tenant_id, user_id=user.sub, username="",
+        action="http_access.site_config.update", resource_type="http_access_site",
+        resource_id=item.id, details=json.dumps({"site": item.site, "changes": values}, ensure_ascii=False),
+    ))
+
+
+@router.get("/sites")
+async def list_http_access_sites(
+    session: DBSession,
+    user: CurrentUser,
+    search: str = "",
+    source: str = "",
+    environment: str = "",
+    role: str = "",
+    monitoring_mode: str = "",
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    stmt = select(HttpAccessSiteConfig).where(HttpAccessSiteConfig.tenant_id == user.tenant_id)
+    if search:
+        stmt = stmt.where(HttpAccessSiteConfig.site.ilike(f"%{search.strip()}%"))
+    if environment:
+        stmt = stmt.where(HttpAccessSiteConfig.environment == environment)
+    if role:
+        stmt = stmt.where(HttpAccessSiteConfig.role == role)
+    if monitoring_mode:
+        stmt = stmt.where(HttpAccessSiteConfig.monitoring_mode == monitoring_mode)
+    result = await session.execute(stmt.order_by(HttpAccessSiteConfig.last_seen_at.desc()).limit(limit))
+    items = [_site_payload(item) for item in result.scalars().all()]
+    if source:
+        items = [item for item in items if source in item["sources"]]
+    return {"items": items, "total": len(items)}
+
+
+@router.patch("/sites/{site_id}")
+async def update_http_access_site(site_id: str, req: SiteConfigUpdate, session: DBSession, user: CurrentUser) -> dict:
+    item = await session.get(HttpAccessSiteConfig, site_id)
+    if not item or item.tenant_id != user.tenant_id:
+        raise HTTPException(404, "HTTP access site not found")
+    values = req.model_dump(exclude_none=True)
+    _validate_site_changes(values)
+    effective_role = values.get("role", item.role)
+    if values.get("enable_traffic_drop") and effective_role not in CRITICAL_ROLES:
+        raise HTTPException(422, "traffic-drop monitoring requires a critical role")
+    for key, value in values.items():
+        setattr(item, key, value)
+    if item.environment == "test" or item.monitoring_mode == "disabled":
+        item.last_status = "silent"
+    await _audit_site_change(session, user, item, values)
+    await session.flush()
+    return _site_payload(item)
+
+
+@router.patch("/site-bulk-update")
+async def bulk_update_http_access_sites(req: SiteConfigBulkUpdate, session: DBSession, user: CurrentUser) -> dict:
+    values = req.model_dump(exclude_none=True, exclude={"site_ids"})
+    _validate_site_changes(values)
+    result = await session.execute(select(HttpAccessSiteConfig).where(
+        HttpAccessSiteConfig.tenant_id == user.tenant_id,
+        HttpAccessSiteConfig.id.in_(req.site_ids),
+    ))
+    items = list(result.scalars().all())
+    for item in items:
+        if values.get("enable_traffic_drop") and values.get("role", item.role) not in CRITICAL_ROLES:
+            raise HTTPException(422, f"{item.site} is not a critical role")
+        for key, value in values.items():
+            setattr(item, key, value)
+        await _audit_site_change(session, user, item, values)
+    await session.flush()
+    return {"updated": len(items)}
 
 
 @router.get("/status")
@@ -33,11 +163,7 @@ async def get_http_access_patrol_status() -> dict:
         "notification_cooldown_minutes": (
             settings.http_access_notification_cooldown_minutes
         ),
-        "repeat_notification_minutes": getattr(
-            settings,
-            "http_access_repeat_notification_minutes",
-            240,
-        ),
+        "p1_repeat_policy": "escalation_only",
         "max_route_candidate_sites": (
             settings.http_access_max_route_candidate_sites
         ),
@@ -106,6 +232,17 @@ async def get_http_access_patrol_runs(
         "summary": _summarize_runs(runs),
         "runs": runs,
     }
+
+
+@router.get("/pending")
+async def list_pending_http_access_incidents(session: DBSession, user: CurrentUser) -> dict:
+    """Unresolved active incidents; site ownership is enforced by config scope."""
+    active = await http_access_alert_state.get_active_incidents()
+    result = await session.execute(select(HttpAccessSiteConfig.site).where(
+        HttpAccessSiteConfig.tenant_id == user.tenant_id
+    ))
+    sites = set(result.scalars().all())
+    return {"items": [item for item in active if item.get("site") in sites]}
 
 
 def _summarize_runs(runs: list[dict]) -> dict:

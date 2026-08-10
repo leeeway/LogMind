@@ -630,7 +630,13 @@ class HttpAccessService:
                                             "field": "lm_status_code",
                                             "size": 10,
                                         }
-                                    }
+                                    },
+                                    "upstream_status_codes": {
+                                        "terms": {
+                                            "field": "lm_upstream_status_code",
+                                            "size": 10,
+                                        }
+                                    },
                                 },
                             },
                             "has_4xx": {
@@ -675,6 +681,15 @@ class HttpAccessService:
                     )
                     if 400 <= safe_int(item.get("key")) < 500
                 }
+                upstream_status_counts = {
+                    safe_int(item.get("key")): int(item.get("doc_count", 0))
+                    for item in (
+                        bucket.get("status_4xx", {})
+                        .get("upstream_status_codes", {})
+                        .get("buckets", [])
+                    )
+                    if safe_int(item.get("key")) > 0
+                }
                 route_metrics.append(
                     AccessRouteMetric(
                         source=source,
@@ -688,6 +703,7 @@ class HttpAccessService:
                             .get("95.0")
                         ),
                         status_counts=status_counts,
+                        upstream_status_counts=upstream_status_counts,
                     )
                 )
             after_key = aggregation.get("after_key")
@@ -773,6 +789,8 @@ class HttpAccessService:
                 "request_count": {"type": "long"},
                 "status_4xx": {"type": "long"},
                 "rate_4xx": {"type": "double"},
+                "p95_ms": {"type": "double"},
+                "upstream_status_counts": {"type": "object", "enabled": False},
             },
         }
         try:
@@ -819,6 +837,8 @@ class HttpAccessService:
                         "request_count": metric.request_count,
                         "status_4xx": metric.status_4xx,
                         "rate_4xx": round(metric.rate_4xx, 6),
+                        "p95_ms": round(metric.p95_ms, 3),
+                        "upstream_status_counts": metric.upstream_status_counts,
                     },
                 }
             )

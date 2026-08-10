@@ -603,13 +603,11 @@ def test_route_aggregation_handles_many_server_names_in_one_query():
         "server_name.keyword"
     ] == ["api.qibao.tjlong.cn", "pigeon.gyyx.cn"]
     assert "lm_route_key" in body["runtime_mappings"]
-    assert body["aggs"]["by_site_route"]["aggs"]["status_4xx"]["aggs"] == {
-        "status_codes": {
-            "terms": {
-                "field": "lm_status_code",
-                "size": 10,
-            }
-        }
+    assert body["aggs"]["by_site_route"]["aggs"]["status_4xx"]["aggs"]["status_codes"] == {
+        "terms": {"field": "lm_status_code", "size": 10}
+    }
+    assert body["aggs"]["by_site_route"]["aggs"]["status_4xx"]["aggs"]["upstream_status_codes"] == {
+        "terms": {"field": "lm_upstream_status_code", "size": 10}
     }
 
 
@@ -1252,7 +1250,7 @@ def test_latency_requires_two_consecutive_windows():
     asyncio.run(scenario())
 
 
-def test_route_p1_requires_two_windows_and_repeats_only_after_four_hours(
+def test_route_p1_requires_two_windows_and_does_not_repeat_without_escalation(
     monkeypatch,
 ):
     settings = SimpleNamespace(
@@ -1299,7 +1297,7 @@ def test_route_p1_requires_two_windows_and_repeats_only_after_four_hours(
             [incident],
             now=_utc() + timedelta(minutes=245),
         )
-        assert [item.key for item in repeat.due] == [incident.key]
+        assert repeat.due == []
 
     asyncio.run(scenario())
 

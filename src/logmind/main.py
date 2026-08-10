@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
     import logmind.domain.provider.models  # noqa: F401
     import logmind.domain.rag.models  # noqa: F401
     import logmind.domain.tenant.models  # noqa: F401
+    import logmind.domain.http_access.site_config  # noqa: F401
 
     # Initialize database
     from logmind.core.database import init_db

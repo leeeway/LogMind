@@ -19,6 +19,7 @@ import logmind.domain.prompt.models  # noqa: F401
 import logmind.domain.analysis.models  # noqa: F401
 import logmind.domain.alert.models  # noqa: F401
 import logmind.domain.rag.models  # noqa: F401
+import logmind.domain.http_access.site_config  # noqa: F401
 
 config = context.config
 
