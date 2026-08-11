@@ -180,6 +180,7 @@ def _register_routes(app: FastAPI):
     from logmind.domain.dashboard.sla_router import router as sla_router
     from logmind.domain.dashboard.topology_router import router as topology_router
     from logmind.domain.http_access.router import router as http_access_router
+    from logmind.domain.http_access.repo_router import router as http_access_repo_router
     from logmind.domain.log.nl_query_router import router as nl_query_router
     from logmind.domain.log.replay_router import router as replay_router
     from logmind.domain.log.router import router as log_router
@@ -202,6 +203,7 @@ def _register_routes(app: FastAPI):
     api_router.include_router(report_router)
     api_router.include_router(alert_router)
     api_router.include_router(http_access_router)
+    api_router.include_router(http_access_repo_router)
     api_router.include_router(dashboard_router)
     api_router.include_router(sla_router)
     api_router.include_router(rag_router)

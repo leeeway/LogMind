@@ -14,6 +14,18 @@ from logmind.core.async_task import run_async
 from logmind.core.celery_app import celery_app
 from logmind.core.config import get_settings
 from logmind.core.logging import get_logger
+from logmind.domain.http_access.governance import (
+    discover_sites,
+    filter_enabled_incidents,
+    role_for_site,
+)
+from logmind.domain.http_access.incident_store import (
+    filter_learned_incidents,
+    learn_stable_route_behaviors,
+    mark_notification_delivered,
+    mark_recovered_records,
+    sync_incident_records,
+)
 from logmind.domain.http_access.models import (
     AccessIncident,
     AccessRecovery,
@@ -21,15 +33,11 @@ from logmind.domain.http_access.models import (
     detect_incidents,
     detect_route_incidents,
     is_rejected_traffic_window,
+    merge_cross_source_incidents,
     route_4xx_threshold,
 )
 from logmind.domain.http_access.service import http_access_service
 from logmind.domain.http_access.state import http_access_alert_state
-from logmind.domain.http_access.governance import (
-    discover_sites,
-    filter_enabled_incidents,
-    role_for_site,
-)
 
 logger = get_logger(__name__)
 
@@ -72,12 +80,124 @@ def send_http_access_pending_digest():
     run_async(_send_http_access_pending_digest())
 
 
+@celery_app.task(name="logmind.domain.http_access.tasks.sync_http_repository")
+def sync_http_repository(repository_id: str):
+    run_async(_sync_http_repository(repository_id))
+
+
+@celery_app.task(name="logmind.domain.http_access.tasks.scheduled_sync_http_repositories")
+def scheduled_sync_http_repositories():
+    run_async(_scheduled_sync_http_repositories())
+
+
+async def _sync_http_repository(repository_id: str) -> None:
+    from logmind.core.database import get_db_context
+    from logmind.domain.http_access.repository import (
+        RepositoryError,
+        git_repository_service,
+    )
+    from logmind.domain.http_access.site_config import GitRepositoryConfig
+
+    async with get_db_context() as session:
+        repository = await session.get(GitRepositoryConfig, repository_id)
+        if not repository or not repository.is_active:
+            return
+        repository.last_sync_status = "syncing"
+    try:
+        # Git network/disk I/O intentionally runs without holding a database
+        # connection from the worker pool.
+        result = await git_repository_service.sync(repository)
+    except RepositoryError as exc:
+        async with get_db_context() as session:
+            current = await session.get(GitRepositoryConfig, repository_id)
+            if current:
+                current.last_sync_status = "failed"
+                current.last_sync_error = str(exc)[:500]
+        logger.warning(
+            "http_access_repository_sync_failed",
+            repository_id=repository_id,
+            error=str(exc),
+        )
+        return
+    async with get_db_context() as session:
+        current = await session.get(GitRepositoryConfig, repository_id)
+        if not current:
+            return
+        current.default_branch = repository.default_branch
+        current.last_sync_status = "success"
+        current.last_sync_error = ""
+        current.last_synced_at = result["synced_at"]
+        current.last_commit_sha = result["commit_sha"]
+        current.cache_size_bytes = result["cache_size_bytes"]
+
+
+async def _scheduled_sync_http_repositories() -> None:
+    from sqlalchemy import select
+
+    from logmind.core.database import get_db_context
+    from logmind.domain.http_access.site_config import GitRepositoryConfig
+
+    async with get_db_context() as session:
+        result = await session.execute(
+            select(GitRepositoryConfig.id).where(
+                GitRepositoryConfig.is_active.is_(True)
+            )
+        )
+        repository_ids = list(result.scalars().all())
+    for repository_id in repository_ids:
+        sync_http_repository.delay(repository_id)
+
+
 async def _send_http_access_pending_digest() -> bool:
     now = datetime.now(_DISPLAY_TZ)
     if now.weekday() >= 5:
         return False
-    active = await http_access_alert_state.get_active_incidents()
-    pending = [item for item in active if item.get("priority") == "P1"]
+    tenant_id = await _resolve_tenant_id()
+    if not tenant_id:
+        return False
+    from sqlalchemy import or_, select
+
+    from logmind.core.database import get_db_context
+    from logmind.domain.http_access.site_config import (
+        HttpAccessIncidentRecord,
+        HttpAccessSiteConfig,
+    )
+
+    local_day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = local_day_start.astimezone(UTC)
+
+    async with get_db_context() as session:
+        result = await session.execute(
+            select(HttpAccessIncidentRecord).where(
+                HttpAccessIncidentRecord.tenant_id == tenant_id,
+                HttpAccessIncidentRecord.priority == "P1",
+                HttpAccessIncidentRecord.status.in_(["open", "acknowledged"]),
+                or_(
+                    HttpAccessIncidentRecord.last_digest_at.is_(None),
+                    HttpAccessIncidentRecord.last_digest_at < day_start_utc,
+                ),
+            ).order_by(HttpAccessIncidentRecord.first_seen_at)
+        )
+        rows = list(result.scalars().all())
+        site_result = await session.execute(
+            select(HttpAccessSiteConfig).where(
+                HttpAccessSiteConfig.tenant_id == tenant_id,
+                HttpAccessSiteConfig.site.in_({item.site for item in rows}),
+            )
+        )
+        site_configs = {item.site: item for item in site_result.scalars().all()}
+    pending = [
+        {
+            "site": item.site,
+            "source": item.source,
+            "kind": item.kind,
+            "first_seen": item.first_seen_at.isoformat(),
+            "owner": site_configs.get(item.site).owner if site_configs.get(item.site) else "",
+            "role": site_configs.get(item.site).role if site_configs.get(item.site) else "general",
+            "id": item.id,
+        }
+        for item in rows
+    ]
     if not pending:
         return False
     pending.sort(key=lambda item: str(item.get("first_seen", "")))
@@ -90,10 +210,23 @@ async def _send_http_access_pending_digest() -> bool:
         lines.append(
             f"- {item.get('site')} · {_display_source(str(item.get('source', 'nginx')))}"
             f" · {_display_kind(str(item.get('kind', '')))}{duration}"
+            f" · {item.get('role') or 'general'}"
+            f" · 负责人:{item.get('owner') or '待配置'}"
         )
     if len(pending) > 10:
         lines.append(f"- 另有 {len(pending) - 10} 个待处理问题")
     delivered = await _send_notification("\n".join(lines))
+    if delivered:
+        delivered_ids = [str(item["id"]) for item in pending]
+        async with get_db_context() as session:
+            result = await session.execute(
+                select(HttpAccessIncidentRecord).where(
+                    HttpAccessIncidentRecord.tenant_id == tenant_id,
+                    HttpAccessIncidentRecord.id.in_(delivered_ids),
+                )
+            )
+            for record in result.scalars().all():
+                record.last_digest_at = datetime.now(UTC)
     logger.info("http_access_pending_digest_completed", pending_count=len(pending), delivered=delivered)
     return delivered
 
@@ -293,13 +426,38 @@ async def _run_http_access_patrol(
     )
     if route_incidents:
         incidents.extend(route_incidents)
+    auto_learned_count = 0
+    if tenant_id and route_metrics and route_baselines:
+        try:
+            auto_learned_count = await learn_stable_route_behaviors(
+                tenant_id,
+                route_metrics,
+                route_baselines,
+                observed_at=time_to,
+            )
+        except Exception as exc:
+            logger.warning("http_access_auto_learning_failed", error=str(exc))
+    incidents = merge_cross_source_incidents(incidents)
     candidate_incident_count = len(incidents)
     # If the patrol has no tenant owner it cannot safely apply a tenant policy;
     # retain legacy global behavior rather than silently dropping a P0.
     if tenant_id:
         incidents = filter_enabled_incidents(incidents, site_configs)
+        site_enabled_incident_count = len(incidents)
         for incident in incidents:
             incident.site_role = role_for_site(incident.site, site_configs)
+        try:
+            incidents, learned_suppressed_count = await filter_learned_incidents(
+                tenant_id,
+                incidents,
+                now=time_to,
+            )
+        except Exception as exc:
+            learned_suppressed_count = 0
+            logger.warning("http_access_learning_filter_failed_open", error=str(exc))
+    else:
+        site_enabled_incident_count = len(incidents)
+        learned_suppressed_count = 0
     try:
         persisted = await service.persist_metrics(metrics)
     except Exception as exc:
@@ -320,6 +478,21 @@ async def _run_http_access_patrol(
             )
 
     batch = await alert_state.evaluate(incidents, now=time_to)
+    try:
+        await sync_incident_records(
+            tenant_id,
+            incidents,
+            due_fingerprints={item.fingerprint for item in batch.due},
+            observed_at=time_to,
+        )
+        await mark_recovered_records(
+            tenant_id,
+            batch.recoveries,
+            recovered_at=time_to,
+        )
+    except Exception as exc:
+        # Durable history must not become a new reason to miss a real alert.
+        logger.error("http_access_incident_persistence_failed", error=str(exc))
     result: dict[str, Any] = {
         "time_from": time_from.isoformat(),
         "time_to": time_to.isoformat(),
@@ -335,7 +508,9 @@ async def _run_http_access_patrol(
         "route_omitted_site_count": route_omitted_site_count,
         "incident_count": len(incidents),
         "candidate_incident_count": candidate_incident_count,
-        "suppressed_site_mode_count": candidate_incident_count - len(incidents),
+        "suppressed_site_mode_count": candidate_incident_count - site_enabled_incident_count,
+        "learned_suppressed_count": learned_suppressed_count,
+        "auto_learned_count": auto_learned_count,
         "incident_site_count": len({item.site for item in incidents}),
         "top_incidents": _build_incident_snapshot(incidents),
         "notification_incident_count": len(batch.due),
@@ -393,6 +568,22 @@ async def _run_http_access_patrol(
         sample_size=settings.http_access_sample_size,
     )
 
+    if tenant_id and display_incidents:
+        from logmind.domain.http_access.diagnostics import (
+            enrich_incident_diagnostics,
+        )
+
+        try:
+            await enrich_incident_diagnostics(
+                tenant_id,
+                display_incidents,
+                site_configs,
+                time_from=time_from,
+                time_to=time_to,
+            )
+        except Exception as exc:
+            logger.warning("http_access_diagnostics_failed_open", error=str(exc))
+
     if settings.http_access_ai_enabled and tenant_id and display_incidents:
         await _attach_ai_summaries(display_incidents, tenant_id)
 
@@ -413,6 +604,15 @@ async def _run_http_access_patrol(
             await finish_summary(reservation, delivered=False)
         raise
     await alert_state.save(batch, delivered=delivered)
+    if delivered:
+        try:
+            await mark_notification_delivered(
+                tenant_id,
+                batch.due,
+                delivered_at=time_to,
+            )
+        except Exception as exc:
+            logger.error("http_access_delivery_persistence_failed", error=str(exc))
     finish_summary = getattr(alert_state, "finish_summary", None)
     if reservation is not None and callable(finish_summary):
         await finish_summary(reservation, delivered=delivered)
@@ -669,6 +869,7 @@ async def _attach_ai_summaries(
                 "baseline_value": round(incident.baseline_value, 6),
                 "status_4xx": incident.status_4xx,
                 "status_counts": incident.status_counts,
+                "upstream_status_counts": incident.upstream_status_counts,
                 "status_5xx": incident.status_5xx,
                 "gateway_5xx": incident.gateway_5xx,
                 "upstream_5xx": incident.upstream_5xx,
@@ -677,6 +878,9 @@ async def _attach_ai_summaries(
                 "samples": [
                     sample.to_ai_dict() for sample in incident.samples[:5]
                 ],
+                "application_evidence": incident.diagnostic_evidence[:10],
+                "knowledge_sources": incident.knowledge_sources[:10],
+                "code_findings": incident.code_findings[:3],
             }
         )
 
@@ -691,6 +895,9 @@ async def _attach_ai_summaries(
         "只能判断为网关路由、连接或上游不可达；上下游均400且耗时低时只能判断为"
         "客户端参数或业务校验异常；499表示客户端在响应前断开。"
         "证据不足时写清楚应先检查哪一项，"
+        "application_evidence来自同时间段应用错误日志，knowledge_sources来自内部知识库，"
+        "code_findings只在CI提供的线上commit中检索；只有应用堆栈命中代码符号或相关文件"
+        "同时出现在部署diff时，才能提高代码关联置信度。"
         "不要复述指标，不使用“访问层现象”等晦涩套话。"
         "使用运维人员一眼能看懂的中文，不超过60字。"
         "返回严格JSON：{\"items\":[{\"key\":\"原key\",\"summary\":\"结论和动作\"}]}。"
@@ -713,14 +920,23 @@ async def _attach_ai_summaries(
                 tenant_id=tenant_id,
                 request=request,
             )
-        summaries = _parse_ai_summaries(response.content)
+        summaries = _parse_ai_summaries(
+            response.content,
+            evidence_by_key={
+                item.key: " ".join(item.diagnostic_evidence)
+                for item in incidents
+            },
+        )
         for incident in incidents:
             incident.ai_summary = summaries.get(incident.key, "")
     except Exception as exc:
         logger.warning("http_access_ai_summary_failed", error=str(exc))
 
 
-def _parse_ai_summaries(content: str) -> dict[str, str]:
+def _parse_ai_summaries(
+    content: str,
+    evidence_by_key: dict[str, str] | None = None,
+) -> dict[str, str]:
     raw = (content or "").strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
@@ -736,14 +952,45 @@ def _parse_ai_summaries(content: str) -> dict[str, str]:
             continue
         key = str(item.get("key", ""))
         summary = " ".join(str(item.get("summary", "")).split())[:80]
+        unsupported = _FORBIDDEN_UNSUPPORTED_AI_CLAIMS_RE.search(summary)
+        evidence = (evidence_by_key or {}).get(key, "")
         if (
             key
             and summary
-            and not _FORBIDDEN_UNSUPPORTED_AI_CLAIMS_RE.search(summary)
+            and (not unsupported or _claim_is_supported(unsupported.group(0), evidence))
             and _ACTIONABLE_AI_SUMMARY_RE.search(summary)
         ):
             summaries[key] = summary
     return summaries
+
+
+def _claim_is_supported(claim: str, evidence: str) -> bool:
+    """Allow internal conclusions only when application evidence names them."""
+    if not evidence:
+        return False
+    claim_lower = claim.lower()
+    evidence_lower = evidence.lower()
+    aliases = {
+        "数据库": ("database", "sql", "dataintegrity", "数据库"),
+        "sql": ("sql", "database", "dataintegrity"),
+        "exception": ("exception",),
+        "c#": ("c#", ".net", "system."),
+        ".net": (".net", "system."),
+        "redis": ("redis",),
+        "kafka": ("kafka",),
+        "zookeeper": ("zookeeper",),
+        "消息队列": ("消息队列", "message queue", "rabbitmq", "kafka"),
+        "线程池": ("线程池", "threadpool"),
+        "连接池": ("连接池", "connection pool"),
+        "内存泄漏": ("内存泄漏", "outofmemory", "memory leak"),
+        "cpu": ("cpu",),
+        "gc": (" gc ", "garbage collection"),
+    }
+    markers = next(
+        (values for name, values in aliases.items() if name in claim_lower),
+        (claim_lower,),
+    )
+    return any(marker in evidence_lower for marker in markers)
 
 
 def build_http_access_notification(
@@ -801,9 +1048,11 @@ def build_http_access_notification(
     for index, site in enumerate(ranked_sites, start=1):
         site_incidents = grouped[site]
         priority = site_priorities[site]
-        sources = "/".join(
-            sorted({_display_source(item.source) for item in site_incidents})
-        )
+        sources = "/".join(sorted({
+            _display_source(source)
+            for item in site_incidents
+            for source in (item.sources or [item.source])
+        }))
         role = next((item.site_role for item in site_incidents if item.site_role), "general")
         lines.append(f"**{index}. {site} [{priority}] · {sources} · {_display_role(role)}**")
         for incident in sorted(
@@ -884,6 +1133,23 @@ def build_http_access_notification(
             lines.append(f"- 建议: {ai_summaries[0]}")
         else:
             lines.append(f"- 建议: {_deterministic_diagnosis(site_incidents)}")
+        knowledge_sources = list(dict.fromkeys(
+            source for item in site_incidents for source in item.knowledge_sources
+        ))
+        if knowledge_sources:
+            lines.append("- 参考经验: " + "、".join(knowledge_sources[:3]))
+        code_findings = [
+            finding for item in site_incidents for finding in item.code_findings
+            if finding.get("confidence") in {"high", "medium"}
+        ]
+        if code_findings:
+            finding = code_findings[0]
+            files = finding.get("matched_files") or []
+            if files:
+                lines.append(
+                    f"- 代码关联({finding.get('confidence')}): {files[0]}"
+                    f" @{str(finding.get('commit_sha', ''))[:12]}"
+                )
         lines.append("")
 
     if omitted_sites:

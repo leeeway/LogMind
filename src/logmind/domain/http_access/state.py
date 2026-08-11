@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from logmind.core.config import get_settings
 from logmind.core.logging import get_logger
@@ -13,9 +13,9 @@ from logmind.domain.http_access.models import AccessIncident, AccessRecovery
 
 logger = get_logger(__name__)
 
-_STATE_KEY = "logmind:http_access:alert_state:v1"
+_STATE_KEY = "logmind:http_access:alert_state:v2"
 _PATROL_LEASE_KEY = "logmind:http_access:patrol:lease:v1"
-_SUMMARY_COOLDOWN_KEY = "logmind:http_access:summary:last_sent:v1"
+_SUMMARY_COOLDOWN_KEY = "logmind:http_access:summary:lease:v2"
 _SUMMARY_P0_LEASE_KEY = "logmind:http_access:summary:p0:lease:v1"
 _RUN_SNAPSHOT_KEY = "logmind:http_access:last_run:v1"
 _RUN_HISTORY_KEY = "logmind:http_access:run_history:v1"
@@ -75,8 +75,6 @@ class HttpAccessAlertState:
         due: list[AccessIncident] = []
         recoveries: list[AccessRecovery] = []
         settings = get_settings()
-        p0_repeat_delta = timedelta(minutes=settings.http_access_dedup_minutes)
-
         for key, incident in current_by_key.items():
             old = previous.get(key, {})
             streak = int(old.get("streak", 0)) + 1
@@ -89,6 +87,9 @@ class HttpAccessAlertState:
             was_active = bool(old.get("active", False))
             active = was_active or streak >= required_streak
             last_notified = _parse_datetime(old.get("last_notified"))
+            last_notified_impact = float(
+                old.get("last_notified_impact", 0) or 0
+            )
 
             should_notify = False
             if active:
@@ -100,14 +101,12 @@ class HttpAccessAlertState:
                     )
                     or _is_material_worsening(
                         incident,
-                        float(old.get("impact", 0) or 0),
+                        last_notified_impact,
                     )
-                    # P1 is sent once on confirmation, then remains in the
-                    # pending list/daily digest. P0 retains short dedup.
-                    or (incident.priority == "P0" and (
-                        last_notified is None
-                        or current_time - last_notified >= p0_repeat_delta
-                    ))
+                    # A notification is not complete until its webhook was
+                    # actually delivered. Shadow mode, a busy lease and send
+                    # failures therefore remain pending and retry next window.
+                    or last_notified is None
                 )
             if should_notify:
                 due.append(incident)
@@ -124,6 +123,8 @@ class HttpAccessAlertState:
                 "first_seen": old.get("first_seen") or current_time.isoformat(),
                 "last_seen": current_time.isoformat(),
                 "last_notified": old.get("last_notified"),
+                "last_notified_impact": last_notified_impact,
+                "notification_pending": bool(active and should_notify),
                 "impact": round(incident.impact, 6),
                 "current_value": round(incident.current_value, 6),
                 "request_count": incident.request_count,
@@ -143,6 +144,7 @@ class HttpAccessAlertState:
                         kind=str(old.get("kind", "")),
                         priority=str(old.get("priority", "P1")),
                         route_key=str(old.get("route_key", "")),
+                        fingerprint=key,
                     )
                 )
                 continue
@@ -171,6 +173,11 @@ class HttpAccessAlertState:
                     state[incident.key]["last_notified"] = (
                         batch.evaluated_at.isoformat()
                     )
+                    state[incident.key]["last_notified_impact"] = round(
+                        incident.impact,
+                        6,
+                    )
+                    state[incident.key]["notification_pending"] = False
         else:
             # Retry failed recovery notifications on the next normal window.
             for recovery in batch.recoveries:
@@ -206,21 +213,13 @@ class HttpAccessAlertState:
         """
         Atomically reserve one summary delivery.
 
-        P1 uses the global cooldown key. P0 bypasses that cooldown but still
-        receives a short lease so concurrent workers cannot duplicate it.
+        The patrol lease already serializes windows. This short delivery lease
+        only prevents a concurrent retry from duplicating the same batch; it
+        must never suppress a new P1 for an hour.
         """
         is_p0 = any(incident.priority == "P0" for incident in incidents)
         key = _SUMMARY_P0_LEASE_KEY if is_p0 else _SUMMARY_COOLDOWN_KEY
-        ttl_seconds = (
-            60
-            if is_p0
-            else getattr(
-                get_settings(),
-                "http_access_notification_cooldown_minutes",
-                30,
-            )
-            * 60
-        )
+        ttl_seconds = 60
         return await self._acquire_lease(
             key,
             ttl_seconds=ttl_seconds,

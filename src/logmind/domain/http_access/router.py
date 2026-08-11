@@ -1,13 +1,12 @@
 """Read-only operational status for the global HTTP access patrol."""
 
-from collections import Counter
-
 import json
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from logmind.core.config import get_settings
 from logmind.core.dependencies import CurrentUser, DBSession
@@ -16,11 +15,17 @@ from logmind.domain.http_access.governance import (
     VALID_ENVIRONMENTS,
     VALID_MODES,
     VALID_ROLES,
+    discover_sites,
 )
-from logmind.domain.http_access.site_config import HttpAccessSiteConfig
+from logmind.domain.http_access.incident_store import record_feedback
 from logmind.domain.http_access.models import aggregate_metrics
 from logmind.domain.http_access.service import http_access_service
-from logmind.domain.http_access.governance import discover_sites
+from logmind.domain.http_access.site_config import (
+    GitRepositoryConfig,
+    HttpAccessIncidentRecord,
+    HttpAccessLearningRule,
+    HttpAccessSiteConfig,
+)
 from logmind.domain.http_access.state import http_access_alert_state
 from logmind.domain.tenant.audit import AuditLog
 
@@ -36,6 +41,9 @@ class SiteConfigUpdate(BaseModel):
     enable_traffic_drop: bool | None = None
     owner: str | None = Field(default=None, max_length=100)
     notes: str | None = Field(default=None, max_length=2000)
+    diagnostic_business_line_id: str | None = None
+    repository_id: str | None = None
+    deployment_service_name: str | None = Field(default=None, max_length=200)
 
 
 class SiteConfigBulkUpdate(SiteConfigUpdate):
@@ -45,6 +53,11 @@ class SiteConfigBulkUpdate(SiteConfigUpdate):
 class SiteDiscoveryRequest(BaseModel):
     # A short lookback makes first use practical without rescanning history.
     window_minutes: int = Field(default=60, ge=5, le=240)
+
+
+class IncidentFeedbackRequest(BaseModel):
+    action: str = Field(pattern=r"^(valid|false_positive|expected|resolved)$")
+    comment: str = Field(default="", max_length=2000)
 
 
 def _site_payload(item: HttpAccessSiteConfig) -> dict:
@@ -61,6 +74,9 @@ def _site_payload(item: HttpAccessSiteConfig) -> dict:
         "first_seen_at": item.first_seen_at, "last_seen_at": item.last_seen_at,
         "last_status": item.last_status, "owner": item.owner, "notes": item.notes,
         "updated_at": item.updated_at,
+        "diagnostic_business_line_id": item.diagnostic_business_line_id,
+        "repository_id": item.repository_id,
+        "deployment_service_name": item.deployment_service_name,
     }
 
 
@@ -71,7 +87,11 @@ def _validate_site_changes(values: dict) -> None:
         raise HTTPException(422, "invalid site role")
     if "monitoring_mode" in values and values["monitoring_mode"] not in VALID_MODES:
         raise HTTPException(422, "monitoring_mode must be observe, enabled or disabled")
-    if values.get("enable_traffic_drop") and values.get("role") not in CRITICAL_ROLES:
+    if (
+        values.get("enable_traffic_drop")
+        and "role" in values
+        and values.get("role") not in CRITICAL_ROLES
+    ):
         raise HTTPException(422, "traffic-drop monitoring requires an APP/account/payment/front role")
 
 
@@ -103,10 +123,10 @@ async def list_http_access_sites(
         stmt = stmt.where(HttpAccessSiteConfig.role == role)
     if monitoring_mode:
         stmt = stmt.where(HttpAccessSiteConfig.monitoring_mode == monitoring_mode)
+    if source:
+        stmt = stmt.where(HttpAccessSiteConfig.sources.ilike(f'%"{source}"%'))
     result = await session.execute(stmt.order_by(HttpAccessSiteConfig.last_seen_at.desc()).limit(limit))
     items = [_site_payload(item) for item in result.scalars().all()]
-    if source:
-        items = [item for item in items if source in item["sources"]]
     return {"items": items, "total": len(items)}
 
 
@@ -141,10 +161,29 @@ async def update_http_access_site(site_id: str, req: SiteConfigUpdate, session: 
     item = await session.get(HttpAccessSiteConfig, site_id)
     if not item or item.tenant_id != user.tenant_id:
         raise HTTPException(404, "HTTP access site not found")
-    values = req.model_dump(exclude_none=True)
+    # ``exclude_unset`` preserves an explicit JSON null, allowing an operator
+    # to remove a business-line or repository mapping.
+    values = req.model_dump(exclude_unset=True)
+    for text_field in ("owner", "notes", "deployment_service_name"):
+        if text_field in values and values[text_field] is None:
+            values[text_field] = ""
+    if values.get("role") and values["role"] not in CRITICAL_ROLES:
+        values.setdefault("enable_traffic_drop", False)
     _validate_site_changes(values)
+    if values.get("diagnostic_business_line_id"):
+        from logmind.domain.tenant.models import BusinessLine
+        business_line = await session.get(BusinessLine, values["diagnostic_business_line_id"])
+        if not business_line or business_line.tenant_id != user.tenant_id:
+            raise HTTPException(422, "diagnostic business line is not in this tenant")
+    if values.get("repository_id"):
+        repository = await session.get(GitRepositoryConfig, values["repository_id"])
+        if not repository or repository.tenant_id != user.tenant_id:
+            raise HTTPException(422, "repository is not in this tenant")
     effective_role = values.get("role", item.role)
-    if values.get("enable_traffic_drop") and effective_role not in CRITICAL_ROLES:
+    effective_traffic_drop = values.get(
+        "enable_traffic_drop", item.enable_traffic_drop
+    )
+    if effective_traffic_drop and effective_role not in CRITICAL_ROLES:
         raise HTTPException(422, "traffic-drop monitoring requires a critical role")
     for key, value in values.items():
         setattr(item, key, value)
@@ -157,8 +196,22 @@ async def update_http_access_site(site_id: str, req: SiteConfigUpdate, session: 
 
 @router.patch("/site-bulk-update")
 async def bulk_update_http_access_sites(req: SiteConfigBulkUpdate, session: DBSession, user: CurrentUser) -> dict:
-    values = req.model_dump(exclude_none=True, exclude={"site_ids"})
+    values = req.model_dump(exclude_unset=True, exclude={"site_ids"})
+    for text_field in ("owner", "notes", "deployment_service_name"):
+        if text_field in values and values[text_field] is None:
+            values[text_field] = ""
+    if values.get("role") and values["role"] not in CRITICAL_ROLES:
+        values.setdefault("enable_traffic_drop", False)
     _validate_site_changes(values)
+    if values.get("diagnostic_business_line_id"):
+        from logmind.domain.tenant.models import BusinessLine
+        business_line = await session.get(BusinessLine, values["diagnostic_business_line_id"])
+        if not business_line or business_line.tenant_id != user.tenant_id:
+            raise HTTPException(422, "diagnostic business line is not in this tenant")
+    if values.get("repository_id"):
+        repository = await session.get(GitRepositoryConfig, values["repository_id"])
+        if not repository or repository.tenant_id != user.tenant_id:
+            raise HTTPException(422, "repository is not in this tenant")
     result = await session.execute(select(HttpAccessSiteConfig).where(
         HttpAccessSiteConfig.tenant_id == user.tenant_id,
         HttpAccessSiteConfig.id.in_(req.site_ids),
@@ -194,9 +247,8 @@ async def get_http_access_patrol_status() -> dict:
         ),
         "ai_enabled": settings.http_access_ai_enabled,
         "window_minutes": settings.http_access_window_minutes,
-        "notification_cooldown_minutes": (
-            settings.http_access_notification_cooldown_minutes
-        ),
+        "notification_global_cooldown_minutes": 0,
+        "notification_delivery_lease_seconds": 60,
         "p1_repeat_policy": "escalation_only",
         "max_route_candidate_sites": (
             settings.http_access_max_route_candidate_sites
@@ -256,6 +308,61 @@ async def get_http_access_patrol_status() -> dict:
     }
 
 
+@router.get("/governance-status")
+async def get_http_access_governance_status(session: DBSession, user: CurrentUser) -> dict:
+    settings = get_settings()
+    mode_rows = await session.execute(
+        select(HttpAccessSiteConfig.monitoring_mode, func.count())
+        .where(HttpAccessSiteConfig.tenant_id == user.tenant_id)
+        .group_by(HttpAccessSiteConfig.monitoring_mode)
+    )
+    modes = {str(mode): int(count) for mode, count in mode_rows.all()}
+    pending_count = int((await session.execute(
+        select(func.count()).select_from(HttpAccessIncidentRecord).where(
+            HttpAccessIncidentRecord.tenant_id == user.tenant_id,
+            HttpAccessIncidentRecord.notification_pending.is_(True),
+        )
+    )).scalar_one())
+    unresolved_count = int((await session.execute(
+        select(func.count()).select_from(HttpAccessIncidentRecord).where(
+            HttpAccessIncidentRecord.tenant_id == user.tenant_id,
+            HttpAccessIncidentRecord.status.in_(["open", "acknowledged"]),
+        )
+    )).scalar_one())
+    last_run = await http_access_alert_state.get_run_snapshot()
+    last_time = last_run.get("completed_at") or last_run.get("time_to")
+    stale = True
+    if last_time:
+        try:
+            parsed = datetime.fromisoformat(str(last_time))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            stale = datetime.now(UTC) - parsed > timedelta(
+                minutes=settings.http_access_window_minutes * 2
+            )
+        except ValueError:
+            stale = True
+    healthy = bool(
+        settings.http_access_patrol_enabled
+        and modes.get("enabled", 0) > 0
+        and not stale
+    )
+    return {
+        "healthy": healthy,
+        "patrol_enabled": settings.http_access_patrol_enabled,
+        "notification_enabled": settings.http_access_notification_enabled,
+        "site_modes": {
+            "enabled": modes.get("enabled", 0),
+            "observe": modes.get("observe", 0),
+            "disabled": modes.get("disabled", 0),
+        },
+        "pending_notification_count": pending_count,
+        "unresolved_incident_count": unresolved_count,
+        "heartbeat_stale": stale,
+        "last_run": last_run,
+    }
+
+
 @router.get("/runs")
 async def get_http_access_patrol_runs(
     limit: int = Query(default=288, ge=1, le=2016),
@@ -270,13 +377,134 @@ async def get_http_access_patrol_runs(
 
 @router.get("/pending")
 async def list_pending_http_access_incidents(session: DBSession, user: CurrentUser) -> dict:
-    """Unresolved active incidents; site ownership is enforced by config scope."""
-    active = await http_access_alert_state.get_active_incidents()
-    result = await session.execute(select(HttpAccessSiteConfig.site).where(
-        HttpAccessSiteConfig.tenant_id == user.tenant_id
+    """Durable unresolved incidents for the current tenant."""
+    result = await session.execute(
+        select(HttpAccessIncidentRecord)
+        .where(
+            HttpAccessIncidentRecord.tenant_id == user.tenant_id,
+            HttpAccessIncidentRecord.status.in_(["open", "acknowledged"]),
+        )
+        .order_by(HttpAccessIncidentRecord.priority, HttpAccessIncidentRecord.last_seen_at.desc())
+        .limit(500)
+    )
+    return {"items": [_incident_payload(item) for item in result.scalars().all()]}
+
+
+@router.get("/learning-rules")
+async def list_http_access_learning_rules(session: DBSession, user: CurrentUser) -> dict:
+    result = await session.execute(
+        select(HttpAccessLearningRule)
+        .where(HttpAccessLearningRule.tenant_id == user.tenant_id)
+        .order_by(HttpAccessLearningRule.updated_at.desc())
+        .limit(500)
+    )
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "site": item.site,
+                "kind": item.kind,
+                "disposition": item.disposition,
+                "source": item.source,
+                "confidence": item.confidence,
+                "reason": item.reason,
+                "expires_at": item.expires_at,
+                "hit_count": item.hit_count,
+                "last_hit_at": item.last_hit_at,
+            }
+            for item in result.scalars().all()
+        ]
+    }
+
+
+@router.get("/incidents/{incident_id}")
+async def get_http_access_incident(incident_id: str, session: DBSession, user: CurrentUser) -> dict:
+    item = await session.get(HttpAccessIncidentRecord, incident_id)
+    if not item or item.tenant_id != user.tenant_id:
+        raise HTTPException(404, "HTTP access incident not found")
+    return _incident_payload(item)
+
+
+@router.post("/incidents/{incident_id}/feedback")
+async def submit_http_access_feedback(
+    incident_id: str,
+    req: IncidentFeedbackRequest,
+    session: DBSession,
+    user: CurrentUser,
+) -> dict:
+    item = await session.get(HttpAccessIncidentRecord, incident_id)
+    if not item or item.tenant_id != user.tenant_id:
+        raise HTTPException(404, "HTTP access incident not found")
+    await record_feedback(
+        session,
+        item,
+        action=req.action,
+        comment=req.comment.strip(),
+        user_id=user.sub,
+    )
+    await session.flush()
+    session.add(AuditLog(
+        tenant_id=user.tenant_id,
+        user_id=user.sub,
+        username="",
+        action=f"http_access.incident.{req.action}",
+        resource_type="http_access_incident",
+        resource_id=item.id,
+        details=json.dumps({"site": item.site, "comment": req.comment[:500]}, ensure_ascii=False),
     ))
-    sites = set(result.scalars().all())
-    return {"items": [item for item in active if item.get("site") in sites]}
+    return _incident_payload(item)
+
+
+def _incident_payload(item: HttpAccessIncidentRecord) -> dict:
+    def parsed(value: str, fallback):
+        try:
+            return json.loads(value or "")
+        except (TypeError, json.JSONDecodeError):
+            return fallback
+    return {
+        "id": item.id,
+        "fingerprint": item.fingerprint,
+        "site": item.site,
+        "source": item.source,
+        "sources": parsed(item.sources, []),
+        "kind": item.kind,
+        "priority": item.priority,
+        "route_key": item.route_key,
+        "status": item.status,
+        "first_seen_at": item.first_seen_at,
+        "last_seen_at": item.last_seen_at,
+        "recovered_at": item.recovered_at,
+        "last_notified_at": item.last_notified_at,
+        "last_digest_at": item.last_digest_at,
+        "notification_pending": item.notification_pending,
+        "notification_count": item.notification_count,
+        "current_impact": item.current_impact,
+        "peak_impact": item.peak_impact,
+        "evidence": parsed(item.evidence_json, {}),
+        "diagnosis": _sanitize_diagnosis(parsed(item.diagnosis_json, {})),
+        "feedback": item.feedback,
+        "feedback_comment": item.feedback_comment,
+        "handled_by": item.handled_by,
+    }
+
+
+def _sanitize_diagnosis(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    result = dict(value)
+    findings = []
+    for finding in result.get("code_findings", []):
+        if not isinstance(finding, dict):
+            continue
+        safe = dict(finding)
+        safe["snippets"] = [
+            {key: snippet.get(key) for key in ("file", "line", "symbol")}
+            for snippet in safe.get("snippets", [])
+            if isinstance(snippet, dict)
+        ]
+        findings.append(safe)
+    result["code_findings"] = findings
+    return result
 
 
 def _summarize_runs(runs: list[dict]) -> dict:

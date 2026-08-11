@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     http_access_run_history_limit: int = 288
     http_access_max_notification_sites: int = 5
     http_access_sample_size: int = 20
+    http_access_repo_cache_dir: str = "/var/lib/logmind/repos"
+    http_access_repo_sync_minutes: int = 30
+    http_access_repo_shallow_depth: int = 200
+    http_access_git_ca_file: str = ""
+    http_access_source_to_ai_enabled: bool = False
 
     @property
     def http_access_index_list(self) -> tuple[str, ...]:
@@ -218,6 +223,8 @@ class Settings(BaseSettings):
         "http_access_run_history_limit",
         "http_access_max_notification_sites",
         "http_access_sample_size",
+        "http_access_repo_sync_minutes",
+        "http_access_repo_shallow_depth",
     )
     @classmethod
     def validate_positive_minutes(cls, v: int) -> int:

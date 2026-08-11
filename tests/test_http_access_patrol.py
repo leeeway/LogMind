@@ -17,6 +17,7 @@ from logmind.domain.http_access.models import (
     extract_body_field_names,
     extract_query_parameter_names,
     is_allowed_site,
+    merge_cross_source_incidents,
     normalize_request,
 )
 from logmind.domain.http_access.router import (
@@ -928,6 +929,19 @@ def test_ai_summary_rejects_unproven_internal_dependency_claim():
     ) == {}
 
 
+def test_ai_summary_allows_application_claim_when_log_evidence_supports_it():
+    key = "incident-fingerprint"
+    content = (
+        '{"items":[{"key":"incident-fingerprint",'
+        '"summary":"检查System.UnauthorizedAccessException对应目录权限"}]}'
+    )
+
+    assert _parse_ai_summaries(
+        content,
+        evidence_by_key={key: "System.UnauthorizedAccessException: Access denied"},
+    ) == {key: "检查System.UnauthorizedAccessException对应目录权限"}
+
+
 def test_notification_groups_sites_and_omits_internal_metadata_and_secrets():
     sample = AccessSample(
         timestamp="2026-07-30T06:05:56Z",
@@ -1342,6 +1356,100 @@ def test_active_p1_notifies_early_only_when_impact_materially_worsens(
             now=_utc() + timedelta(minutes=10),
         )
         assert len(worse.due) == 1
+
+    asyncio.run(scenario())
+
+
+def test_failed_p1_delivery_remains_pending_and_retries_next_window():
+    state = HttpAccessAlertState(redis=_FakeRedis())
+    incident = AccessIncident(
+        source="nginx",
+        site="gpay.tjlong.cn",
+        kind="latency",
+        priority="P1",
+        request_count=500,
+        current_value=5000,
+        baseline_value=100,
+        p95_ms=5000,
+    )
+
+    async def scenario():
+        first = await state.evaluate([incident], now=_utc())
+        await state.save(first, delivered=True)
+        second = await state.evaluate([incident], now=_utc() + timedelta(minutes=5))
+        assert len(second.due) == 1
+        await state.save(second, delivered=False)
+        retry = await state.evaluate([incident], now=_utc() + timedelta(minutes=10))
+        assert [item.key for item in retry.due] == [incident.key]
+
+    asyncio.run(scenario())
+
+
+def test_cross_source_event_uses_one_fingerprint_and_does_not_renotify():
+    nginx = AccessIncident(
+        source="nginx",
+        site="api.gyyx.cn",
+        kind="route_4xx",
+        priority="P1",
+        request_count=200,
+        current_value=0.5,
+        baseline_value=0.1,
+        status_4xx=100,
+        route_key="GET /v1/account/info",
+        status_counts={400: 100},
+        upstream_status_counts={400: 100},
+    )
+    ingress = AccessIncident(
+        source="ingress",
+        site=nginx.site,
+        kind=nginx.kind,
+        priority="P1",
+        request_count=210,
+        current_value=0.5,
+        baseline_value=0.1,
+        status_4xx=105,
+        route_key=nginx.route_key,
+        status_counts={400: 105},
+        upstream_status_counts={400: 105},
+    )
+    merged = merge_cross_source_incidents([nginx, ingress])
+    assert len(merged) == 1
+    assert merged[0].sources == ["ingress", "nginx"]
+    assert nginx.key == ingress.key
+
+    async def scenario():
+        state = HttpAccessAlertState(redis=_FakeRedis())
+        first = await state.evaluate([nginx], now=_utc())
+        await state.save(first, delivered=True)
+        second = await state.evaluate([ingress], now=_utc() + timedelta(minutes=5))
+        assert len(second.due) == 1
+        await state.save(second, delivered=True)
+        third = await state.evaluate([nginx], now=_utc() + timedelta(minutes=10))
+        assert third.due == []
+
+    asyncio.run(scenario())
+
+
+def test_p0_does_not_repeat_on_elapsed_time_alone():
+    state = HttpAccessAlertState(redis=_FakeRedis())
+    incident = AccessIncident(
+        source="ingress",
+        site="billing.gyyx.cn",
+        kind="http_5xx",
+        priority="P0",
+        request_count=1000,
+        current_value=0.1,
+        baseline_value=0.001,
+        status_5xx=100,
+        upstream_5xx=100,
+    )
+
+    async def scenario():
+        first = await state.evaluate([incident], now=_utc())
+        assert len(first.due) == 1
+        await state.save(first, delivered=True)
+        later = await state.evaluate([incident], now=_utc() + timedelta(hours=8))
+        assert later.due == []
 
     asyncio.run(scenario())
 

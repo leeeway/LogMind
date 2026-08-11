@@ -52,6 +52,10 @@ def _change_response(event: ChangeEvent) -> "ChangeEventResponse":
         description=event.description or "",
         timestamp=event.timestamp.isoformat(),
         correlated_spikes=event.correlated_spikes or 0,
+        repository_id=event.repository_id or "",
+        commit_sha=event.commit_sha or "",
+        image_version=event.image_version or "",
+        environment=event.environment or "production",
     )
 
 
@@ -74,6 +78,10 @@ class ChangeEventCreate(BaseModel):
     operator: str = ""
     description: str = ""
     timestamp: str | None = None  # ISO format, defaults to now
+    repository_id: str = ""
+    commit_sha: str = ""
+    image_version: str = ""
+    environment: str = "production"
 
 
 class ChangeEventResponse(BaseModel):
@@ -86,6 +94,10 @@ class ChangeEventResponse(BaseModel):
     description: str
     timestamp: str
     correlated_spikes: int = 0
+    repository_id: str = ""
+    commit_sha: str = ""
+    image_version: str = ""
+    environment: str = "production"
 
 
 class ChangeTimelineResponse(BaseModel):
@@ -118,6 +130,10 @@ async def create_change_event(
         description=req.description,
         timestamp=_parse_change_timestamp(req.timestamp),
         correlated_spikes=0,
+        repository_id=req.repository_id or None,
+        commit_sha=req.commit_sha,
+        image_version=req.image_version,
+        environment=req.environment,
     )
     session.add(event)
     await session.flush()
@@ -261,7 +277,7 @@ async def get_change_impact(
     if risk_score > 60:
         assessment = f"🔴 高风险变更: {len(high_impact)} 个服务受到显著影响，建议立即回滚并排查"
     elif risk_score > 30:
-        assessment = f"🟡 中风险变更: 部分服务指标波动，建议持续观察 30 分钟"
+        assessment = "🟡 中风险变更: 部分服务指标波动，建议持续观察 30 分钟"
     elif blast_radius:
         assessment = "🟢 低风险变更: 指标波动在正常范围内"
     else:

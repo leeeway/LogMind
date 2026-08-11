@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import math
@@ -232,15 +233,56 @@ class AccessIncident:
     p95_ms: float = 0.0
     route_key: str = ""
     status_counts: dict[int, int] = field(default_factory=dict)
+    upstream_status_counts: dict[int, int] = field(default_factory=dict)
     observed_minutes: int = 0
     samples: list[AccessSample] = field(default_factory=list)
     ai_summary: str = ""
     site_role: str = "general"
+    sources: list[str] = field(default_factory=list)
+    knowledge_sources: list[str] = field(default_factory=list)
+    diagnostic_evidence: list[str] = field(default_factory=list)
+    code_findings: list[dict] = field(default_factory=list)
 
     @property
     def key(self) -> str:
-        suffix = f"|{self.route_key}" if self.route_key else ""
-        return f"{self.source}|{self.site}|{self.kind}{suffix}"
+        # State, delivery and learning must all use the same cross-source
+        # identity. Otherwise an event observed at Nginx in one window and at
+        # Ingress in the next is incorrectly treated as two new incidents.
+        return self.fingerprint
+
+    @property
+    def fingerprint(self) -> str:
+        """Stable cross-source identity used for notification and learning."""
+        dominant_status = (
+            max(self.status_counts, key=self.status_counts.get)
+            if self.status_counts
+            else (500 if self.status_5xx else 0)
+        )
+        dominant_upstream = (
+            max(self.upstream_status_counts, key=self.upstream_status_counts.get)
+            if self.upstream_status_counts
+            else 0
+        )
+        if self.upstream_5xx or int(dominant_upstream or 0) >= 500:
+            upstream_class = "upstream_5xx"
+        elif self.gateway_5xx:
+            upstream_class = "gateway_5xx"
+        elif dominant_status and not dominant_upstream:
+            upstream_class = "no_upstream"
+        elif dominant_upstream and int(dominant_upstream) != int(dominant_status):
+            upstream_class = "status_mismatch"
+        elif dominant_upstream:
+            upstream_class = f"matched_{int(dominant_upstream) // 100}xx"
+        else:
+            upstream_class = "normal"
+        raw = "|".join((
+            self.site,
+            self.kind,
+            self.route_key or "*",
+            str(dominant_status),
+            upstream_class,
+        ))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @property
     def impact(self) -> float:
@@ -286,9 +328,12 @@ class AccessRecovery:
     kind: str
     priority: str
     route_key: str = ""
+    fingerprint: str = ""
 
     @property
     def key(self) -> str:
+        if self.fingerprint:
+            return self.fingerprint
         suffix = f"|{self.route_key}" if self.route_key else ""
         return f"{self.source}|{self.site}|{self.kind}{suffix}"
 
@@ -529,6 +574,41 @@ def aggregate_metrics(metrics: list[AccessMetric]) -> dict[tuple[str, str], Acce
         window.p95_ms = max(window.p95_ms, metric.p95_ms)
         window.p99_ms = max(window.p99_ms, metric.p99_ms)
     return windows
+
+
+def merge_cross_source_incidents(
+    incidents: list[AccessIncident],
+) -> list[AccessIncident]:
+    """Collapse the same site/route symptom observed by Nginx and Ingress.
+
+    Counts are deliberately not summed because the two layers can observe the
+    same request.  The higher-impact observation represents the episode while
+    all contributing sources remain available for diagnosis.
+    """
+    grouped: dict[str, list[AccessIncident]] = {}
+    for incident in incidents:
+        grouped.setdefault(incident.fingerprint, []).append(incident)
+    merged: list[AccessIncident] = []
+    for group in grouped.values():
+        selected = max(
+            group,
+            key=lambda item: (
+                -({"P0": 0, "P1": 1, "P2": 2}.get(item.priority, 9)),
+                item.impact,
+            ),
+        )
+        selected.sources = sorted(
+            {source for item in group for source in (item.sources or [item.source])}
+        )
+        merged.append(selected)
+    return sorted(
+        merged,
+        key=lambda item: (
+            {"P0": 0, "P1": 1, "P2": 2}.get(item.priority, 9),
+            -item.impact,
+            item.site,
+        ),
+    )
 
 
 def detect_incidents(
@@ -779,6 +859,7 @@ def detect_route_incidents(
                 p95_ms=metric.p95_ms,
                 route_key=metric.route_key,
                 status_counts=dict(metric.status_counts),
+                upstream_status_counts=dict(metric.upstream_status_counts),
             )
         )
 

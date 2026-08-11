@@ -149,3 +149,7 @@ class ChangeEvent(Base, UUIDPrimaryKeyMixin, TenantMixin, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="")
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     correlated_spikes: Mapped[int] = mapped_column(Integer, default=0)
+    repository_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    commit_sha: Mapped[str] = mapped_column(String(64), default="")
+    image_version: Mapped[str] = mapped_column(String(200), default="")
+    environment: Mapped[str] = mapped_column(String(32), default="production")
