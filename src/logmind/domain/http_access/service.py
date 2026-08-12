@@ -361,6 +361,15 @@ class HttpAccessService:
                                     }
                                 },
                                 "aggs": {
+                                    "slow_2s": {
+                                        "filter": {
+                                            "range": {
+                                                "lm_request_time_ms": {
+                                                    "gte": 2000
+                                                }
+                                            }
+                                        }
+                                    },
                                     "latency": {
                                         "percentiles": {
                                             "field": "lm_request_time_ms",
@@ -411,6 +420,11 @@ class HttpAccessService:
                         ),
                         upstream_5xx=int(
                             bucket.get("upstream_5xx", {}).get("doc_count", 0)
+                        ),
+                        slow_2s_count=int(
+                            bucket.get("successful", {})
+                            .get("slow_2s", {})
+                            .get("doc_count", 0)
                         ),
                         p50_ms=safe_float(latency_values.get("50.0")),
                         p95_ms=safe_float(latency_values.get("95.0")),
@@ -715,6 +729,15 @@ class HttpAccessService:
         settings = get_settings()
         index_name = settings.http_access_metrics_index
         if await self.es.indices.exists(index=index_name):
+            # Existing strict indices need the additive field before the first
+            # post-upgrade bulk write. This is safe and does not reindex old
+            # documents; missing historical values naturally behave as zero.
+            put_mapping = getattr(self.es.indices, "put_mapping", None)
+            if callable(put_mapping):
+                await put_mapping(
+                    index=index_name,
+                    properties={"slow_2s_count": {"type": "long"}},
+                )
             return
         mappings = {
             "dynamic": "strict",
@@ -727,6 +750,7 @@ class HttpAccessService:
                 "status_5xx": {"type": "long"},
                 "gateway_5xx": {"type": "long"},
                 "upstream_5xx": {"type": "long"},
+                "slow_2s_count": {"type": "long"},
                 "p50_ms": {"type": "double"},
                 "p95_ms": {"type": "double"},
                 "p99_ms": {"type": "double"},

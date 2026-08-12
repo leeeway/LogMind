@@ -87,6 +87,62 @@ def filter_enabled_incidents(
     return [item for item in incidents if incident_is_enabled(item, configs.get(item.site))]
 
 
+def incident_is_notification_worthy(
+    incident: AccessIncident,
+    config: HttpAccessSiteConfig | None,
+    *,
+    critical_only: bool = True,
+    general_latency_min_p95_ms: int = 10000,
+    general_latency_min_slow_count: int = 100,
+    general_latency_min_slow_rate: float = 0.20,
+) -> bool:
+    """Keep WeCom as a must-see channel while retaining backend evidence.
+
+    P0 and confirmed 5xx remain eligible for every explicitly enabled
+    production site. Other P1 symptoms normally require a critical business
+    role. An unclassified site can still escape the gate when latency is both
+    severe and broad, preventing a missing role label from hiding an outage.
+    """
+    if not critical_only:
+        return True
+    if incident.priority == "P0" or incident.kind == "http_5xx":
+        return True
+    role = config.role if config else "general"
+    if incident.kind in {"route_4xx", "traffic_drop"}:
+        return role in CRITICAL_ROLES
+    if incident.kind == "latency":
+        if role in CRITICAL_ROLES:
+            return True
+        slow_rate = (
+            incident.slow_2s_count / incident.successful_count
+            if incident.successful_count
+            else 0.0
+        )
+        return (
+            role != "cdn_download"
+            and incident.p95_ms >= general_latency_min_p95_ms
+            and incident.slow_2s_count >= general_latency_min_slow_count
+            and slow_rate >= general_latency_min_slow_rate
+        )
+    return False
+
+
+def filter_notification_worthy_incidents(
+    incidents: list[AccessIncident],
+    configs: dict[str, HttpAccessSiteConfig],
+    **policy,
+) -> list[AccessIncident]:
+    return [
+        item
+        for item in incidents
+        if incident_is_notification_worthy(
+            item,
+            configs.get(item.site),
+            **policy,
+        )
+    ]
+
+
 def role_for_site(site: str, configs: dict[str, HttpAccessSiteConfig]) -> str:
     config = configs.get(site)
     return config.role if config else "general"

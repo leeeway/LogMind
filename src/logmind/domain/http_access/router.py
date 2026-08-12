@@ -92,14 +92,21 @@ def _validate_site_changes(values: dict) -> None:
         and "role" in values
         and values.get("role") not in CRITICAL_ROLES
     ):
-        raise HTTPException(422, "traffic-drop monitoring requires an APP/account/payment/front role")
+        raise HTTPException(
+            422,
+            "traffic-drop monitoring requires an APP/account/payment/front role",
+        )
 
 
 async def _audit_site_change(session, user, item, values: dict) -> None:
     session.add(AuditLog(
         tenant_id=user.tenant_id, user_id=user.sub, username="",
         action="http_access.site_config.update", resource_type="http_access_site",
-        resource_id=item.id, details=json.dumps({"site": item.site, "changes": values}, ensure_ascii=False),
+        resource_id=item.id,
+        details=json.dumps(
+            {"site": item.site, "changes": values},
+            ensure_ascii=False,
+        ),
     ))
 
 
@@ -125,7 +132,9 @@ async def list_http_access_sites(
         stmt = stmt.where(HttpAccessSiteConfig.monitoring_mode == monitoring_mode)
     if source:
         stmt = stmt.where(HttpAccessSiteConfig.sources.ilike(f'%"{source}"%'))
-    result = await session.execute(stmt.order_by(HttpAccessSiteConfig.last_seen_at.desc()).limit(limit))
+    result = await session.execute(
+        stmt.order_by(HttpAccessSiteConfig.last_seen_at.desc()).limit(limit)
+    )
     items = [_site_payload(item) for item in result.scalars().all()]
     return {"items": items, "total": len(items)}
 
@@ -157,7 +166,12 @@ async def discover_http_access_sites(
 
 
 @router.patch("/sites/{site_id}")
-async def update_http_access_site(site_id: str, req: SiteConfigUpdate, session: DBSession, user: CurrentUser) -> dict:
+async def update_http_access_site(
+    site_id: str,
+    req: SiteConfigUpdate,
+    session: DBSession,
+    user: CurrentUser,
+) -> dict:
     item = await session.get(HttpAccessSiteConfig, site_id)
     if not item or item.tenant_id != user.tenant_id:
         raise HTTPException(404, "HTTP access site not found")
@@ -195,7 +209,11 @@ async def update_http_access_site(site_id: str, req: SiteConfigUpdate, session: 
 
 
 @router.patch("/site-bulk-update")
-async def bulk_update_http_access_sites(req: SiteConfigBulkUpdate, session: DBSession, user: CurrentUser) -> dict:
+async def bulk_update_http_access_sites(
+    req: SiteConfigBulkUpdate,
+    session: DBSession,
+    user: CurrentUser,
+) -> dict:
     values = req.model_dump(exclude_unset=True, exclude={"site_ids"})
     for text_field in ("owner", "notes", "deployment_service_name"):
         if text_field in values and values[text_field] is None:
@@ -218,7 +236,10 @@ async def bulk_update_http_access_sites(req: SiteConfigBulkUpdate, session: DBSe
     ))
     items = list(result.scalars().all())
     for item in items:
-        if values.get("enable_traffic_drop") and values.get("role", item.role) not in CRITICAL_ROLES:
+        if (
+            values.get("enable_traffic_drop")
+            and values.get("role", item.role) not in CRITICAL_ROLES
+        ):
             raise HTTPException(422, f"{item.site} is not a critical role")
         for key, value in values.items():
             setattr(item, key, value)
@@ -242,14 +263,23 @@ async def get_http_access_patrol_status() -> dict:
         "mode": mode,
         "patrol_enabled": settings.http_access_patrol_enabled,
         "notification_enabled": settings.http_access_notification_enabled,
+        "critical_notifications_only": getattr(
+            settings,
+            "http_access_critical_notifications_only",
+            True,
+        ),
         "recovery_notification_enabled": (
             settings.http_access_recovery_notification_enabled
         ),
         "ai_enabled": settings.http_access_ai_enabled,
         "window_minutes": settings.http_access_window_minutes,
-        "notification_global_cooldown_minutes": 0,
+        "notification_global_cooldown_minutes": getattr(
+            settings,
+            "http_access_notification_cooldown_minutes",
+            30,
+        ),
         "notification_delivery_lease_seconds": 60,
-        "p1_repeat_policy": "escalation_only",
+        "p1_repeat_policy": "30m_digest_then_impact_doubling_only",
         "max_route_candidate_sites": (
             settings.http_access_max_route_candidate_sites
         ),
@@ -296,6 +326,35 @@ async def get_http_access_patrol_status() -> dict:
                 settings,
                 "http_access_route_baseline_rate_delta",
                 0.10,
+            ),
+        },
+        "latency_thresholds": {
+            "nginx_csharp_min_p95_ms": getattr(
+                settings, "http_access_latency_nginx_min_p95_ms", 3000
+            ),
+            "ingress_java_min_p95_ms": getattr(
+                settings, "http_access_latency_ingress_min_p95_ms", 2500
+            ),
+            "min_success_count": getattr(
+                settings, "http_access_latency_min_success_count", 200
+            ),
+            "min_slow_2s_count": getattr(
+                settings, "http_access_latency_min_slow_count", 50
+            ),
+            "min_slow_2s_rate": getattr(
+                settings, "http_access_latency_min_slow_rate", 0.10
+            ),
+            "confirm_windows": getattr(
+                settings, "http_access_latency_confirm_windows", 4
+            ),
+            "general_min_p95_ms": getattr(
+                settings, "http_access_latency_general_min_p95_ms", 10000
+            ),
+            "general_min_slow_count": getattr(
+                settings, "http_access_latency_general_min_slow_count", 100
+            ),
+            "general_min_slow_rate": getattr(
+                settings, "http_access_latency_general_min_slow_rate", 0.20
             ),
         },
         "run_history_limit": settings.http_access_run_history_limit,

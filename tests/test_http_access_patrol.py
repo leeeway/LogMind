@@ -2,6 +2,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from logmind.domain.http_access.governance import (
+    filter_notification_worthy_incidents,
+)
 from logmind.domain.http_access.models import (
     AccessBaseline,
     AccessIncident,
@@ -103,7 +106,8 @@ def test_detects_5xx_latency_and_uses_source_specific_baselines():
             request_count=1000,
             status_5xx=70,
             gateway_5xx=50,
-            p95_ms=2800,
+            slow_2s_count=150,
+            p95_ms=3200,
         ),
         AccessMetric(
             source="ingress",
@@ -195,6 +199,119 @@ def test_latency_ignores_windows_dominated_by_4xx():
         window,
         {("nginx", "zeus-mobile-ops.gyyx.cn"): baseline},
     ) == []
+
+
+def test_nginx_latency_suppresses_short_low_impact_spike():
+    window = aggregate_metrics(
+        [
+            AccessMetric(
+                source="nginx",
+                site="account.module.gyyx.cn",
+                minute=_utc(),
+                request_count=500,
+                slow_2s_count=25,
+                p95_ms=2100,
+            )
+        ]
+    )
+    baseline = AccessBaseline(
+        source="nginx",
+        site="account.module.gyyx.cn",
+        sample_count=7,
+        request_count=500,
+        p95_ms=20,
+    )
+
+    assert detect_incidents(
+        window,
+        {("nginx", "account.module.gyyx.cn"): baseline},
+    ) == []
+
+
+def test_window_latency_uses_request_weighted_median_not_maximum_minute():
+    metrics = [
+        AccessMetric(
+            source="nginx",
+            site="account.module.gyyx.cn",
+            minute=_utc(minute=minute),
+            request_count=100,
+            slow_2s_count=10 if minute == 0 else 0,
+            p95_ms=5000 if minute == 0 else 50,
+        )
+        for minute in range(5)
+    ]
+
+    window = aggregate_metrics(metrics)[("nginx", "account.module.gyyx.cn")]
+
+    assert window.p95_ms == 50
+    assert window.slow_2s_count == 10
+
+
+def test_wecom_policy_keeps_only_must_see_p1_risks():
+    def latency(site: str, *, p95_ms: int, slow_count: int, success_count: int):
+        return AccessIncident(
+            source="nginx",
+            site=site,
+            kind="latency",
+            priority="P1",
+            request_count=success_count,
+            current_value=p95_ms,
+            baseline_value=100,
+            p95_ms=p95_ms,
+            successful_count=success_count,
+            slow_2s_count=slow_count,
+        )
+
+    incidents = [
+        latency(
+            "account.module.gyyx.cn",
+            p95_ms=3500,
+            slow_count=80,
+            success_count=500,
+        ),
+        latency(
+            "general.gyyx.cn",
+            p95_ms=3500,
+            slow_count=80,
+            success_count=500,
+        ),
+        latency(
+            "unknown-severe.gyyx.cn",
+            p95_ms=12000,
+            slow_count=120,
+            success_count=500,
+        ),
+        latency(
+            "download.gyyx.cn",
+            p95_ms=30000,
+            slow_count=500,
+            success_count=1000,
+        ),
+        AccessIncident(
+            source="nginx",
+            site="general.gyyx.cn",
+            kind="http_5xx",
+            priority="P1",
+            request_count=1000,
+            current_value=0.02,
+            baseline_value=0.001,
+            status_5xx=20,
+        ),
+    ]
+    configs = {
+        "account.module.gyyx.cn": SimpleNamespace(role="account"),
+        "general.gyyx.cn": SimpleNamespace(role="general"),
+        "unknown-severe.gyyx.cn": SimpleNamespace(role="general"),
+        "download.gyyx.cn": SimpleNamespace(role="cdn_download"),
+    }
+
+    retained = filter_notification_worthy_incidents(incidents, configs)
+
+    assert {(item.site, item.kind) for item in retained} == {
+        ("account.module.gyyx.cn", "latency"),
+        ("unknown-severe.gyyx.cn", "latency"),
+        ("general.gyyx.cn", "http_5xx"),
+    }
 
 
 def test_nginx_route_4xx_uses_higher_threshold():
@@ -501,6 +618,7 @@ def test_composite_aggregation_counts_more_than_ten_thousand_documents():
                                 "gateway_5xx": {"doc_count": 20},
                                 "upstream_5xx": {"doc_count": 10},
                                 "successful": {
+                                    "slow_2s": {"doc_count": 160},
                                     "latency": {
                                         "values": {
                                             "50.0": 10.0,
@@ -529,6 +647,7 @@ def test_composite_aggregation_counts_more_than_ten_thousand_documents():
     )
 
     assert metrics[0].request_count == 15001
+    assert metrics[0].slow_2s_count == 160
     body = es.search_calls[0]["body"]
     assert body["size"] == 0
     assert "lm_status_code" in body["runtime_mappings"]
@@ -973,16 +1092,18 @@ def test_notification_groups_sites_and_omits_internal_metadata_and_secrets():
             kind="latency",
             priority="P1",
             request_count=500,
-            current_value=2100,
+            current_value=3100,
             baseline_value=180,
-            p95_ms=2100,
+            p95_ms=3100,
+            successful_count=500,
+            slow_2s_count=80,
             samples=[
                 AccessSample(
                     timestamp="2026-07-30T06:05:56Z",
                     method="GET",
                     route="/alarm/current/list",
                     status=200,
-                    request_time_ms=2100,
+                    request_time_ms=3100,
                 )
             ],
         ),
@@ -995,10 +1116,12 @@ def test_notification_groups_sites_and_omits_internal_metadata_and_secrets():
         time_to=_utc() + timedelta(minutes=5),
     )
 
-    assert message.count("HTTP访问告警") == 1
+    assert message.count("HTTP关键风险告警") == 1
     assert "api.qibao.tjlong.cn" in message
     assert "pigeon.gyyx.cn" in message
     assert "GET /notice/noread/{uuid}/" in message
+    assert "≥2秒 80/500次（16.0%）" in message
+    assert "慢请求样本: GET /alarm/current/list" in message
     assert "通知原因" not in message
     assert "分析入口" not in message
     assert "任务ID" not in message
@@ -1237,7 +1360,7 @@ def test_traffic_drop_requires_two_windows_and_recovery_requires_two():
     asyncio.run(scenario())
 
 
-def test_latency_requires_two_consecutive_windows():
+def test_latency_requires_four_consecutive_windows():
     redis = _FakeRedis()
     state = HttpAccessAlertState(redis=redis)
     incident = AccessIncident(
@@ -1255,11 +1378,19 @@ def test_latency_requires_two_consecutive_windows():
         first = await state.evaluate([incident], now=_utc())
         assert first.due == []
         await state.save(first, delivered=True)
-        second = await state.evaluate(
+        for offset in (5, 10):
+            pending = await state.evaluate(
+                [incident],
+                now=_utc() + timedelta(minutes=offset),
+            )
+            assert pending.due == []
+            await state.save(pending, delivered=True)
+        fourth = await state.evaluate(
             [incident],
-            now=_utc() + timedelta(minutes=5),
+            now=_utc() + timedelta(minutes=15),
         )
-        assert [item.key for item in second.due] == [incident.key]
+        assert [item.key for item in fourth.due] == [incident.key]
+        assert fourth.due[0].observed_minutes == 20
 
     asyncio.run(scenario())
 
@@ -1374,12 +1505,20 @@ def test_failed_p1_delivery_remains_pending_and_retries_next_window():
     )
 
     async def scenario():
-        first = await state.evaluate([incident], now=_utc())
-        await state.save(first, delivered=True)
-        second = await state.evaluate([incident], now=_utc() + timedelta(minutes=5))
-        assert len(second.due) == 1
-        await state.save(second, delivered=False)
-        retry = await state.evaluate([incident], now=_utc() + timedelta(minutes=10))
+        for offset in (0, 5, 10):
+            pending = await state.evaluate(
+                [incident],
+                now=_utc() + timedelta(minutes=offset),
+            )
+            assert pending.due == []
+            await state.save(pending, delivered=True)
+        due = await state.evaluate(
+            [incident],
+            now=_utc() + timedelta(minutes=15),
+        )
+        assert len(due.due) == 1
+        await state.save(due, delivered=False)
+        retry = await state.evaluate([incident], now=_utc() + timedelta(minutes=20))
         assert [item.key for item in retry.due] == [incident.key]
 
     asyncio.run(scenario())
@@ -1787,6 +1926,18 @@ def test_http_access_status_exposes_safe_settings_and_last_run(monkeypatch):
         "same_time_slot_minutes": 60,
     }
     assert status["last_run"]["metric_count"] == 42
+    assert status["notification_global_cooldown_minutes"] == 30
+    assert status["latency_thresholds"] == {
+        "nginx_csharp_min_p95_ms": 3000,
+        "ingress_java_min_p95_ms": 2500,
+        "min_success_count": 200,
+        "min_slow_2s_count": 50,
+        "min_slow_2s_rate": 0.10,
+        "confirm_windows": 4,
+        "general_min_p95_ms": 10000,
+        "general_min_slow_count": 100,
+        "general_min_slow_rate": 0.20,
+    }
     assert "webhook_url" not in status
     assert "tenant_id" not in status
 

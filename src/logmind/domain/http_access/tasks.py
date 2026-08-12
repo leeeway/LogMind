@@ -17,6 +17,7 @@ from logmind.core.logging import get_logger
 from logmind.domain.http_access.governance import (
     discover_sites,
     filter_enabled_incidents,
+    filter_notification_worthy_incidents,
     role_for_site,
 )
 from logmind.domain.http_access.incident_store import (
@@ -206,7 +207,14 @@ async def _send_http_access_pending_digest() -> bool:
         first_seen = _parse_state_time(item.get("first_seen"))
         duration = ""
         if first_seen:
-            duration = f"，持续{max(5, int((now - first_seen.astimezone(_DISPLAY_TZ)).total_seconds() // 60))}分钟"
+            duration_minutes = max(
+                5,
+                int(
+                    (now - first_seen.astimezone(_DISPLAY_TZ)).total_seconds()
+                    // 60
+                ),
+            )
+            duration = f"，持续{duration_minutes}分钟"
         lines.append(
             f"- {item.get('site')} · {_display_source(str(item.get('source', 'nginx')))}"
             f" · {_display_kind(str(item.get('kind', '')))}{duration}"
@@ -227,7 +235,11 @@ async def _send_http_access_pending_digest() -> bool:
             )
             for record in result.scalars().all():
                 record.last_digest_at = datetime.now(UTC)
-    logger.info("http_access_pending_digest_completed", pending_count=len(pending), delivered=delivered)
+    logger.info(
+        "http_access_pending_digest_completed",
+        pending_count=len(pending),
+        delivered=delivered,
+    )
     return delivered
 
 
@@ -317,7 +329,31 @@ async def _run_http_access_patrol(
         tenant_id = None
         site_configs = {}
         logger.error("http_access_site_discovery_failed", error=str(exc))
-    incidents = detect_incidents(windows, baselines)
+    incidents = detect_incidents(
+        windows,
+        baselines,
+        latency_nginx_min_p95_ms=getattr(
+            settings, "http_access_latency_nginx_min_p95_ms", 3000
+        ),
+        latency_ingress_min_p95_ms=getattr(
+            settings, "http_access_latency_ingress_min_p95_ms", 2500
+        ),
+        latency_min_success_count=getattr(
+            settings, "http_access_latency_min_success_count", 200
+        ),
+        latency_min_slow_count=getattr(
+            settings, "http_access_latency_min_slow_count", 50
+        ),
+        latency_min_slow_rate=getattr(
+            settings, "http_access_latency_min_slow_rate", 0.10
+        ),
+        latency_severe_p95_ms=getattr(
+            settings, "http_access_latency_severe_p95_ms", 10000
+        ),
+        latency_severe_min_slow_count=getattr(
+            settings, "http_access_latency_severe_min_slow_count", 20
+        ),
+    )
     route_eligible_by_source: dict[str, int] = defaultdict(int)
     route_rejected_site_count = 0
     for window in windows.values():
@@ -458,6 +494,35 @@ async def _run_http_access_patrol(
     else:
         site_enabled_incident_count = len(incidents)
         learned_suppressed_count = 0
+    notification_incidents = incidents
+    if tenant_id:
+        notification_incidents = filter_notification_worthy_incidents(
+            incidents,
+            site_configs,
+            critical_only=getattr(
+                settings,
+                "http_access_critical_notifications_only",
+                True,
+            ),
+            general_latency_min_p95_ms=getattr(
+                settings,
+                "http_access_latency_general_min_p95_ms",
+                10000,
+            ),
+            general_latency_min_slow_count=getattr(
+                settings,
+                "http_access_latency_general_min_slow_count",
+                100,
+            ),
+            general_latency_min_slow_rate=getattr(
+                settings,
+                "http_access_latency_general_min_slow_rate",
+                0.20,
+            ),
+        )
+    notification_policy_suppressed_count = (
+        len(incidents) - len(notification_incidents)
+    )
     try:
         persisted = await service.persist_metrics(metrics)
     except Exception as exc:
@@ -477,7 +542,7 @@ async def _run_http_access_patrol(
                 error=str(exc),
             )
 
-    batch = await alert_state.evaluate(incidents, now=time_to)
+    batch = await alert_state.evaluate(notification_incidents, now=time_to)
     try:
         await sync_incident_records(
             tenant_id,
@@ -510,6 +575,9 @@ async def _run_http_access_patrol(
         "candidate_incident_count": candidate_incident_count,
         "suppressed_site_mode_count": candidate_incident_count - site_enabled_incident_count,
         "learned_suppressed_count": learned_suppressed_count,
+        "notification_policy_suppressed_count": (
+            notification_policy_suppressed_count
+        ),
         "auto_learned_count": auto_learned_count,
         "incident_site_count": len({item.site for item in incidents}),
         "top_incidents": _build_incident_snapshot(incidents),
@@ -677,6 +745,8 @@ def _build_incident_snapshot(
             "current_value": round(item.current_value, 6),
             "baseline_value": round(item.baseline_value, 6),
             "p95_ms": round(item.p95_ms, 3),
+            "successful_count": item.successful_count,
+            "slow_2s_count": item.slow_2s_count,
         }
         for item in ranked[:limit]
     ]
@@ -874,6 +944,8 @@ async def _attach_ai_summaries(
                 "gateway_5xx": incident.gateway_5xx,
                 "upstream_5xx": incident.upstream_5xx,
                 "p95_ms": round(incident.p95_ms, 3),
+                "successful_count": incident.successful_count,
+                "slow_2s_count": incident.slow_2s_count,
                 "route": incident.route_key,
                 "samples": [
                     sample.to_ai_dict() for sample in incident.samples[:5]
@@ -1039,7 +1111,7 @@ def build_http_access_notification(
     local_from = _to_local(time_from)
     local_to = _to_local(time_to)
     lines = [
-        f"## {icon} HTTP访问告警",
+        f"## {icon} HTTP关键风险告警",
         f"**时间窗口**: {local_from:%Y-%m-%d %H:%M} ~ {local_to:%H:%M}",
         f"**需要关注**: P0 {p0_count}个，P1 {p1_count}个",
         "",
@@ -1082,7 +1154,12 @@ def build_http_access_notification(
         ]
         if not explicit_routes and sample_routes:
             top_route = Counter(sample_routes).most_common(1)[0][0]
-            lines.append(f"- 主要接口: {top_route}")
+            sample_label = (
+                "慢请求样本" if any(
+                    item.kind == "latency" for item in site_incidents
+                ) else "主要接口"
+            )
+            lines.append(f"- {sample_label}: {top_route}")
         upstreams = [
             sample.upstream_addr
             for sample in samples
@@ -1200,10 +1277,17 @@ def _incident_metric_text(incident: AccessIncident) -> str:
             f"{_observed_text(incident)}）"
         )
     if incident.kind == "latency":
+        affected = ""
+        if incident.successful_count > 0 and incident.slow_2s_count > 0:
+            affected = (
+                f"；≥2秒 {incident.slow_2s_count}/"
+                f"{incident.successful_count}次"
+                f"（{incident.slow_2s_count / incident.successful_count:.1%}）"
+            )
         return (
             f"响应变慢: 成功请求P95 {_duration_text(incident.current_value)}"
             f"（平时{_duration_text(incident.baseline_value)}"
-            f"{_observed_text(incident)}）"
+            f"{_observed_text(incident)}{affected}）"
         )
     return (
         f"流量骤降: 当前{incident.current_value:.0f}次"

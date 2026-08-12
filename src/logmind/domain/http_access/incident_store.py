@@ -186,6 +186,8 @@ async def sync_incident_records(
                 "status_4xx": incident.status_4xx,
                 "status_5xx": incident.status_5xx,
                 "p95_ms": round(incident.p95_ms, 3),
+                "successful_count": incident.successful_count,
+                "slow_2s_count": incident.slow_2s_count,
                 "current_value": round(incident.current_value, 6),
                 "baseline_value": round(incident.baseline_value, 6),
                 "status_counts": incident.status_counts,

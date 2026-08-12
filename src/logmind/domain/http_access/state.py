@@ -78,7 +78,16 @@ class HttpAccessAlertState:
         for key, incident in current_by_key.items():
             old = previous.get(key, {})
             streak = int(old.get("streak", 0)) + 1
-            required_streak = 1 if incident.priority == "P0" else 2
+            if incident.priority == "P0":
+                required_streak = 1
+            elif incident.kind == "latency":
+                required_streak = getattr(
+                    settings,
+                    "http_access_latency_confirm_windows",
+                    4,
+                )
+            else:
+                required_streak = 2
             incident.observed_minutes = streak * getattr(
                 settings,
                 "http_access_window_minutes",
@@ -219,7 +228,19 @@ class HttpAccessAlertState:
         """
         is_p0 = any(incident.priority == "P0" for incident in incidents)
         key = _SUMMARY_P0_LEASE_KEY if is_p0 else _SUMMARY_COOLDOWN_KEY
-        ttl_seconds = 60
+        ttl_seconds = (
+            60
+            if is_p0
+            else max(
+                60,
+                getattr(
+                    get_settings(),
+                    "http_access_notification_cooldown_minutes",
+                    30,
+                )
+                * 60,
+            )
+        )
         return await self._acquire_lease(
             key,
             ttl_seconds=ttl_seconds,
@@ -364,11 +385,15 @@ def _is_material_worsening(
     if previous_impact <= 0 or current_impact <= previous_impact:
         return False
     absolute_increase = current_impact - previous_impact
-    minimum_increase = (
-        1000.0
-        if incident.kind == "latency"
-        else max(10.0, previous_impact * 0.25)
-    )
+    if incident.kind == "latency":
+        # Latency impact is the exact count of successful requests taking at
+        # least two seconds. Re-alert only when that affected population has
+        # doubled and grown by at least 50 requests.
+        return (
+            current_impact >= previous_impact * 2
+            and current_impact - previous_impact >= 50
+        )
+    minimum_increase = max(10.0, previous_impact * 0.25)
     return (
         current_impact >= previous_impact * 1.5
         and absolute_increase >= minimum_increase

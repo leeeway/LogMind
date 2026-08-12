@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # This patrol is intentionally independent from the business_line table.
     http_access_patrol_enabled: bool = False
     http_access_notification_enabled: bool = False
+    # WeCom is an interruption channel: keep ordinary P1 candidates in the
+    # backend and notify only critical-role or clearly severe incidents.
+    http_access_critical_notifications_only: bool = True
     http_access_recovery_notification_enabled: bool = False
     http_access_ai_enabled: bool = True
     http_access_indexes: str = (
@@ -108,7 +111,9 @@ class Settings(BaseSettings):
     http_access_baseline_days: int = 7
     http_access_baseline_slot_minutes: int = 60
     http_access_dedup_minutes: int = 30
-    http_access_notification_cooldown_minutes: int = 60
+    # P1 risks are accumulated into a digest at most once per this interval.
+    # P0 uses an independent short lease and remains real-time.
+    http_access_notification_cooldown_minutes: int = 30
     http_access_repeat_notification_minutes: int = 240
     http_access_max_route_candidate_sites: int = 20
     # Nginx primarily fronts C# and static sites, so use a deliberately higher
@@ -121,6 +126,18 @@ class Settings(BaseSettings):
     http_access_route_baseline_min_days: int = 3
     http_access_route_baseline_rate_multiplier: float = 2.0
     http_access_route_baseline_rate_delta: float = 0.10
+    # Latency must represent broad user impact, not one slow one-minute bucket.
+    http_access_latency_nginx_min_p95_ms: int = 3000
+    http_access_latency_ingress_min_p95_ms: int = 2500
+    http_access_latency_min_success_count: int = 200
+    http_access_latency_min_slow_count: int = 50
+    http_access_latency_min_slow_rate: float = 0.10
+    http_access_latency_severe_p95_ms: int = 10000
+    http_access_latency_severe_min_slow_count: int = 20
+    http_access_latency_confirm_windows: int = 4
+    http_access_latency_general_min_p95_ms: int = 10000
+    http_access_latency_general_min_slow_count: int = 100
+    http_access_latency_general_min_slow_rate: float = 0.20
     http_access_run_history_limit: int = 288
     http_access_max_notification_sites: int = 5
     http_access_sample_size: int = 20
@@ -220,6 +237,15 @@ class Settings(BaseSettings):
         "http_access_ingress_4xx_min_count",
         "http_access_route_baseline_min_samples",
         "http_access_route_baseline_min_days",
+        "http_access_latency_nginx_min_p95_ms",
+        "http_access_latency_ingress_min_p95_ms",
+        "http_access_latency_min_success_count",
+        "http_access_latency_min_slow_count",
+        "http_access_latency_severe_p95_ms",
+        "http_access_latency_severe_min_slow_count",
+        "http_access_latency_confirm_windows",
+        "http_access_latency_general_min_p95_ms",
+        "http_access_latency_general_min_slow_count",
         "http_access_run_history_limit",
         "http_access_max_notification_sites",
         "http_access_sample_size",
@@ -236,6 +262,8 @@ class Settings(BaseSettings):
         "http_access_nginx_4xx_min_rate",
         "http_access_ingress_4xx_min_rate",
         "http_access_route_baseline_rate_delta",
+        "http_access_latency_min_slow_rate",
+        "http_access_latency_general_min_slow_rate",
     )
     @classmethod
     def validate_http_access_rate(cls, v: float) -> float:

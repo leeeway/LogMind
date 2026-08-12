@@ -59,6 +59,7 @@ class AccessMetric:
     status_5xx: int = 0
     gateway_5xx: int = 0
     upstream_5xx: int = 0
+    slow_2s_count: int = 0
     p50_ms: float = 0.0
     p95_ms: float = 0.0
     p99_ms: float = 0.0
@@ -73,6 +74,7 @@ class AccessMetric:
             "status_5xx": self.status_5xx,
             "gateway_5xx": self.gateway_5xx,
             "upstream_5xx": self.upstream_5xx,
+            "slow_2s_count": self.slow_2s_count,
             "p50_ms": round(self.p50_ms, 3),
             "p95_ms": round(self.p95_ms, 3),
             "p99_ms": round(self.p99_ms, 3),
@@ -90,9 +92,14 @@ class AccessWindow:
     status_5xx: int = 0
     gateway_5xx: int = 0
     upstream_5xx: int = 0
+    slow_2s_count: int = 0
     p50_ms: float = 0.0
     p95_ms: float = 0.0
     p99_ms: float = 0.0
+    _latency_points: list[tuple[int, float, float, float]] = field(
+        default_factory=list,
+        repr=False,
+    )
 
     @property
     def rate_4xx(self) -> float:
@@ -111,6 +118,14 @@ class AccessWindow:
         return (
             self.successful_count / self.request_count
             if self.request_count
+            else 0.0
+        )
+
+    @property
+    def slow_2s_rate(self) -> float:
+        return (
+            self.slow_2s_count / self.successful_count
+            if self.successful_count
             else 0.0
         )
 
@@ -231,6 +246,8 @@ class AccessIncident:
     gateway_5xx: int = 0
     upstream_5xx: int = 0
     p95_ms: float = 0.0
+    successful_count: int = 0
+    slow_2s_count: int = 0
     route_key: str = ""
     status_counts: dict[int, int] = field(default_factory=dict)
     upstream_status_counts: dict[int, int] = field(default_factory=dict)
@@ -291,7 +308,14 @@ class AccessIncident:
         if self.kind in {"http_4xx", "route_4xx"}:
             return float(self.status_4xx)
         if self.kind == "latency":
-            return self.p95_ms
+            # Re-notification should follow the number of affected requests,
+            # not ordinary percentile jitter. Keep the fallback for old state
+            # and callers that do not yet populate the exact slow count.
+            return (
+                float(self.slow_2s_count)
+                if self.slow_2s_count > 0
+                else self.p95_ms
+            )
         return max(0.0, self.baseline_value - self.current_value)
 
     @property
@@ -568,12 +592,57 @@ def aggregate_metrics(metrics: list[AccessMetric]) -> dict[tuple[str, str], Acce
         window.status_5xx += metric.status_5xx
         window.gateway_5xx += metric.gateway_5xx
         window.upstream_5xx += metric.upstream_5xx
-        # Per-minute percentiles cannot be merged exactly without a histogram.
-        # Taking the maximum retains short latency spikes instead of hiding them.
-        window.p50_ms = max(window.p50_ms, metric.p50_ms)
-        window.p95_ms = max(window.p95_ms, metric.p95_ms)
-        window.p99_ms = max(window.p99_ms, metric.p99_ms)
+        window.slow_2s_count += metric.slow_2s_count
+        successful_count = max(
+            0,
+            metric.request_count - metric.status_4xx - metric.status_5xx,
+        )
+        if successful_count and metric.p95_ms > 0:
+            window._latency_points.append(
+                (
+                    successful_count,
+                    metric.p50_ms,
+                    metric.p95_ms,
+                    metric.p99_ms,
+                )
+            )
+    for window in windows.values():
+        # A percentile cannot be merged exactly without raw values or a
+        # histogram. The old implementation used the maximum one-minute P95,
+        # so a single short spike contaminated the whole five-minute window.
+        # A request-weighted median requires the slowdown to affect most of the
+        # traffic-bearing minutes, while exact slow-request counters below
+        # retain sensitivity to genuinely broad impact.
+        window.p50_ms = _weighted_median(
+            [(weight, p50) for weight, p50, _p95, _p99 in window._latency_points]
+        )
+        window.p95_ms = _weighted_median(
+            [(weight, p95) for weight, _p50, p95, _p99 in window._latency_points]
+        )
+        window.p99_ms = _weighted_median(
+            [(weight, p99) for weight, _p50, _p95, p99 in window._latency_points]
+        )
     return windows
+
+
+def _weighted_median(points: list[tuple[int, float]]) -> float:
+    usable = sorted(
+        [
+            (weight, value)
+            for weight, value in points
+            if weight > 0 and math.isfinite(value) and value >= 0
+        ],
+        key=lambda item: item[1],
+    )
+    if not usable:
+        return 0.0
+    threshold = sum(weight for weight, _value in usable) / 2
+    cumulative = 0
+    for weight, value in usable:
+        cumulative += weight
+        if cumulative >= threshold:
+            return value
+    return usable[-1][1]
 
 
 def merge_cross_source_incidents(
@@ -614,6 +683,14 @@ def merge_cross_source_incidents(
 def detect_incidents(
     windows: dict[tuple[str, str], AccessWindow],
     baselines: dict[tuple[str, str], AccessBaseline],
+    *,
+    latency_nginx_min_p95_ms: int = 3000,
+    latency_ingress_min_p95_ms: int = 2500,
+    latency_min_success_count: int = 200,
+    latency_min_slow_count: int = 50,
+    latency_min_slow_rate: float = 0.10,
+    latency_severe_p95_ms: int = 10000,
+    latency_severe_min_slow_count: int = 20,
 ) -> list[AccessIncident]:
     """Apply deterministic low-noise access anomaly rules."""
     incidents: list[AccessIncident] = []
@@ -658,13 +735,29 @@ def detect_incidents(
                 )
             )
 
+        latency_floor_ms = (
+            latency_ingress_min_p95_ms
+            if window.source == "ingress"
+            else latency_nginx_min_p95_ms
+        )
+        broadly_slow = (
+            window.slow_2s_count >= latency_min_slow_count
+            and window.slow_2s_rate >= latency_min_slow_rate
+        )
+        severely_slow = (
+            window.p95_ms >= latency_severe_p95_ms
+            and window.slow_2s_count >= latency_severe_min_slow_count
+            and window.slow_2s_rate >= 0.05
+        )
         if (
-            window.successful_count >= 100
+            window.successful_count >= latency_min_success_count
             and window.success_rate >= 0.80
             and baseline_ready
             and baseline_p95 > 0
-            and window.p95_ms >= 2000
+            and window.p95_ms >= latency_floor_ms
             and window.p95_ms >= baseline_p95 * 3
+            and window.p95_ms >= baseline_p95 + 1000
+            and (broadly_slow or severely_slow)
         ):
             incidents.append(
                 AccessIncident(
@@ -678,6 +771,8 @@ def detect_incidents(
                     status_4xx=window.status_4xx,
                     status_5xx=window.status_5xx,
                     p95_ms=window.p95_ms,
+                    successful_count=window.successful_count,
+                    slow_2s_count=window.slow_2s_count,
                 )
             )
 
