@@ -32,6 +32,7 @@ from logmind.domain.http_access.service import HttpAccessService
 from logmind.domain.http_access.state import HttpAccessAlertState
 from logmind.domain.http_access.tasks import (
     _attach_samples,
+    _format_pending_digest_line,
     _parse_ai_summaries,
     _run_http_access_patrol,
     build_http_access_notification,
@@ -312,6 +313,24 @@ def test_wecom_policy_keeps_only_must_see_p1_risks():
         ("unknown-severe.gyyx.cn", "latency"),
         ("general.gyyx.cn", "http_5xx"),
     }
+
+
+def test_pending_digest_line_omits_owner_and_shows_primary_route():
+    line = _format_pending_digest_line(
+        {
+            "site": "gpay.module.tjlong.cn",
+            "source": "nginx",
+            "kind": "latency",
+            "role": "payment",
+            "route": "POST /payment/create",
+            "owner": "待配置",
+        },
+        duration="，持续20分钟",
+    )
+
+    assert "负责人" not in line
+    assert "待配置" not in line
+    assert "主要接口: POST /payment/create" in line
 
 
 def test_nginx_route_4xx_uses_higher_threshold():

@@ -18,6 +18,8 @@ from logmind.domain.http_access.governance import (
     discover_sites,
     filter_enabled_incidents,
     filter_notification_worthy_incidents,
+    incident_is_enabled,
+    incident_is_notification_worthy,
     role_for_site,
 )
 from logmind.domain.http_access.incident_store import (
@@ -166,6 +168,7 @@ async def _send_http_access_pending_digest() -> bool:
 
     local_day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_start_utc = local_day_start.astimezone(UTC)
+    active_cutoff = datetime.now(UTC) - timedelta(minutes=15)
 
     async with get_db_context() as session:
         result = await session.execute(
@@ -173,6 +176,7 @@ async def _send_http_access_pending_digest() -> bool:
                 HttpAccessIncidentRecord.tenant_id == tenant_id,
                 HttpAccessIncidentRecord.priority == "P1",
                 HttpAccessIncidentRecord.status.in_(["open", "acknowledged"]),
+                HttpAccessIncidentRecord.last_seen_at >= active_cutoff,
                 or_(
                     HttpAccessIncidentRecord.last_digest_at.is_(None),
                     HttpAccessIncidentRecord.last_digest_at < day_start_utc,
@@ -187,21 +191,53 @@ async def _send_http_access_pending_digest() -> bool:
             )
         )
         site_configs = {item.site: item for item in site_result.scalars().all()}
-    pending = [
-        {
-            "site": item.site,
-            "source": item.source,
-            "kind": item.kind,
-            "first_seen": item.first_seen_at.isoformat(),
-            "owner": site_configs.get(item.site).owner if site_configs.get(item.site) else "",
-            "role": site_configs.get(item.site).role if site_configs.get(item.site) else "general",
-            "id": item.id,
-        }
-        for item in rows
-    ]
+    pending = []
+    for item in rows:
+        config = site_configs.get(item.site)
+        incident = _incident_from_record(item)
+        if not incident_is_enabled(incident, config):
+            continue
+        if not incident_is_notification_worthy(
+            incident,
+            config,
+            critical_only=getattr(
+                get_settings(),
+                "http_access_critical_notifications_only",
+                True,
+            ),
+            general_latency_min_p95_ms=getattr(
+                get_settings(),
+                "http_access_latency_general_min_p95_ms",
+                10000,
+            ),
+            general_latency_min_slow_count=getattr(
+                get_settings(),
+                "http_access_latency_general_min_slow_count",
+                100,
+            ),
+            general_latency_min_slow_rate=getattr(
+                get_settings(),
+                "http_access_latency_general_min_slow_rate",
+                0.20,
+            ),
+        ):
+            continue
+        pending.append(
+            {
+                "site": item.site,
+                "source": item.source,
+                "kind": item.kind,
+                "first_seen": item.first_seen_at.isoformat(),
+                "last_seen": item.last_seen_at.isoformat(),
+                "role": config.role if config else "general",
+                "route": item.route_key,
+                "id": item.id,
+            }
+        )
     if not pending:
         return False
     pending.sort(key=lambda item: str(item.get("first_seen", "")))
+    await _attach_pending_digest_routes(pending[:10])
     lines = ["## 🟡 HTTP访问待处理摘要", f"**时间**: {now:%Y-%m-%d %H:%M}", ""]
     for item in pending[:10]:
         first_seen = _parse_state_time(item.get("first_seen"))
@@ -215,12 +251,7 @@ async def _send_http_access_pending_digest() -> bool:
                 ),
             )
             duration = f"，持续{duration_minutes}分钟"
-        lines.append(
-            f"- {item.get('site')} · {_display_source(str(item.get('source', 'nginx')))}"
-            f" · {_display_kind(str(item.get('kind', '')))}{duration}"
-            f" · {item.get('role') or 'general'}"
-            f" · 负责人:{item.get('owner') or '待配置'}"
-        )
+        lines.append(_format_pending_digest_line(item, duration=duration))
     if len(pending) > 10:
         lines.append(f"- 另有 {len(pending) - 10} 个待处理问题")
     delivered = await _send_notification("\n".join(lines))
@@ -241,6 +272,75 @@ async def _send_http_access_pending_digest() -> bool:
         delivered=delivered,
     )
     return delivered
+
+
+def _incident_from_record(record) -> AccessIncident:
+    try:
+        evidence = json.loads(record.evidence_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        evidence = {}
+    return AccessIncident(
+        source=record.source,
+        site=record.site,
+        kind=record.kind,
+        priority=record.priority,
+        request_count=int(evidence.get("request_count", 0) or 0),
+        current_value=float(evidence.get("current_value", 0) or 0),
+        baseline_value=float(evidence.get("baseline_value", 0) or 0),
+        status_4xx=int(evidence.get("status_4xx", 0) or 0),
+        status_5xx=int(evidence.get("status_5xx", 0) or 0),
+        p95_ms=float(evidence.get("p95_ms", 0) or 0),
+        successful_count=int(evidence.get("successful_count", 0) or 0),
+        slow_2s_count=int(evidence.get("slow_2s_count", 0) or 0),
+        route_key=record.route_key,
+    )
+
+
+async def _attach_pending_digest_routes(pending: list[dict[str, Any]]) -> None:
+    missing = [item for item in pending if not item.get("route")]
+    if not missing:
+        return
+    calls = []
+    for item in missing:
+        last_seen = _parse_state_time(item.get("last_seen")) or datetime.now(UTC)
+        calls.append(
+            http_access_service.fetch_samples(
+                source=str(item.get("source", "nginx")),
+                site=str(item.get("site", "")),
+                time_from=last_seen - timedelta(minutes=10),
+                time_to=last_seen + timedelta(minutes=1),
+                size=10,
+                prefer_latency=item.get("kind") == "latency",
+                route_keys=[],
+            )
+        )
+    results = await asyncio.gather(*calls, return_exceptions=True)
+    for item, samples in zip(missing, results, strict=True):
+        if isinstance(samples, Exception):
+            logger.warning(
+                "http_access_pending_route_sample_failed",
+                site=item.get("site"),
+                error=str(samples),
+            )
+            continue
+        routes = [
+            f"{sample.method} {sample.route}"
+            for sample in samples
+            if sample.method and sample.route
+        ]
+        if routes:
+            item["route"] = Counter(routes).most_common(1)[0][0]
+
+
+def _format_pending_digest_line(item: dict[str, Any], *, duration: str) -> str:
+    line = (
+        f"- {item.get('site')} · "
+        f"{_display_source(str(item.get('source', 'nginx')))}"
+        f" · {_display_kind(str(item.get('kind', '')))}{duration}"
+        f" · {_display_role(str(item.get('role') or 'general'))}"
+    )
+    route = str(item.get("route") or "").strip()
+    return f"{line}\n  主要接口: {route}" if route else line
 
 
 def _parse_state_time(value: object) -> datetime | None:
