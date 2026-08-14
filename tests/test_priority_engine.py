@@ -231,16 +231,16 @@ class TestMinNotifyPriority:
             baseline_error_count=10,
             business_weight=5,
         )
-        # Verify it calculates as P1 by default
+        # Verify it calculates as P1, but suppressed by default P0 threshold
         dec_default = engine.decide(factors)
         assert dec_default.priority == "P1"
-        assert dec_default.actions.should_notify is True
+        assert dec_default.actions.should_notify is False
+        assert "低于最低通知级别门槛限制 P0" in dec_default.actions.reason
 
-        # Override min_notify_priority to P0
-        dec_override = engine.decide(factors, min_notify_priority="P0")
+        # Override min_notify_priority to P1 -> should notify
+        dec_override = engine.decide(factors, min_notify_priority="P1")
         assert dec_override.priority == "P1"
-        assert dec_override.actions.should_notify is False
-        assert "低于最低通知级别门槛限制 P0" in dec_override.actions.reason
+        assert dec_override.actions.should_notify is True
 
     def test_inherit_global_p0_threshold(self, engine):
         factors = PriorityFactors(

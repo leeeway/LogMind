@@ -188,7 +188,7 @@ class Settings(BaseSettings):
     analysis_fingerprint_ttl_hours: int = 6
     analysis_agent_max_steps: int = 5
     analysis_agent_enabled: bool = True
-    analysis_min_notification_priority: str = "P1"
+    analysis_min_notification_priority: str = "P0"
 
     # ── Auto-Discovery ──────────────────────────────────
     auto_discover_enabled: bool = True

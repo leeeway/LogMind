@@ -20,13 +20,14 @@ from logmind.core.logging import get_logger
 logger = get_logger(__name__)
 
 # ── Index name parsing ──────────────────────────────────
-# Strip trailing date patterns:
-#   master-game-api-2026.08.14     → game-api
-#   master-app-server-2026.08      → app-server
-#   master-svc-000001              → svc
-#   master-billing-pay.gyyx.cn-2026.08.14 → billing-pay.gyyx.cn
-_DATE_SUFFIX_RE = re.compile(
-    r"[-.](\d{4}[\.\-]\d{2}[\.\-]?\d{0,2}|\d{6,})$"
+# Strip trailing date patterns and generation numbers:
+#   master-game-api-2026.08.14                → game-api
+#   .ds-master-8004-tong.oa.gyyx.cn-2026.07.29-001838 → 8004-tong.oa.gyyx.cn
+#   master-app-server-2026.08                 → app-server
+#   master-svc-000001                         → svc
+#   master-billing-pay.gyyx.cn-2026.08.14     → billing-pay.gyyx.cn
+_DS_SUFFIX_RE = re.compile(
+    r"[-.]\d{4}[\.\-]\d{2}[\.\-]\d{2}[-.]\d{4,8}$|[-.]\d{4}[\.\-]\d{2}[\.\-]?\d{0,2}$|[-.]\d{6,}$"
 )
 
 
@@ -36,18 +37,74 @@ def parse_service_name(index_name: str, prefix: str = "master-") -> str | None:
 
     Examples:
         master-stage-billing-pay.gyyx.cn-2026.08.14 → stage-billing-pay.gyyx.cn
+        .ds-master-8004-tong.oa.gyyx.cn-2026.07.29-001838 → 8004-tong.oa.gyyx.cn
         master-slowcoach-connector-server-000001     → slowcoach-connector-server
         master-game-api                              → game-api
         develop-game-api-2026.08.14                  → None  (wrong prefix)
         .kibana                                      → None  (system index)
     """
-    if not index_name or not index_name.startswith(prefix):
+    if not index_name:
         return None
-    name = index_name[len(prefix):]
+    name = index_name
+    if name.startswith(".ds-"):
+        name = name[4:]
+    if not name.startswith(prefix):
+        return None
+    name = name[len(prefix):]
     # Strip date/numeric suffixes
-    name = _DATE_SUFFIX_RE.sub("", name)
+    name = _DS_SUFFIX_RE.sub("", name)
     name = name.rstrip("-.")
     return name if name else None
+
+
+async def _fetch_matching_indices(prefix: str, settings) -> list[str]:
+    """
+    Fetch index names matching prefix.
+    Uses _field_caps endpoint to work with index-level read privileges
+    and avoid cluster:monitor/state 403 Forbidden errors from cat.indices.
+    """
+    import httpx
+
+    auth = (
+        (settings.es_username, settings.es_password)
+        if settings.es_username
+        else None
+    )
+    base = settings.es_hosts_list[0] if settings.es_hosts_list else "http://localhost:9200"
+
+    try:
+        async with httpx.AsyncClient(
+            verify=settings.es_verify_certs,
+            trust_env=False,
+            timeout=float(settings.es_request_timeout or 30),
+        ) as http_client:
+            r = await http_client.get(
+                f"{base}/{prefix}*/_field_caps?fields=@timestamp",
+                auth=auth,
+            )
+            if r.status_code == 200:
+                return r.json().get("indices", [])
+            else:
+                logger.warning(
+                    "field_caps_index_scan_non_200",
+                    status_code=r.status_code,
+                    body=r.text[:200],
+                )
+    except Exception as e:
+        logger.warning("field_caps_index_scan_failed", error=str(e))
+
+    # Fallback to ES client cat.indices if available
+    from logmind.core.elasticsearch import get_es_client
+
+    try:
+        es = get_es_client()
+        raw_indices = await es.cat.indices(
+            index=f"{prefix}*", format="json", h="index"
+        )
+        return [idx.get("index", "") for idx in raw_indices if idx.get("index")]
+    except Exception as e:
+        logger.error("cat_indices_fallback_failed", error=str(e))
+        return []
 
 
 async def discover_indices(tenant_id: str) -> dict:
@@ -59,34 +116,24 @@ async def discover_indices(tenant_id: str) -> dict:
     """
     from logmind.core.config import get_settings
     from logmind.core.database import get_db_context
-    from logmind.core.elasticsearch import get_es_client
     from logmind.domain.tenant.models import BusinessLine, DiscoveredIndex
 
     settings = get_settings()
     prefix = settings.auto_discover_index_prefix
     now = datetime.now(timezone.utc)
 
-    # 1. Fetch all indices matching the prefix from ES
-    es = get_es_client()
-    try:
-        raw_indices = await es.cat.indices(
-            index=f"{prefix}*", format="json", h="index,docs.count,store.size"
-        )
-    except Exception as e:
-        logger.error("discover_es_scan_failed", error=str(e))
-        return {"new": 0, "updated": 0, "total": 0, "error": str(e)}
+    # 1. Fetch matching index names from ES
+    index_names = await _fetch_matching_indices(prefix, settings)
+    if not index_names:
+        logger.info("discover_no_matching_indices_found", prefix=prefix)
+        return {"new": 0, "updated": 0, "total": 0}
 
-    # 2. Group by service name and aggregate doc counts
-    service_map: dict[str, int] = {}  # service_name → total doc_count
-    for idx in raw_indices:
-        idx_name = idx.get("index", "")
-        # Skip system indices
-        if idx_name.startswith("."):
-            continue
+    # 2. Group by service name
+    service_map: dict[str, int] = {}  # service_name -> index count
+    for idx_name in index_names:
         svc = parse_service_name(idx_name, prefix)
         if svc:
-            doc_count = int(idx.get("docs.count", 0) or 0)
-            service_map[svc] = service_map.get(svc, 0) + doc_count
+            service_map[svc] = service_map.get(svc, 0) + 1
 
     if not service_map:
         logger.info("discover_no_new_indices", prefix=prefix)
