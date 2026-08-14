@@ -98,6 +98,7 @@ class PipelineContext:
     estimated_dau: int = 0
     night_policy: str = "p0_only"
     night_hours: str = "22:00-08:00"
+    min_notify_priority: str | None = None
 
     # Error tracking
     errors: list[str] = field(default_factory=list)

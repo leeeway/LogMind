@@ -135,6 +135,10 @@ async def create_business_line(
     req: BusinessLineCreate, session: DBSession, user: CurrentUser
 ):
     """Create a business line with ES index mapping."""
+    min_prio = None
+    if req.min_notify_priority and req.min_notify_priority.lower() != "default":
+        min_prio = req.min_notify_priority.upper()
+
     biz = BusinessLine(
         tenant_id=user.tenant_id,
         name=req.name,
@@ -147,6 +151,7 @@ async def create_business_line(
         field_mapping=json.dumps(req.field_mapping),
         ai_enabled=req.ai_enabled,
         webhook_url=req.webhook_url,
+        min_notify_priority=min_prio,
     )
     biz = await biz_repo.create(session, biz)
     return BusinessLineResponse.model_validate(biz)
@@ -192,6 +197,12 @@ async def update_business_line(
         values["default_filters"] = json.dumps(values["default_filters"])
     if "field_mapping" in values:
         values["field_mapping"] = json.dumps(values["field_mapping"])
+    if "min_notify_priority" in values:
+        val = values["min_notify_priority"]
+        if val and val.lower() != "default":
+            values["min_notify_priority"] = val.upper()
+        else:
+            values["min_notify_priority"] = None
 
     success = await biz_repo.update_by_id(
         session, biz_id, values, tenant_id=user.tenant_id

@@ -103,6 +103,19 @@ const BusinessLineList: React.FC = () => {
       },
     },
     {
+      title: '通知级别', dataIndex: 'min_notify_priority', width: 110,
+      render: (v: string) => {
+        const map: Record<string, { label: string; color: string }> = {
+          default: { label: '跟随全局', color: 'default' },
+          P0: { label: '仅 P0', color: 'red' },
+          P1: { label: 'P0 + P1', color: 'orange' },
+          P2: { label: '全部通知', color: 'green' },
+        };
+        const m = map[v] || { label: '跟随全局', color: 'default' };
+        return <Tag color={m.color} style={{ borderRadius: 4, fontSize: 11 }}>{m.label}</Tag>;
+      },
+    },
+    {
       title: 'AI', dataIndex: 'ai_enabled', width: 60,
       render: (v: boolean, r: any) => (
         <Tooltip title={v ? '关闭 AI 分析' : '开启 AI 分析'}>
@@ -174,11 +187,21 @@ const BusinessLineList: React.FC = () => {
                 { value: 'silent', label: '完全静默' },
               ]} />
             </Form.Item>
+            <Form.Item name="min_notify_priority" label="通知级别" initialValue="default" style={{ flex: 1 }}>
+              <Select options={[
+                { value: 'default', label: '跟随全局' },
+                { value: 'P0', label: '仅 P0 (严重)' },
+                { value: 'P1', label: 'P0 + P1 (警告)' },
+                { value: 'P2', label: '全部通知' },
+              ]} />
+            </Form.Item>
+          </Space>
+          <Space style={{ width: '100%' }} size={16}>
+            <Form.Item name="webhook_url" label="Webhook URL" style={{ flex: 3 }}><Input placeholder="可选 - WeChat/DingTalk/Feishu Webhook" /></Form.Item>
             <Form.Item name="is_core_path" label="核心路径" valuePropName="checked" initialValue={false} style={{ flex: 1, marginTop: 30 }}>
               <Switch />
             </Form.Item>
           </Space>
-          <Form.Item name="webhook_url" label="Webhook URL"><Input placeholder="可选 - WeChat/DingTalk/Feishu Webhook" /></Form.Item>
           <Form.Item><Button type="primary" htmlType="submit" block>保存</Button></Form.Item>
         </Form>
       </Modal>

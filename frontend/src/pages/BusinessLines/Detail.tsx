@@ -137,6 +137,19 @@ const BusinessLineDetail: React.FC = () => {
           <Descriptions.Item label="权重"><Text strong style={{ color: biz.business_weight >= 8 ? '#ff4d4f' : 'var(--lm-text)' }}>{biz.business_weight}</Text></Descriptions.Item>
           <Descriptions.Item label="预估 DAU">{biz.estimated_dau?.toLocaleString() || '-'}</Descriptions.Item>
           <Descriptions.Item label="夜间策略"><Tag color={np.color} style={{ borderRadius: 4 }}>{np.label}</Tag></Descriptions.Item>
+          <Descriptions.Item label="通知级别">
+            <Tag color={
+              biz.min_notify_priority === 'P0' ? 'red' :
+              biz.min_notify_priority === 'P1' ? 'orange' :
+              biz.min_notify_priority === 'P2' ? 'green' : 'default'
+            }>
+              {
+                biz.min_notify_priority === 'P0' ? '仅 P0' :
+                biz.min_notify_priority === 'P1' ? 'P0 + P1' :
+                biz.min_notify_priority === 'P2' ? '全部通知' : '跟随全局'
+              }
+            </Tag>
+          </Descriptions.Item>
           <Descriptions.Item label="告警级别"><Tag>{biz.severity_threshold || 'error'}</Tag></Descriptions.Item>
           <Descriptions.Item label="状态"><Tag color={biz.is_active ? '#52c41a' : '#8c8c8c'}>{biz.is_active ? '启用' : '禁用'}</Tag></Descriptions.Item>
           {biz.description && <Descriptions.Item label="描述" span={2}>{biz.description}</Descriptions.Item>}

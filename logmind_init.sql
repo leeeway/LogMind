@@ -60,6 +60,7 @@ CREATE TABLE business_line (
 	field_mapping TEXT NOT NULL DEFAULT '{}', 
 	ai_enabled BOOLEAN NOT NULL DEFAULT TRUE, 
 	webhook_url VARCHAR(500) NOT NULL DEFAULT '', 
+	min_notify_priority VARCHAR(10) NULL,
 	is_active BOOLEAN NOT NULL, 
 	id VARCHAR(36) NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 

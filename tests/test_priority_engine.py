@@ -218,3 +218,48 @@ class TestSelfLearningIntegration:
         decision = engine.decide(extreme)
         # Score should not go below 0 (clamped)
         assert decision.score >= 0.0
+
+
+class TestMinNotifyPriority:
+    """Tests for min_notify_priority logic (global default and business line override)."""
+
+    def test_notify_p0_only_suppresses_p1_alert(self, engine):
+        factors = PriorityFactors(
+            ai_severity="warning",
+            confidence=0.8,
+            current_error_count=50,
+            baseline_error_count=10,
+            business_weight=5,
+        )
+        # Verify it calculates as P1 by default
+        dec_default = engine.decide(factors)
+        assert dec_default.priority == "P1"
+        assert dec_default.actions.should_notify is True
+
+        # Override min_notify_priority to P0
+        dec_override = engine.decide(factors, min_notify_priority="P0")
+        assert dec_override.priority == "P1"
+        assert dec_override.actions.should_notify is False
+        assert "低于最低通知级别门槛限制 P0" in dec_override.actions.reason
+
+    def test_inherit_global_p0_threshold(self, engine):
+        factors = PriorityFactors(
+            ai_severity="warning",
+            confidence=0.8,
+            current_error_count=50,
+            baseline_error_count=10,
+            business_weight=5,
+        )
+        with patch("logmind.core.config.get_settings") as mock_settings:
+            # Set global minimum notification priority to P0
+            mock_settings.return_value.analysis_min_notification_priority = "P0"
+
+            # Should be suppressed by global setting
+            dec = engine.decide(factors, min_notify_priority="default")
+            assert dec.actions.should_notify is False
+            assert "低于最低通知级别门槛限制 P0" in dec.actions.reason
+
+            # Should override global setting back to P1 and notify
+            dec_override = engine.decide(factors, min_notify_priority="P1")
+            assert dec_override.actions.should_notify is True
+

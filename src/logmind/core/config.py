@@ -188,6 +188,7 @@ class Settings(BaseSettings):
     analysis_fingerprint_ttl_hours: int = 6
     analysis_agent_max_steps: int = 5
     analysis_agent_enabled: bool = True
+    analysis_min_notification_priority: str = "P1"
 
     # ── Adaptive Log Sampling ────────────────────────────
     analysis_sampling_default_budget: int = 150
@@ -219,6 +220,14 @@ class Settings(BaseSettings):
         if v.lower() not in allowed:
             raise ValueError(f"severity must be one of {allowed}")
         return v.lower()
+
+    @field_validator("analysis_min_notification_priority")
+    @classmethod
+    def validate_notification_priority(cls, v: str) -> str:
+        allowed = {"p0", "p1", "p2"}
+        if v.lower() not in allowed:
+            raise ValueError(f"minimum notification priority must be one of {allowed}")
+        return v.upper()
 
     @field_validator(
         "analysis_cooldown_minutes",

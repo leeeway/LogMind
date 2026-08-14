@@ -14,6 +14,7 @@ async def main():
         "ALTER TABLE business_line ADD COLUMN ai_enabled BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE business_line ADD COLUMN webhook_url VARCHAR(500) NOT NULL DEFAULT ''",
         "ALTER TABLE business_line ADD COLUMN noise_patterns TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE business_line ADD COLUMN min_notify_priority VARCHAR(10) NULL",
     ]
     for col_query in columns_to_add:
         try:

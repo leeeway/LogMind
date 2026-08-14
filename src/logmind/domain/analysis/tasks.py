@@ -528,6 +528,7 @@ async def _execute_analysis(task_id: str):
         estimated_dau=biz.estimated_dau,
         night_policy=biz.night_policy,
         night_hours=biz.night_hours,
+        min_notify_priority=biz.min_notify_priority,
         # Cross-service correlation config
         related_services=json.loads(biz.related_services) if biz.related_services else {},
     )

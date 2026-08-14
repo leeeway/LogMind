@@ -71,8 +71,12 @@ class PriorityDecisionStage(PipelineStage):
             is_suppressed=is_suppressed, suppression_reason=suppression_reason,
         )
 
-        decision = engine.decide(factors=factors, night_policy=ctx.night_policy,
-                                  night_hours=ctx.night_hours)
+        decision = engine.decide(
+            factors=factors,
+            night_policy=ctx.night_policy,
+            night_hours=ctx.night_hours,
+            min_notify_priority=ctx.min_notify_priority,
+        )
 
         ctx.priority_decision = {
             "priority": decision.priority, "score": decision.score,

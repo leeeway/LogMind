@@ -110,6 +110,7 @@ class PriorityDecisionEngine:
         factors: PriorityFactors,
         night_policy: str = "p0_only",
         night_hours: str = "22:00-08:00",
+        min_notify_priority: str | None = None,
     ) -> PriorityDecision:
         """Calculate priority and determine notification actions."""
 
@@ -121,7 +122,9 @@ class PriorityDecisionEngine:
 
         # 3. Determine notification actions based on priority + night policy
         is_night = self._is_night_time(night_hours)
-        actions = self._determine_actions(priority, night_policy, is_night, factors)
+        actions = self._determine_actions(
+            priority, night_policy, is_night, factors, min_notify_priority
+        )
 
         decision = PriorityDecision(
             priority=priority,
@@ -229,6 +232,7 @@ class PriorityDecisionEngine:
         night_policy: str,
         is_night: bool,
         factors: PriorityFactors,
+        min_notify_priority: str | None = None,
     ) -> NotificationAction:
         """Determine what notification actions to take."""
 
@@ -270,6 +274,20 @@ class PriorityDecisionEngine:
         else:  # P2
             action.should_notify = False
             action.reason = f"🟢 P2: 低优先级，仅记录到日报"
+
+        # Apply minimum notification priority filter (global default + local override)
+        prio_ranks = {"P0": 3, "P1": 2, "P2": 1}
+        
+        # Determine threshold
+        if not min_notify_priority or min_notify_priority.lower() == "default":
+            from logmind.core.config import get_settings
+            min_prio = get_settings().analysis_min_notification_priority.upper()
+        else:
+            min_prio = min_notify_priority.upper()
+            
+        if prio_ranks.get(priority, 1) < prio_ranks.get(min_prio, 2):
+            action.should_notify = False
+            action.reason += f" (低于最低通知级别门槛限制 {min_prio})"
 
         # ── Self-learning: auto-suppression override ─────
         if factors.is_suppressed:

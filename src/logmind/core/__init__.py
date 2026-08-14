@@ -149,6 +149,7 @@ class Settings(BaseSettings):
     analysis_patrol_interval_minutes: int = 5
     analysis_anomaly_window_minutes: int = 5
     analysis_lookback_minutes: int = 10
+    analysis_min_notification_priority: str = "P1"
 
     @field_validator("analysis_severity_threshold")
     @classmethod
@@ -157,6 +158,14 @@ class Settings(BaseSettings):
         if v.lower() not in allowed:
             raise ValueError(f"severity must be one of {allowed}")
         return v.lower()
+
+    @field_validator("analysis_min_notification_priority")
+    @classmethod
+    def validate_notification_priority(cls, v: str) -> str:
+        allowed = {"p0", "p1", "p2"}
+        if v.lower() not in allowed:
+            raise ValueError(f"minimum notification priority must be one of {allowed}")
+        return v.upper()
 
     @field_validator(
         "analysis_cooldown_minutes",

@@ -133,6 +133,9 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Night hours window (HH:MM-HH:MM, local time based on Celery timezone)
     night_hours: Mapped[str] = mapped_column(String(20), default="22:00-08:00")
 
+    # Minimum notification priority threshold ("P0", "P1", "P2" or None/default to inherit global)
+    min_notify_priority: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
+
     # Auto-remediation Runbook config (JSON)
     # RESERVED for v3.0: Not currently consumed by any pipeline stage.
     # Planned: {"actions": [{"type": "webhook", "url": "...", "trigger_on": ["P0"]}]}

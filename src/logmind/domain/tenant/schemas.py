@@ -101,6 +101,12 @@ class BusinessLineCreate(BaseModel):
         description="Webhook URL for notifications. Overrides global setting. "
         "Supports WeChat Work, DingTalk, Feishu webhooks.",
     )
+    min_notify_priority: str | None = Field(
+        "default",
+        pattern=r"^(default|P0|P1|P2|p0|p1|p2)$",
+        description="Minimum notification priority: default / P0 / P1 / P2. "
+        "default inherits from global config.",
+    )
 
 
 class BusinessLineUpdate(BaseModel):
@@ -117,6 +123,7 @@ class BusinessLineUpdate(BaseModel):
     noise_patterns: list[dict] | None = None
     is_active: bool | None = None
     auto_remediation_config: str | None = None
+    min_notify_priority: str | None = Field(None, pattern=r"^(default|P0|P1|P2|p0|p1|p2)$")
 
 
 class BusinessLineResponse(BaseSchema):
@@ -132,6 +139,7 @@ class BusinessLineResponse(BaseSchema):
     webhook_url: str = ""
     noise_patterns: list[dict] = Field(default_factory=list)
     auto_remediation_config: str = "{}"
+    min_notify_priority: str | None = "default"
     is_active: bool = True
     created_at: datetime
 
@@ -139,6 +147,11 @@ class BusinessLineResponse(BaseSchema):
     @classmethod
     def parse_str_fields(cls, v):
         return v or ""
+
+    @field_validator("min_notify_priority", mode="before")
+    @classmethod
+    def parse_min_notify_priority(cls, v):
+        return v or "default"
 
     @field_validator("language", mode="before")
     @classmethod
