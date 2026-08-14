@@ -53,6 +53,22 @@ export const businessLineApi = {
 
   update: (id: string, data: Record<string, unknown>) =>
     client.put(`/business-lines/${id}`, data),
+
+  // Discovery
+  discover: () =>
+    client.post('/business-lines/discover'),
+
+  listDiscovered: () =>
+    client.get('/business-lines/discovered'),
+
+  confirmDiscovered: (id: string) =>
+    client.post(`/business-lines/discovered/${id}/confirm`),
+
+  ignoreDiscovered: (id: string) =>
+    client.post(`/business-lines/discovered/${id}/ignore`),
+
+  confirmAllDiscovered: () =>
+    client.post('/business-lines/discovered/confirm-all'),
 };
 
 export const providerApi = {

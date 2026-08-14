@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Table, Tag, Button, Space, Typography, Card, Modal, Form, Input, Select, Switch, message, Tooltip, Progress } from 'antd';
-import { PlusOutlined, EditOutlined, ReloadOutlined, ClusterOutlined, ApiOutlined, ExperimentOutlined } from '@ant-design/icons';
+import { Table, Tag, Button, Space, Typography, Card, Modal, Form, Input, Select, Switch, message, Tooltip, Progress, Alert, Badge } from 'antd';
+import { PlusOutlined, EditOutlined, ReloadOutlined, ClusterOutlined, ApiOutlined, ExperimentOutlined, SearchOutlined } from '@ant-design/icons';
 import { businessLineApi } from '@/api/services';
 
 const { Title, Text } = Typography;
@@ -16,6 +16,8 @@ const BusinessLineList: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
+  const [discovered, setDiscovered] = useState<any[]>([]);
+  const [discovering, setDiscovering] = useState(false);
   const [form] = Form.useForm();
 
   const fetchLines = async () => {
@@ -27,7 +29,53 @@ const BusinessLineList: React.FC = () => {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { fetchLines(); }, []);
+  const fetchDiscovered = async () => {
+    try {
+      const { data } = await businessLineApi.listDiscovered();
+      setDiscovered((data?.items || []).filter((d: any) => d.status === 'pending'));
+    } catch (err) { console.error(err); }
+  };
+
+  useEffect(() => { 
+    fetchLines(); 
+    fetchDiscovered();
+  }, []);
+
+  const handleDiscover = async () => {
+    setDiscovering(true);
+    try {
+      await businessLineApi.discover();
+      message.success('扫描完成');
+      await fetchDiscovered();
+    } catch (err: any) { message.error(err.response?.data?.detail || '扫描失败'); }
+    finally { setDiscovering(false); }
+  };
+
+  const handleConfirm = async (id: string) => {
+    try {
+      await businessLineApi.confirmDiscovered(id);
+      message.success('已添加为监控服务');
+      fetchDiscovered();
+      fetchLines();
+    } catch (err: any) { message.error(err.response?.data?.detail || '确认失败'); }
+  };
+
+  const handleIgnore = async (id: string) => {
+    try {
+      await businessLineApi.ignoreDiscovered(id);
+      message.success('已忽略');
+      fetchDiscovered();
+    } catch (err: any) { message.error(err.response?.data?.detail || '操作失败'); }
+  };
+
+  const handleConfirmAll = async () => {
+    try {
+      await businessLineApi.confirmAllDiscovered();
+      message.success(`已添加 ${discovered.length} 个服务`);
+      fetchDiscovered();
+      fetchLines();
+    } catch (err: any) { message.error(err.response?.data?.detail || '批量确认失败'); }
+  };
 
   const handleSave = async (values: any) => {
     try {
@@ -144,10 +192,45 @@ const BusinessLineList: React.FC = () => {
           </Tag>
         </Space>
         <Space>
+          <Button icon={<SearchOutlined />} loading={discovering} onClick={handleDiscover}>扫描发现</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditId(null); form.resetFields(); setFormOpen(true); }}>添加服务</Button>
           <Button icon={<ReloadOutlined />} onClick={fetchLines} />
         </Space>
       </div>
+
+      {discovered.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16, borderRadius: 12 }}
+          message={
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>🆕 发现 <strong>{discovered.length}</strong> 个新的生产索引待确认</span>
+              <Button size="small" type="primary" onClick={handleConfirmAll}>全部确认</Button>
+            </div>
+          }
+          description={
+            <div style={{ marginTop: 8 }}>
+              {discovered.map((d: any) => (
+                <div key={d.id} style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '6px 0', borderBottom: '1px solid var(--lm-border-light)',
+                }}>
+                  <Space>
+                    <code style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>{d.index_pattern}</code>
+                    <Tag>{d.index_name}</Tag>
+                    {d.doc_count > 0 && <Text type="secondary" style={{ fontSize: 12 }}>{d.doc_count.toLocaleString()} docs</Text>}
+                  </Space>
+                  <Space size={4}>
+                    <Button size="small" type="primary" onClick={() => handleConfirm(d.id)}>确认添加</Button>
+                    <Button size="small" onClick={() => handleIgnore(d.id)}>忽略</Button>
+                  </Space>
+                </div>
+              ))}
+            </div>
+          }
+        />
+      )}
 
       <Card style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12 }} styles={{ body: { padding: 0 } }}>
         <Table dataSource={lines} columns={columns} rowKey="id" size="small" loading={loading} pagination={false} />

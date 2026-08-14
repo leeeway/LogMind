@@ -151,6 +151,13 @@ class Settings(BaseSettings):
     analysis_lookback_minutes: int = 10
     analysis_min_notification_priority: str = "P1"
 
+    # ── Auto-Discovery ──────────────────────────────────
+    auto_discover_enabled: bool = True
+    auto_discover_index_prefix: str = "master-"
+    auto_discover_interval_minutes: int = 30
+    auto_discover_default_language: str = "java"
+    auto_discover_default_severity: str = "error"
+
     @field_validator("analysis_severity_threshold")
     @classmethod
     def validate_severity(cls, v: str) -> str:

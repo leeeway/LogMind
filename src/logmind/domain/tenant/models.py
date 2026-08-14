@@ -1,10 +1,12 @@
 """
 Tenant Domain — ORM Models
 
-Models: Tenant, User, BusinessLine
+Models: Tenant, User, BusinessLine, DiscoveredIndex
 """
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from logmind.shared.base_model import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -156,3 +158,34 @@ class BusinessLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Relationships
     tenant = relationship("Tenant", back_populates="business_lines", foreign_keys=[tenant_id])
+
+
+class DiscoveredIndex(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """
+    Auto-discovered ES index — pending admin confirmation.
+
+    Tracks ES indices found by periodic scanning that are not yet
+    registered as BusinessLine records. Admin can confirm (→ create
+    BusinessLine) or ignore.
+    """
+
+    __tablename__ = "discovered_index"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False, index=True
+    )
+    index_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    index_pattern: Mapped[str] = mapped_column(String(500), nullable=False)
+    doc_count: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    # pending / confirmed / ignored
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    business_line_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, default=None
+    )
+

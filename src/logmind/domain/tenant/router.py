@@ -210,3 +210,73 @@ async def update_business_line(
     if not success:
         raise HTTPException(status_code=404, detail="Business line not found")
     return MessageResponse(message="Updated successfully")
+
+
+# ── Auto-Discovery ───────────────────────────────────────
+@biz_router.post("/discover")
+async def trigger_discover(user: CurrentUser):
+    """Manually trigger ES index discovery scan."""
+    from logmind.domain.tenant.discovery import discover_indices
+
+    result = await discover_indices(user.tenant_id)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@biz_router.get("/discovered", response_model=PaginatedResponse)
+async def list_discovered(session: DBSession, user: CurrentUser):
+    """List all discovered indices (pending + ignored + confirmed)."""
+    from sqlalchemy import select
+
+    from logmind.domain.tenant.models import DiscoveredIndex
+    from logmind.domain.tenant.schemas import DiscoveredIndexResponse
+
+    stmt = (
+        select(DiscoveredIndex)
+        .where(DiscoveredIndex.tenant_id == user.tenant_id)
+        .order_by(DiscoveredIndex.last_seen.desc())
+    )
+    result = await session.execute(stmt)
+    items = result.scalars().all()
+    return PaginatedResponse.create(
+        items=[DiscoveredIndexResponse.model_validate(d) for d in items],
+        total=len(items),
+        page=1,
+        page_size=len(items) or 1,
+    )
+
+
+@biz_router.post("/discovered/{disc_id}/confirm")
+async def confirm_single(disc_id: str, user: CurrentUser):
+    """Confirm a discovered index — creates a BusinessLine."""
+    from logmind.domain.tenant.discovery import confirm_discovered
+
+    result = await confirm_discovered(disc_id, user.tenant_id)
+    if "error" in result:
+        if result["error"] == "not_found":
+            raise HTTPException(status_code=404, detail="Discovered index not found")
+        if result["error"] == "already_confirmed":
+            raise HTTPException(status_code=409, detail="Already confirmed")
+    return result
+
+
+@biz_router.post("/discovered/{disc_id}/ignore")
+async def ignore_single(disc_id: str, user: CurrentUser):
+    """Ignore a discovered index — won't show as pending anymore."""
+    from logmind.domain.tenant.discovery import ignore_discovered
+
+    success = await ignore_discovered(disc_id, user.tenant_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Discovered index not found")
+    return MessageResponse(message="Ignored")
+
+
+@biz_router.post("/discovered/confirm-all")
+async def confirm_all(user: CurrentUser):
+    """Confirm all pending discovered indices at once."""
+    from logmind.domain.tenant.discovery import confirm_all_discovered
+
+    result = await confirm_all_discovered(user.tenant_id)
+    return result
+

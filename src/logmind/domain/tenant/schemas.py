@@ -191,3 +191,18 @@ class BusinessLineResponse(BaseSchema):
             except (json.JSONDecodeError, TypeError):
                 return []
         return v
+
+
+# ── DiscoveredIndex ──────────────────────────────────────
+class DiscoveredIndexResponse(BaseSchema):
+    id: str
+    tenant_id: str
+    index_name: str
+    index_pattern: str
+    doc_count: int = 0
+    first_seen: datetime
+    last_seen: datetime
+    status: str  # pending / confirmed / ignored
+    business_line_id: str | None = None
+    created_at: datetime
+

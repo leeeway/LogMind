@@ -47,6 +47,7 @@ celery_app.autodiscover_tasks([
     "logmind.domain.http_access",
     "logmind.domain.dashboard",
     "logmind.domain.rag",
+    "logmind.domain.tenant",
 ])
 
 # ── Beat Schedule (定时任务) ──────────────────────────────
@@ -101,6 +102,12 @@ celery_app.conf.beat_schedule = {
     "daily-standup-auto-share": {
         "task": "logmind.domain.dashboard.tasks.dispatch_daily_standup_auto_share",
         "schedule": crontab(minute="*/5"),
+        "options": {"queue": "alert"},
+    },
+    # ES index auto-discovery — scan for new master-* indices
+    "discover-business-lines": {
+        "task": "logmind.domain.tenant.tasks.discover_business_lines",
+        "schedule": crontab(minute=f"*/{settings.auto_discover_interval_minutes}"),
         "options": {"queue": "alert"},
     },
 }

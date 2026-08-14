@@ -201,3 +201,18 @@ CREATE TABLE "user" (
 	UNIQUE (username)
 );
 
+CREATE TABLE discovered_index (
+	tenant_id VARCHAR(36) NOT NULL REFERENCES tenant(id),
+	index_name VARCHAR(500) NOT NULL,
+	index_pattern VARCHAR(500) NOT NULL,
+	doc_count BIGINT DEFAULT 0,
+	first_seen TIMESTAMP WITH TIME ZONE NOT NULL,
+	last_seen TIMESTAMP WITH TIME ZONE NOT NULL,
+	status VARCHAR(20) NOT NULL DEFAULT 'pending',
+	business_line_id VARCHAR(36) NULL,
+	id VARCHAR(36) NOT NULL,
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+	PRIMARY KEY (id),
+	UNIQUE (tenant_id, index_pattern)
+);
