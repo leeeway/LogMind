@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Table, Tag, Button, Space, Typography, Card, Modal, Form, Input, Select, Switch, message, Tooltip, Progress, Alert, Badge } from 'antd';
-import { PlusOutlined, EditOutlined, ReloadOutlined, ClusterOutlined, ApiOutlined, ExperimentOutlined, SearchOutlined } from '@ant-design/icons';
+import { Table, Tag, Button, Space, Typography, Card, Modal, Form, Input, Select, Switch, message, Tooltip, Progress, Alert, Badge, Popconfirm } from 'antd';
+import { PlusOutlined, EditOutlined, ReloadOutlined, ClusterOutlined, ApiOutlined, ExperimentOutlined, SearchOutlined, EyeOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { businessLineApi } from '@/api/services';
 
 const { Title, Text } = Typography;
@@ -18,7 +18,59 @@ const BusinessLineList: React.FC = () => {
   const [editId, setEditId] = useState<string | null>(null);
   const [discovered, setDiscovered] = useState<any[]>([]);
   const [discovering, setDiscovering] = useState(false);
+  const [discoverModalOpen, setDiscoverModalOpen] = useState(false);
+  const [discoverSearch, setDiscoverSearch] = useState('');
+  const [selectedDiscKeys, setSelectedDiscKeys] = useState<React.Key[]>([]);
+  const [batchActionLoading, setBatchActionLoading] = useState(false);
   const [form] = Form.useForm();
+
+  const filteredDiscovered = discovered.filter((d: any) => {
+    if (!discoverSearch.trim()) return true;
+    const q = discoverSearch.toLowerCase();
+    return (
+      (d.index_name && d.index_name.toLowerCase().includes(q)) ||
+      (d.index_pattern && d.index_pattern.toLowerCase().includes(q))
+    );
+  });
+
+  const handleBatchConfirm = async () => {
+    if (selectedDiscKeys.length === 0) return;
+    setBatchActionLoading(true);
+    try {
+      let count = 0;
+      for (const key of selectedDiscKeys) {
+        await businessLineApi.confirmDiscovered(String(key));
+        count++;
+      }
+      message.success(`已成功添加 ${count} 个服务`);
+      setSelectedDiscKeys([]);
+      await fetchDiscovered();
+      await fetchLines();
+    } catch (err: any) {
+      message.error('部分服务添加失败');
+    } finally {
+      setBatchActionLoading(false);
+    }
+  };
+
+  const handleBatchIgnore = async () => {
+    if (selectedDiscKeys.length === 0) return;
+    setBatchActionLoading(true);
+    try {
+      let count = 0;
+      for (const key of selectedDiscKeys) {
+        await businessLineApi.ignoreDiscovered(String(key));
+        count++;
+      }
+      message.success(`已忽略 ${count} 个服务`);
+      setSelectedDiscKeys([]);
+      await fetchDiscovered();
+    } catch (err: any) {
+      message.error('操作失败');
+    } finally {
+      setBatchActionLoading(false);
+    }
+  };
 
   const fetchLines = async () => {
     setLoading(true);
@@ -179,6 +231,34 @@ const BusinessLineList: React.FC = () => {
     },
   ];
 
+  const discoveredColumns = [
+    {
+      title: '服务名称',
+      dataIndex: 'index_name',
+      width: 220,
+      render: (name: string) => (
+        <span style={{ fontWeight: 600, color: 'var(--lm-text)' }}>{name}</span>
+      ),
+    },
+    {
+      title: 'ES 索引模式',
+      dataIndex: 'index_pattern',
+      render: (pattern: string) => (
+        <code style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>{pattern}</code>
+      ),
+    },
+    {
+      title: '操作',
+      width: 140,
+      render: (_: any, r: any) => (
+        <Space size={6}>
+          <Button size="small" type="primary" onClick={() => handleConfirm(r.id)}>添加</Button>
+          <Button size="small" onClick={() => handleIgnore(r.id)}>忽略</Button>
+        </Space>
+      ),
+    },
+  ];
+
   return (
     <div className="lm-animate-in">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
@@ -200,33 +280,27 @@ const BusinessLineList: React.FC = () => {
 
       {discovered.length > 0 && (
         <Alert
-          type="warning"
+          type="info"
           showIcon
-          style={{ marginBottom: 16, borderRadius: 12 }}
+          style={{ marginBottom: 16, borderRadius: 12, background: 'rgba(22, 119, 255, 0.06)', border: '1px solid rgba(22, 119, 255, 0.2)' }}
           message={
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>🆕 发现 <strong>{discovered.length}</strong> 个新的生产索引待确认</span>
-              <Button size="small" type="primary" onClick={handleConfirmAll}>全部确认</Button>
-            </div>
-          }
-          description={
-            <div style={{ marginTop: 8 }}>
-              {discovered.map((d: any) => (
-                <div key={d.id} style={{
-                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  padding: '6px 0', borderBottom: '1px solid var(--lm-border-light)',
-                }}>
-                  <Space>
-                    <code style={{ fontSize: 12, color: 'var(--lm-text-tertiary)' }}>{d.index_pattern}</code>
-                    <Tag>{d.index_name}</Tag>
-                    {d.doc_count > 0 && <Text type="secondary" style={{ fontSize: 12 }}>{d.doc_count.toLocaleString()} docs</Text>}
-                  </Space>
-                  <Space size={4}>
-                    <Button size="small" type="primary" onClick={() => handleConfirm(d.id)}>确认添加</Button>
-                    <Button size="small" onClick={() => handleIgnore(d.id)}>忽略</Button>
-                  </Space>
-                </div>
-              ))}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+              <Space>
+                <span>🆕 扫描发现 <strong>{discovered.length}</strong> 个新的生产服务待接入</span>
+              </Space>
+              <Space size={8}>
+                <Button size="small" type="primary" icon={<EyeOutlined />} onClick={() => setDiscoverModalOpen(true)}>
+                  查看并接入 ({discovered.length})
+                </Button>
+                <Popconfirm
+                  title={`确定要将全部 ${discovered.length} 个新发现的服务一键添加为监控吗？`}
+                  onConfirm={handleConfirmAll}
+                  okText="确定"
+                  cancelText="取消"
+                >
+                  <Button size="small" icon={<ThunderboltOutlined />}>一键全部添加</Button>
+                </Popconfirm>
+              </Space>
             </div>
           }
         />
@@ -287,6 +361,86 @@ const BusinessLineList: React.FC = () => {
           </Space>
           <Form.Item><Button type="primary" htmlType="submit" block>保存</Button></Form.Item>
         </Form>
+      </Modal>
+
+      {/* Discovered Services Approval Modal */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 32 }}>
+            <Space>
+              <SearchOutlined style={{ color: '#1677ff' }} />
+              <span>待确认的生产服务</span>
+              <Tag color="processing">{discovered.length} 个待接入</Tag>
+            </Space>
+          </div>
+        }
+        open={discoverModalOpen}
+        onCancel={() => { setDiscoverModalOpen(false); setSelectedDiscKeys([]); }}
+        footer={null}
+        width={860}
+        destroyOnClose
+      >
+        <div style={{ marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <Input.Search
+            placeholder="搜索服务名称或 ES 索引模式..."
+            allowClear
+            value={discoverSearch}
+            onChange={(e) => setDiscoverSearch(e.target.value)}
+            style={{ width: 280 }}
+          />
+          <Space>
+            {selectedDiscKeys.length > 0 && (
+              <>
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={batchActionLoading}
+                  onClick={handleBatchConfirm}
+                >
+                  批量添加 ({selectedDiscKeys.length})
+                </Button>
+                <Button
+                  size="small"
+                  loading={batchActionLoading}
+                  onClick={handleBatchIgnore}
+                >
+                  批量忽略 ({selectedDiscKeys.length})
+                </Button>
+              </>
+            )}
+            <Popconfirm
+              title={`确定要将所有 ${discovered.length} 个服务一键全部添加为监控吗？`}
+              onConfirm={async () => {
+                await handleConfirmAll();
+                setDiscoverModalOpen(false);
+              }}
+              okText="确定"
+              cancelText="取消"
+            >
+              <Button size="small" type="dashed" icon={<ThunderboltOutlined />}>
+                一键全部添加 ({discovered.length})
+              </Button>
+            </Popconfirm>
+          </Space>
+        </div>
+
+        <Table
+          dataSource={filteredDiscovered}
+          columns={discoveredColumns}
+          rowKey="id"
+          size="small"
+          rowSelection={{
+            selectedRowKeys: selectedDiscKeys,
+            onChange: (keys) => setSelectedDiscKeys(keys),
+          }}
+          pagination={{
+            pageSize: 10,
+            showSizeChanger: true,
+            pageSizeOptions: ['10', '20', '50', '100'],
+            showTotal: (total) => `共 ${total} 个待接入服务`,
+          }}
+          scroll={{ y: 420 }}
+        />
       </Modal>
     </div>
   );
