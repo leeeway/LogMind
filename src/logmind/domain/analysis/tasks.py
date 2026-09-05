@@ -368,6 +368,8 @@ def _build_alert_location_summary(
         refs = [str(ref)[:120] for ref in parsed_refs if ref][:3] if isinstance(parsed_refs, list) else []
         if refs:
             evidence_lines.append(f"日志引用: {', '.join(refs)}")
+        elif getattr(ctx, "error_signature", None) and len(ctx.error_signature) >= 10:
+            evidence_lines.append(f"错误特征: {ctx.error_signature[:160]}")
 
     verification_lines = [_compact_text(str(step), 140) for step in verifications if step][:2]
 
@@ -935,6 +937,8 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
                 task_id=ctx.task_id,
                 log_count=ctx.log_count,
                 webhook_url=webhook_url or None,
+                time_from=ctx.time_from,
+                time_to=ctx.time_to,
             )
             notify_result_data = {"success": notify_success, "channel": "webhook"}
         except Exception as e:

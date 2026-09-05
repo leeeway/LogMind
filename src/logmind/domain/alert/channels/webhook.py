@@ -66,6 +66,27 @@ def _strip_wecom_notification_metadata(content: str) -> str:
     return "\n".join(lines)
 
 
+def _truncate_wecom_content(content: str, max_bytes: int = 4000) -> str:
+    """
+    Ensure markdown content does not exceed WeChat Work's 4096-byte limit.
+    Truncates safely on UTF-8 bytes to prevent API error 40058.
+    """
+    encoded = content.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return content
+
+    suffix = "\n\n> ⚠️ (内容超过企业微信字数限制已截断，请登录平台查看完整报告)"
+    suffix_bytes = len(suffix.encode("utf-8"))
+    budget = max_bytes - suffix_bytes
+
+    truncated_text = encoded[:budget].decode("utf-8", errors="ignore")
+    last_newline = truncated_text.rfind("\n")
+    if last_newline > budget * 0.7:
+        truncated_text = truncated_text[:last_newline]
+
+    return truncated_text.rstrip() + suffix
+
+
 def _to_display_timezone(dt: datetime | None) -> datetime | None:
     """Convert UTC/naive datetimes to the notification display timezone."""
     if dt is None:
@@ -159,8 +180,13 @@ def _build_error_log_alert(
         f"{localized_summary[:1500]}",
         f"",
         f"---",
-        f"> 请及时排查处理。登录 LogMind 平台查看完整日志。",
     ])
+    settings = get_settings()
+    app_url = (getattr(settings, "public_app_url", "") or "").strip().rstrip("/")
+    if app_url:
+        lines.append(f"> 🔗 **排查入口**: [点击查看平台日志详情]({app_url})")
+    else:
+        lines.append(f"> 请及时排查处理。登录 LogMind 平台查看完整日志。")
     return "\n".join(lines)
 
 
@@ -174,6 +200,8 @@ def _build_ai_analysis_alert(
     content: str,
     task_id: str,
     log_count: int,
+    time_from: datetime | None = None,
+    time_to: datetime | None = None,
 ) -> str:
     """
     Template: AI Analysis Alert — critical findings from AI analysis.
@@ -188,6 +216,9 @@ def _build_ai_analysis_alert(
     elif branch == "develop":
         env_tag = " (测试环境)"
 
+    lang_names = {"java": "Java", "csharp": "C#", "python": "Python", "go": "Go"}
+    lang_display = lang_names.get(language, language) if language else ""
+
     source = domain or host_name or "未知"
 
     lines = [
@@ -196,6 +227,14 @@ def _build_ai_analysis_alert(
         f"**告警级别**: {severity.upper()}",
         f"**业务线**: {business_line}",
         f"**站点**: {source}{env_tag}",
+    ]
+    if lang_display:
+        lines.append(f"**语言**: {lang_display}")
+    if time_from and time_to:
+        time_range = _format_time_range(time_from, time_to)
+        if time_range != "未知":
+            lines.append(f"**时间范围**: {time_range}")
+    lines.extend([
         f"**扫描日志数**: {log_count} 条",
         f"**任务ID**: {task_id[:8]}...",
         f"",
@@ -205,8 +244,15 @@ def _build_ai_analysis_alert(
         f"{content[:2000]}",
         f"",
         f"---",
-        f"> 请及时处理。登录 LogMind 平台查看完整分析报告。",
-    ]
+    ])
+
+    settings = get_settings()
+    app_url = (getattr(settings, "public_app_url", "") or "").strip().rstrip("/")
+    if app_url:
+        lines.append(f"> 🔗 **排查入口**: [点击查看完整分析报告与调用栈]({app_url}/analysis/{task_id})")
+    else:
+        lines.append(f"> 请及时处理。登录 LogMind 平台查看完整分析报告。")
+
     return "\n".join(lines)
 
 
@@ -278,6 +324,7 @@ async def send_webhook_notification(
     if _is_wecom_webhook(url):
         # WeChat Work
         wecom_content = _strip_wecom_notification_metadata(markdown_content)
+        wecom_content = _truncate_wecom_content(wecom_content)
         payload = {
             "msgtype": msg_type,
             msg_type: {"content": wecom_content},
@@ -368,6 +415,8 @@ async def notify_ai_alert(
     task_id: str,
     log_count: int,
     webhook_url: str | None = None,
+    time_from: datetime | None = None,
+    time_to: datetime | None = None,
 ) -> bool:
     """Send an AI analysis alert notification."""
     markdown = _build_ai_analysis_alert(
@@ -380,6 +429,8 @@ async def notify_ai_alert(
         content=content,
         task_id=task_id,
         log_count=log_count,
+        time_from=time_from,
+        time_to=time_to,
     )
     return await send_webhook_notification(markdown, webhook_url=webhook_url)
 

@@ -18,6 +18,7 @@ def _context() -> PipelineContext:
         log_count=10000,
         business_weight=8,
         is_core_path=True,
+        min_notify_priority="P1",
     )
 
 
