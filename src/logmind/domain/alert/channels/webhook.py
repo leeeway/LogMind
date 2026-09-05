@@ -143,6 +143,7 @@ def _build_error_log_alert(
     error_summary: str,
     time_from: datetime | None,
     time_to: datetime | None,
+    analysis_mode: str = "disabled",
 ) -> str:
     """
     Template: Error Log Alert — direct error notification (AI disabled).
@@ -161,8 +162,18 @@ def _build_error_log_alert(
     time_range = _format_time_range(time_from, time_to)
     localized_summary = _localize_inline_timestamps(error_summary)
 
+    title = (
+        "⚠️ AI分析暂不可用·高置信日志故障"
+        if analysis_mode == "fallback"
+        else "⚠️ 日志异常告警（AI未启用）"
+    )
+    analysis_status = (
+        "AI调用失败，本通知仅包含规则确认的系统故障证据"
+        if analysis_mode == "fallback"
+        else "该业务线未启用AI分析，本通知不包含AI根因总结"
+    )
     lines = [
-        f"## ⚠️ 日志异常告警",
+        f"## {title}",
         f"",
         f"**业务线**: {business_line}",
         f"**站点**: {source}",
@@ -173,10 +184,11 @@ def _build_error_log_alert(
         f"**语言**: {lang_display}",
         f"**时间范围**: {time_range}",
         f"**异常日志数**: {log_count} 条",
+        f"**分析状态**: {analysis_status}",
         f"",
         f"---",
         f"",
-        f"**异常摘要**:",
+        f"**日志证据**:",
         f"{localized_summary[:1500]}",
         f"",
         f"---",
@@ -284,7 +296,7 @@ def _build_pipeline_error_alert(
         f"---",
         f"> ⚠️ 分析管道执行未能完成",
         f"> 请检查报错查明是基础设施依赖（如 ElasticSearch、网络等）故障，还是 AI 模型调用异常。",
-        f"> 当前该业务线的错误日志将仅通过原始日志摘要通知。",
+        f"> 仅当日志中存在异常栈、连接失败、超时或5xx等高置信系统故障证据时发送兜底通知。",
     ]
     return "\n".join(lines)
 
@@ -388,6 +400,7 @@ async def notify_error_logs(
     time_from: datetime | None,
     time_to: datetime | None,
     webhook_url: str | None = None,
+    analysis_mode: str = "disabled",
 ) -> bool:
     """Send an error log alert notification (AI disabled mode)."""
     content = _build_error_log_alert(
@@ -400,6 +413,7 @@ async def notify_error_logs(
         error_summary=error_summary,
         time_from=time_from,
         time_to=time_to,
+        analysis_mode=analysis_mode,
     )
     return await send_webhook_notification(content, webhook_url=webhook_url)
 

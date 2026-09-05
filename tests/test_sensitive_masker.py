@@ -73,6 +73,20 @@ class TestMaskSensitive:
         result = mask_sensitive("手机: 13600001111")
         assert "136****1111" in result
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "待校验动态码：526632",
+            "输入动态码：526632",
+            "验证码=526632",
+            "乾坤码: 526632",
+        ],
+    )
+    def test_verification_code_is_fully_masked(self, text):
+        result = mask_sensitive(text)
+        assert "526632" not in result
+        assert "******" in result
+
     def test_non_phone_number_not_masked(self):
         # Timestamps, hex strings should not be treated as phones
         text = "timestamp=1681234567890"

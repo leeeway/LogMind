@@ -40,3 +40,23 @@ def test_build_error_log_alert_renders_localized_summary_and_range():
 
     assert "**时间范围**: 2026-05-10 22:01:39 ~ 2026-05-10 22:31:39 (北京时间)" in alert
     assert "[2026-05-10 22:23:46]" in alert
+    assert "日志异常告警（AI未启用）" in alert
+    assert "该业务线未启用AI分析" in alert
+
+
+def test_fallback_alert_explicitly_reports_ai_unavailable():
+    alert = _build_error_log_alert(
+        business_line="在线客服-upload",
+        domain="slowcoach-upload",
+        branch="master",
+        host_name="",
+        language="go",
+        log_count=10,
+        error_summary="• UploadHandler.handleFileUpload - upload failed",
+        time_from=None,
+        time_to=None,
+        analysis_mode="fallback",
+    )
+
+    assert "AI分析暂不可用·高置信日志故障" in alert
+    assert "规则确认的系统故障证据" in alert

@@ -193,24 +193,68 @@ def _clean_error_summary_line(line: str) -> str:
 
 def _extract_raw_message_key(line: str) -> str:
     """Extract a key for deduplicating identical log messages."""
-    return _clean_error_summary_line(line)
+    cleaned = _strip_volatile_log_context(_clean_error_summary_line(line))
+    return _UUID_RE.sub("{uuid}", cleaned)
 
 
 _CALL_SITE_EXTRACT_RE = re.compile(
-    r"\b((?:[a-zA-Z_][a-zA-Z0-9_]*\.)+[a-zA-Z_][a-zA-Z0-9_$]+)(?:\s*\[([a-zA-Z0-9_$.]+)\])?\s*[-–:]\s*(.*)$"
+    r"\b((?:[a-zA-Z_][a-zA-Z0-9_]*\.)+[a-zA-Z_][a-zA-Z0-9_$]+)"
+    r"(?:\s*\[([a-zA-Z0-9_$.]+)(?::\d+)?\])?\s*[-–:]\s*(.*)$"
 )
+_GO_CALL_SITE_EXTRACT_RE = re.compile(
+    r"(?:^|\s)(?:[\w./-]+\.)\(\*?([A-Za-z_][A-Za-z0-9_]*)\)\s*"
+    r"\[([A-Za-z_][A-Za-z0-9_]*):(\d+)\]\s*[-–:]\s*(.*)$"
+)
+_VOLATILE_LOG_CONTEXT_RE = re.compile(
+    r"\[(?=[^\]]*(?:request_?id|trace_?id|span_?id|correlation_?id))[^\]]*\]\s*",
+    re.IGNORECASE,
+)
+_VOLATILE_ID_RE = re.compile(
+    r"\b(?:request_?id|trace_?id|span_?id|correlation_?id)\s*[:=]\s*"
+    r"[A-Za-z0-9._:-]+",
+    re.IGNORECASE,
+)
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+_HIGH_CONFIDENCE_FALLBACK_FAULT_RE = re.compile(
+    r"(?:\b(?:exception|error|panic|fatal|deadlock|outofmemory|oom)\b|"
+    r"\b(?:timed?\s*out|timeout|connection\s+(?:refused|reset)|"
+    r"broken\s+pipe|no\s+route\s+to\s+host|unknown\s+host)\b|"
+    r"\b(?:sqlstate|redisconnectionexception|jedisexception)\b|"
+    r"\b(?:failed\s+to|failure|upload\s+failed)\b|"
+    r"\bHTTP/\d(?:\.\d)?\s+5\d{2}\b|"
+    r'"(?:status|statusCode|code)"\s*:\s*5\d{2}\b|'
+    r"(?:Caused by:|Traceback \(most recent|\.cs:line\s+\d+|\.java:\d+))",
+    re.IGNORECASE,
+)
+
+
+def _strip_volatile_log_context(text: str) -> str:
+    from logmind.domain.analysis.sensitive_masker import mask_sensitive
+
+    cleaned = _VOLATILE_LOG_CONTEXT_RE.sub("", text or "")
+    cleaned = _VOLATILE_ID_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,-;")
+    return mask_sensitive(cleaned)
 
 
 def _format_clean_summary_item(cleaned: str) -> str:
     """Format a log line into a readable, concise summary item without deep framework dump."""
+    go_match = _GO_CALL_SITE_EXTRACT_RE.search(cleaned)
+    if go_match:
+        receiver, method, line, msg = go_match.groups()
+        message = _compact_text(_strip_volatile_log_context(msg), 180)
+        return f"{receiver}.{method}:{line} - {message}"
     m = _CALL_SITE_EXTRACT_RE.search(cleaned)
     if m:
         cls, method, msg = m.groups()
         loc = f"{cls}.{method}" if method and not method.startswith(cls) else (method or cls)
-        # Keep msg concise (max 120 chars)
-        msg_compact = _compact_text(msg, 120)
+        # Keep enough of the actual message after volatile request metadata.
+        msg_compact = _compact_text(_strip_volatile_log_context(msg), 180)
         return f"{loc} - {msg_compact}"
-    return _compact_text(cleaned, 150)
+    return _compact_text(_strip_volatile_log_context(cleaned), 220)
 
 
 def _clean_error_summary(summary: str, max_lines: int = 5) -> str:
@@ -230,10 +274,11 @@ def _clean_error_summary(summary: str, max_lines: int = 5) -> str:
         cleaned = _clean_error_summary_line(line)
         if not cleaned:
             continue
-        if cleaned in seen:
-            seen[cleaned]["count"] += 1
+        key = _extract_raw_message_key(cleaned)
+        if key in seen:
+            seen[key]["count"] += 1
         else:
-            seen[cleaned] = {"line": line, "cleaned": cleaned, "count": 1}
+            seen[key] = {"line": line, "cleaned": cleaned, "count": 1}
 
     result_lines = []
     for item in list(seen.values())[:max_lines]:
@@ -272,6 +317,11 @@ def _filter_direct_notification_noise(summary: str) -> tuple[str, int]:
         kept_lines.append(line)
 
     return "\n".join(kept_lines).strip(), filtered_count
+
+
+def _contains_high_confidence_fallback_fault(summary: str) -> bool:
+    """Only page on deterministic system-fault evidence when AI is unavailable."""
+    return bool(_HIGH_CONFIDENCE_FALLBACK_FAULT_RE.search(summary or ""))
 
 
 
@@ -852,7 +902,11 @@ async def _execute_analysis(task_id: str):
 
             # Send direct webhook notification if errors found
             if ctx.log_count > 0:
-                await _send_error_log_notification(ctx, webhook_url)
+                await _send_error_log_notification(
+                    ctx,
+                    webhook_url,
+                    analysis_mode="disabled",
+                )
 
     except Exception as e:
         logger.error("pipeline_failed", task_id=task_id, error=str(e))
@@ -1186,7 +1240,12 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
                 logger.warning("runbook_execution_failed", error=str(e))
 
 
-async def _send_error_log_notification(ctx, webhook_url: str):
+async def _send_error_log_notification(
+    ctx,
+    webhook_url: str,
+    *,
+    analysis_mode: str = "disabled",
+):
     """Send direct error log notification (AI disabled mode), with aggregation."""
     from logmind.domain.alert.aggregator import alert_aggregator
     from logmind.domain.alert.channels.webhook import notify_error_logs
@@ -1244,6 +1303,7 @@ async def _send_error_log_notification(ctx, webhook_url: str):
             time_from=ctx.time_from,
             time_to=ctx.time_to,
             webhook_url=webhook_url or None,
+            analysis_mode=analysis_mode,
         )
     except Exception as e:
         logger.error("error_log_notification_failed", error=str(e))
@@ -1311,7 +1371,10 @@ def _should_send_plain_error_fallback(ctx, exc: Exception) -> bool:
     happened in the AI/post-AI portion of the pipeline.
     """
     normalized_summary = _normalize_error_summary(ctx.processed_logs)
+    normalized_summary, _ = _filter_direct_notification_noise(normalized_summary)
     if ctx.log_count <= 0 or not _is_meaningful_error_summary(normalized_summary):
+        return False
+    if not _contains_high_confidence_fallback_fault(normalized_summary):
         return False
 
     if isinstance(exc, AllProvidersFailedError):
@@ -1360,7 +1423,11 @@ async def _maybe_send_plain_error_fallback(ctx, exc: Exception, webhook_url: str
     )
 
     try:
-        await _send_error_log_notification(ctx, webhook_url)
+        await _send_error_log_notification(
+            ctx,
+            webhook_url,
+            analysis_mode="fallback",
+        )
         return True
     except Exception as fallback_exc:
         logger.error(

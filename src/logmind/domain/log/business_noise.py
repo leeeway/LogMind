@@ -81,6 +81,13 @@ STATIC_NOISE_PATTERNS: list[dict] = [
     {"pattern": "验证码不正确", "category": "captcha_flow", "reason": "验证码校验失败属于正常业务"},
     {"pattern": "验证码已失效", "category": "captcha_flow", "reason": "验证码失效属于正常业务"},
     {"pattern": "图形验证码错误", "category": "captcha_flow", "reason": "图形验证码校验失败属于正常业务"},
+    {"pattern": "动态码校验失败", "category": "captcha_flow", "reason": "用户动态码输入错误属于正常业务校验"},
+    {"pattern": "动态码输入错误", "category": "captcha_flow", "reason": "用户动态码输入错误属于正常业务校验"},
+    {"pattern": "乾坤码验证失败", "category": "captcha_flow", "reason": "用户乾坤码输入错误属于正常业务校验"},
+
+    # ── Compatibility warnings (track in logs, do not page in real time) ──
+    {"pattern": "TLSv1 was negotiated", "category": "compatibility_warning",
+     "reason": "TLS旧协议兼容警告属于待治理配置项，不是本次实时故障"},
 
     # ── 业务校验/参数校验 ──────────────────────────────────
     {"pattern": "余额不足", "category": "biz_validation", "reason": "余额校验属于正常业务逻辑"},

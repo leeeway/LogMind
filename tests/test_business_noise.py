@@ -71,6 +71,27 @@ class TestStaticNoisePatterns:
         assert result is not None
         assert result["category"] == "captcha_flow"
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "动态码校验失败，共尝试8次均未匹配",
+            "动态码输入错误，请重新输入动态码",
+            "光宇通乾坤码验证失败，结果：null",
+        ],
+    )
+    def test_dynamic_code_validation_is_business_noise(self, line):
+        result = match_static_noise(line)
+        assert result is not None
+        assert result["category"] == "captcha_flow"
+
+    def test_tls_v1_negotiation_warning_is_not_realtime_incident(self):
+        result = match_static_noise(
+            "TDSChannel.enableSSL - TLSv1 was negotiated. "
+            "Please update server and client to use TLSv1.2 at minimum."
+        )
+        assert result is not None
+        assert result["category"] == "compatibility_warning"
+
     def test_biz_balance_insufficient(self):
         line = "[ERROR] 余额不足，请充值后再试"
         result = match_static_noise(line)

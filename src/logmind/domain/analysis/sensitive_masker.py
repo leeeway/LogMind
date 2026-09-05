@@ -148,6 +148,20 @@ _BANKCARD_RE = re.compile(
     r'(?![0-9a-fA-F-])'
 )
 
+# One-time verification codes should never leave the platform in notifications
+# or prompts. Restrict this rule to explicit Chinese labels so ordinary counts,
+# timestamps and status codes retain their diagnostic meaning.
+_VERIFICATION_CODE_RE = re.compile(
+    r"(?P<label>(?:待校验|输入|当前|短信)?(?:动态码|验证码|乾坤码)"
+    r"(?:输入错误|错误|不正确|已失效|已过期)?\s*[：:=]?\s*)"
+    r"(?P<value>\d{4,8})(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def _verification_code_replacer(match: re.Match) -> str:
+    return f"{match.group('label')}******"
+
 # IPv4 internal addresses with port (mask the port is unnecessary, but mask IP)
 # We DON'T mask IPs — they have diagnostic value and are not PII.
 
@@ -187,6 +201,9 @@ def mask_sensitive(text: str) -> str:
 
         # Phase 5: Bank card numbers (16-19 digits)
         result = _BANKCARD_RE.sub(r'\1********\2', result)
+
+        # Phase 6: OTP/dynamic-code values with an explicit semantic label
+        result = _VERIFICATION_CODE_RE.sub(_verification_code_replacer, result)
 
         return result
 

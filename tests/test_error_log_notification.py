@@ -110,6 +110,7 @@ async def test_send_error_log_notification_uses_normalized_summary(monkeypatch):
     notify_error_logs.assert_awaited_once()
     assert aggregator_should_send.await_args.kwargs["alert_summary"] == "[ERROR] Database timeout"
     assert notify_error_logs.await_args.kwargs["error_summary"] == "• Database timeout"
+    assert notify_error_logs.await_args.kwargs["analysis_mode"] == "disabled"
 
 
 @pytest.mark.asyncio
@@ -201,7 +202,50 @@ async def test_maybe_send_plain_error_fallback_dispatches_notification(monkeypat
     )
 
     assert sent is True
-    send_error_log_notification.assert_awaited_once_with(ctx, "")
+    send_error_log_notification.assert_awaited_once_with(
+        ctx,
+        "",
+        analysis_mode="fallback",
+    )
+
+
+def test_plain_fallback_rejects_business_validation_even_when_ai_fails():
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        business_line_name="密保v5",
+        processed_logs=(
+            "[ERROR] DynamicCodeService.checkVerifyApplyCodeByTong - "
+            "动态码校验失败，待校验动态码：526632，共尝试8次均未匹配"
+        ),
+        log_count=23,
+    )
+
+    exc = AllProvidersFailedError("t1", errors=["provider timeout"])
+
+    assert analysis_tasks._should_send_plain_error_fallback(ctx, exc) is False
+
+
+def test_clean_error_summary_groups_go_logs_with_different_request_ids():
+    raw_logs = (
+        "[ERROR] cn.gyyx.upload/handler/upload.(*UploadHandler) "
+        "[handleFileUpload:135] - "
+        "[request_id=932704a9-4bfc-49e7-bba1-1b9f7ede98da trace_id=a1] "
+        "upload failed: disk quota exceeded\n"
+        "[ERROR] cn.gyyx.upload/handler/upload.(*UploadHandler) "
+        "[handleFileUpload:135] - "
+        "[request_id=202eee09-057a-415b-a4c4-1236ac5c9f2c trace_id=b2] "
+        "upload failed: disk quota exceeded"
+    )
+
+    cleaned = analysis_tasks._clean_error_summary(raw_logs)
+
+    assert "(重复 2 次)" in cleaned
+    assert "upload failed: disk quota exceeded" in cleaned
+    assert "UploadHandler.handleFileUpload:135" in cleaned
+    assert "932704a9" not in cleaned
+    assert "202eee09" not in cleaned
 
 
 def test_normalize_error_summary_removes_middle_events_omitted():
@@ -258,4 +302,3 @@ async def test_send_error_log_notification_skips_agent_skip_business_noise(monke
 
     aggregator_should_send.assert_not_awaited()
     notify_error_logs.assert_not_awaited()
-
