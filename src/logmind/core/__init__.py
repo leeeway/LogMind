@@ -149,6 +149,8 @@ class Settings(BaseSettings):
     analysis_patrol_interval_minutes: int = 5
     analysis_anomaly_window_minutes: int = 5
     analysis_lookback_minutes: int = 10
+    analysis_agent_max_steps: int = 2
+    analysis_agent_enabled: bool = True
     analysis_min_notification_priority: str = "P0"
 
     # ── Auto-Discovery ──────────────────────────────────

@@ -252,6 +252,16 @@ class AgentInferenceStage(PipelineStage):
                                 "直接输出最终 JSON 数组格式的分析结论。"
                             ),
                         })
+                    elif step >= max_steps - 1 and tools:
+                        # ── Optimization: Force final answer on next step to avoid multi-call loops ──
+                        tools = None
+                        tools_withdrawn = True
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "已补充上述上下文信息。请立即结合已有日志，直接输出最终 JSON 数组格式的分析报告，不要再调用工具。"
+                            ),
+                        })
                     continue
 
                 # AI produced final content — exit loop
@@ -287,28 +297,16 @@ class AgentInferenceStage(PipelineStage):
         Prepends tool-usage guidance to the existing system prompt.
         """
         agent_instructions = """## 你的工作方式
-你是一名拥有 Elasticsearch 查询能力的 SRE 分析师。
-你可以调用工具来主动搜索更多日志、查看上下文、统计错误频率，
-并参考历史分析记录来加速诊断。
+你是一名专业的 SRE 异常根因排查专家。
+上游系统已为你自动完成了日志清洗、异常堆栈聚合、错误基线统计和知识库检索，当前提供的上下文中已包含核心分析数据。
 
-### 智能分析策略
-1. **先查历史**: 首先调用 search_similar_incidents 工具，看看历史上是否分析过类似错误模式
-2. **如有历史**: 参考历史结论，验证其是否仍然适用于当前情况，避免重复无效分析
-3. **如无历史**: 按正常流程使用 search_logs、get_log_context 等工具调查
-4. **趋势感知**: 调用 count_error_patterns 对比当前错误频率，判断偶发还是频发
+### 高效诊断原则（控制调用频次）
+1. **优先直接分析**: 如果提供的日志及堆栈信息（如异常类名、报错行号、连接池超时等）已足够定位根因，**请直接输出最终 JSON 分析结论，不要调用任何工具**（一次性完成分析）。
+2. **克制使用工具**: 仅在核心错误信息极度缺失、必须补充上下文日志时，才允许调用至多 1 次必要工具。
+3. **严禁链式重复调用**: 禁止为了查历史或全局统计无意义地连续多次调用工具；如果进行了 1 次工具查询，下一步必须立即输出最终 JSON 报告。
 
-### 工具使用原则
-- 只在需要更多信息时调用工具，不要为了调用而调用
-- 每个工具最多调用 1-2 次，避免重复调用同一工具
-- 如果工具返回错误，不要重试同一个工具，换一种方式获取信息
-- 优先使用 search_similar_incidents 查看历史经验
-- 使用 count_error_patterns 了解全局情况
-- 使用 search_logs 深入调查具体错误
-- 使用 get_log_context 理解错误发生的完整场景
-- 使用 search_knowledge_base 查阅内部 SOP 文档
-
-### 最终输出
-当你完成分析后，直接输出 JSON 数组格式的分析结果（不要再调用工具）。
+### 最终输出格式
+当你完成分析后，请直接以 JSON 数组格式输出分析结果（不要调用任何工具）。
 
 """
         return agent_instructions + ctx.system_prompt

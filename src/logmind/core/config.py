@@ -186,7 +186,7 @@ class Settings(BaseSettings):
     pipeline_error_cooldown_minutes: int = 240
     analysis_fingerprint_enabled: bool = True
     analysis_fingerprint_ttl_hours: int = 6
-    analysis_agent_max_steps: int = 5
+    analysis_agent_max_steps: int = 2
     analysis_agent_enabled: bool = True
     analysis_min_notification_priority: str = "P0"
 

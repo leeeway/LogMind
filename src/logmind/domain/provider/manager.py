@@ -8,6 +8,7 @@ Manages provider instances:
 - Health monitoring
 """
 
+import asyncio
 import json
 from typing import Any
 
@@ -97,6 +98,30 @@ class ProviderManager:
         errors: list[str] = []
         for config in configs:
             try:
+                # Rate limit protection: check RPM if configured
+                if config.rate_limit_rpm and config.rate_limit_rpm > 0:
+                    try:
+                        from logmind.core.rate_limiter import RateLimitMiddleware
+                        is_allowed, remaining, retry_after = await RateLimitMiddleware._check_rate_limit(
+                            key=f"ratelimit:provider:{config.id}",
+                            max_requests=config.rate_limit_rpm,
+                            window_seconds=60,
+                        )
+                        if not is_allowed:
+                            logger.warning(
+                                "provider_rpm_limit_reached",
+                                provider=config.name,
+                                limit=config.rate_limit_rpm,
+                                retry_after=retry_after,
+                            )
+                            if len(configs) > 1:
+                                errors.append(f"{config.name}: local RPM limit ({config.rate_limit_rpm}) reached, failover")
+                                continue
+                            # Sole provider: apply gentle backpressure (max 3s)
+                            await asyncio.sleep(min(retry_after, 3))
+                    except Exception as rle:
+                        logger.debug("provider_rpm_check_skipped", error=str(rle))
+
                 provider = self._create_or_get_cached(config)
                 response = await provider.chat(request)
                 logger.info(

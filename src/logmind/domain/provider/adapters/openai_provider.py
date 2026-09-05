@@ -103,10 +103,26 @@ class OpenAIProvider(BaseProvider):
 
         return payload
 
+    def _get_request_headers(self) -> dict[str, str]:
+        """Hook for subclasses to supply extra per-request headers."""
+        return {}
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_error),
+        wait=wait_exponential(multiplier=1.5, min=2, max=15),
+        stop=stop_after_attempt(3),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """Synchronous chat completion (supports function calling)."""
         payload = self._build_payload(request)
-        resp = await self._client.post("/v1/chat/completions", json=payload)
+        headers = self._get_request_headers()
+        resp = await self._client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers=headers if headers else None,
+        )
         resp.raise_for_status()
         data = resp.json()
 
@@ -143,8 +159,12 @@ class OpenAIProvider(BaseProvider):
     async def chat_stream(self, request: ChatRequest) -> AsyncIterator[str]:
         """Streaming chat completion — yields content chunks."""
         payload = self._build_payload(request, stream=True)
+        headers = self._get_request_headers()
         async with self._client.stream(
-            "POST", "/v1/chat/completions", json=payload
+            "POST",
+            "/v1/chat/completions",
+            json=payload,
+            headers=headers if headers else None,
         ) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():

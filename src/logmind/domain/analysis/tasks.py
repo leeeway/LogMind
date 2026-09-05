@@ -1089,13 +1089,19 @@ async def _send_pipeline_error_notification(ctx, error_message: str, webhook_url
     pipeline_error_window = getattr(settings, "pipeline_error_cooldown_minutes", 240) * 60
 
     # Create a temporary aggregator with the pipeline-error-specific window
+    import hashlib
     from logmind.domain.alert.aggregator import AlertAggregator
     pipeline_agg = AlertAggregator(window_seconds=pipeline_error_window)
 
+    # Use tenant-level scope if available so that an infrastructure/provider outage
+    # doesn't spam separate notifications across every individual business line.
+    agg_scope_id = f"tenant:{ctx.tenant_id}" if getattr(ctx, "tenant_id", None) else ctx.business_line_id
+    error_sig = hashlib.md5(error_message[:100].encode()).hexdigest()[:12]
+
     should_send, agg_count = await pipeline_agg.should_send(
-        business_line_id=ctx.business_line_id,
+        business_line_id=agg_scope_id,
         severity="pipeline_error",
-        error_signature=None,
+        error_signature=error_sig,
         alert_summary=error_message[:200],
     )
 
