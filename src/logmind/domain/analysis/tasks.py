@@ -40,9 +40,12 @@ _EMPTY_LOG_SUMMARY_MARKERS = (
     "(No logs found matching the query)",
     "... (truncated)",
     "... (更多日志请登录平台查看)",
+    "... (middle events omitted) ...",
+    "...(middle events omitted)...",
+    "(middle events omitted)",
 )
 _SUMMARY_WORD_RE = re.compile(r"[A-Za-z\u4e00-\u9fff]{3,}")
-_MAX_ALERT_ISSUE_CHARS = 600
+_MAX_ALERT_ISSUE_CHARS = 350
 _MAX_ALERT_LOCATION_SUMMARY_CHARS = 1600
 _MAX_INCIDENT_LOCATION_SUMMARY_CHARS = 1200
 
@@ -170,6 +173,85 @@ def _is_meaningful_error_summary(summary: str) -> bool:
     return bool(_SUMMARY_WORD_RE.search(normalized))
 
 
+_LOG_CONTEXT_PREFIX_RE = re.compile(
+    r"^\[[^\]]+\]\s*\[(DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\](?:\s*\[[^\]]+\])*\s*"
+)
+_THREAD_TRACE_PREFIX_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+)?(?:\[[^\]]+\]\s*){1,3}(?:DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)?\s*"
+)
+
+
+def _clean_error_summary_line(line: str) -> str:
+    """Clean redundant metadata from a log line for cleaner alert readability."""
+    cleaned = line.strip()
+    # Strip LogMind preprocessed prefix: [ts] [LEVEL] [context] [occurrences]
+    cleaned = _LOG_CONTEXT_PREFIX_RE.sub("", cleaned)
+    # Strip inner thread/trace/timestamp prefix if present
+    cleaned = _THREAD_TRACE_PREFIX_RE.sub("", cleaned)
+    return cleaned.strip() or line.strip()
+
+
+def _extract_raw_message_key(line: str) -> str:
+    """Extract a key for deduplicating identical log messages."""
+    return _clean_error_summary_line(line)
+
+
+_CALL_SITE_EXTRACT_RE = re.compile(
+    r"\b((?:[a-zA-Z_][a-zA-Z0-9_]*\.)+[a-zA-Z_][a-zA-Z0-9_$]+)(?:\s*\[([a-zA-Z0-9_$.]+)\])?\s*[-–:]\s*(.*)$"
+)
+
+
+def _format_clean_summary_item(cleaned: str) -> str:
+    """Format a log line into a readable, concise summary item without deep framework dump."""
+    m = _CALL_SITE_EXTRACT_RE.search(cleaned)
+    if m:
+        cls, method, msg = m.groups()
+        loc = f"{cls}.{method}" if method and not method.startswith(cls) else (method or cls)
+        # Keep msg concise (max 120 chars)
+        msg_compact = _compact_text(msg, 120)
+        return f"{loc} - {msg_compact}"
+    return _compact_text(cleaned, 150)
+
+
+def _clean_error_summary(summary: str, max_lines: int = 5) -> str:
+    """
+    Clean, deduplicate, and limit direct error log summary lines.
+
+    Strips redundant framework tags, extracts concise caller locations,
+    and aggregates repeating log messages with occurrence counts.
+    """
+    lines = [line.strip() for line in (summary or "").split("\n") if line.strip()]
+    if not lines:
+        return ""
+
+    # Count occurrences and keep order
+    seen: dict[str, dict] = {}
+    for line in lines:
+        cleaned = _clean_error_summary_line(line)
+        if not cleaned:
+            continue
+        if cleaned in seen:
+            seen[cleaned]["count"] += 1
+        else:
+            seen[cleaned] = {"line": line, "cleaned": cleaned, "count": 1}
+
+    result_lines = []
+    for item in list(seen.values())[:max_lines]:
+        cleaned = item["cleaned"]
+        count = item["count"]
+        formatted = _format_clean_summary_item(cleaned)
+        if count > 1:
+            result_lines.append(f"• (重复 {count} 次) {formatted}")
+        else:
+            result_lines.append(f"• {formatted}")
+
+    omitted = len(lines) - sum(item["count"] for item in list(seen.values())[:max_lines])
+    if omitted > 0 or len(seen) > max_lines:
+        result_lines.append(f"... (其余 {max(omitted, 1)} 条相似/省略日志请登录平台查看)")
+
+    return "\n".join(result_lines)
+
+
 def _filter_direct_notification_noise(summary: str) -> tuple[str, int]:
     """Remove known non-fault business lines before sending direct log alerts."""
     from logmind.domain.log.business_noise import classify_line
@@ -190,6 +272,7 @@ def _filter_direct_notification_noise(summary: str) -> tuple[str, int]:
         kept_lines.append(line)
 
     return "\n".join(kept_lines).strip(), filtered_count
+
 
 
 def _is_retryable_analysis_error(exc: Exception) -> bool:
@@ -292,6 +375,70 @@ def _format_evidence_item(item: dict) -> str:
     return _compact_text(f"{title}: {detail}", 180)
 
 
+_LOCATION_CALL_RE = re.compile(
+    r"\b((?:[a-zA-Z_][a-zA-Z0-9_]*\.)+[a-zA-Z_][a-zA-Z0-9_$]+(?:\.[a-zA-Z_][a-zA-Z0-9_$]+)?)\b"
+)
+
+
+def _extract_suspect_location(*texts: str) -> str:
+    """Extract code location (class, method, package or service) from texts."""
+    for text in texts:
+        if not text:
+            continue
+        for match in _LOCATION_CALL_RE.finditer(text):
+            candidate = match.group(1).strip()
+            # Ignore standard Java exception class names if they aren't locations
+            if candidate.endswith(("Exception", "Error")) and candidate.startswith(("java.lang.", "System.")):
+                continue
+            return candidate
+    return ""
+
+
+def _extract_compact_issue(content: str, max_chars: int = 350) -> str:
+    """Extract the core issue sentence(s), discarding meta or speculative commentary."""
+    text = (content or "").strip()
+    sentences = re.split(r"(?<=[。；;！？\n])\s*", text)
+    # Filter out pure meta-commentary, speculative non-evidence, or telemetry noise
+    meaningful: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if re.search(r"历史相似事件|向量服务|统计错误率|仅凭当前.*无法确认|服务健康数据", s):
+            continue
+        meaningful.append(s)
+
+    if not meaningful:
+        meaningful = [s for s in sentences if s.strip()]
+
+    # If the text has concrete exceptions or call sites, ensure they are prioritized
+    exception_sentences = [
+        s for s in meaningful
+        if _LOCATION_CALL_RE.search(s) or re.search(r"Exception|Error|超时|失败", s)
+    ]
+
+    kept: list[str] = []
+    curr_len = 0
+    # Include first overview sentence if not already in exception_sentences
+    if meaningful and (not exception_sentences or meaningful[0] not in exception_sentences):
+        kept.append(meaningful[0])
+        curr_len += len(meaningful[0])
+
+    candidates = exception_sentences if exception_sentences else meaningful
+    for s in candidates:
+        if s in kept:
+            continue
+        if curr_len + len(s) > max_chars and kept:
+            break
+        kept.append(s)
+        curr_len += len(s)
+
+    res = "".join(kept) if kept else text
+    if len(res) > max_chars:
+        res = res[:max_chars - 1].rstrip() + "…"
+    return res
+
+
 def _build_alert_location_summary(
     ctx,
     alert: dict,
@@ -304,9 +451,15 @@ def _build_alert_location_summary(
     Build a short operator-facing summary for chat/webhook alerts.
 
     The full AI analysis remains in the task detail page; this message only keeps
-    the key facts needed for first-response triage.
+    the key facts needed for first-response triage:
+    - 问题: 核心现象 (<=160字)
+    - 疑似原因: 根因概要
+    - 位置: 涉及类/方法/服务 (如有)
+    - 证据: 关键事实
+    - 下一步: 验证动作
+    - 分析入口
     """
-    from logmind.domain.analysis.evidence import build_root_cause_evidence
+    from logmind.domain.analysis.evidence import build_root_cause_evidence, parse_json_object
     from logmind.domain.analysis.stages.result_parse import (
         _sanitize_negative_boilerplate,
     )
@@ -315,23 +468,26 @@ def _build_alert_location_summary(
     safe_alert["content"] = _sanitize_negative_boilerplate(
         str(alert.get("content", ""))
     )
-    content = _compact_text(
-        safe_alert["content"],
-        _MAX_ALERT_ISSUE_CHARS,
-    )
-    if not content:
-        content = "检测到日志异常，请查看分析详情。"
-        safe_alert["content"] = content
+    raw_content = safe_alert["content"]
+    if not raw_content:
+        raw_content = "检测到日志异常，请查看分析详情。"
+        safe_alert["content"] = raw_content
+
+    # Extract structured data if available
+    structured = parse_json_object(alert.get("structured_data", "{}"))
+    root_service = str(structured.get("root_service") or structured.get("service") or "").strip()
 
     summary = build_root_cause_evidence([safe_alert])
     candidates = summary.get("candidates", [])
     evidence = summary.get("evidence", [])
     verifications = summary.get("next_verifications", [])
 
+    service = root_service
     if candidates:
         top = candidates[0]
-        service = top.get("service") or ""
-        cause_text = top.get("reason") or top.get("title") or content
+        if not service:
+            service = top.get("service") or ""
+        cause_text = top.get("reason") or top.get("title") or raw_content
         score = top.get("score")
         score_text = f" (评分 {float(score) * 100:.0f}%)" if isinstance(score, (int, float)) else ""
         cause = _compact_text(
@@ -342,7 +498,21 @@ def _build_alert_location_summary(
         if not verifications and isinstance(candidate_steps, list):
             verifications = candidate_steps
     else:
-        cause = _compact_text(safe_alert["content"] or "待进一步确认", 220)
+        cause = _compact_text(raw_content or "待进一步确认", 220)
+
+    # Extract location (from root_service, candidates, or call sites in text/logs)
+    location = service
+    if not location or location in (ctx.business_line_name, getattr(ctx, "domain", "")):
+        extracted_loc = _extract_suspect_location(
+            raw_content,
+            cause,
+            getattr(ctx, "processed_logs", ""),
+        )
+        if extracted_loc:
+            location = extracted_loc
+
+    # Compact content
+    content = _extract_compact_issue(raw_content, _MAX_ALERT_ISSUE_CHARS)
 
     evidence_lines: list[str] = []
     for item in evidence:
@@ -379,6 +549,8 @@ def _build_alert_location_summary(
     ]
     if not _is_redundant_alert_text(cause, content):
         lines.append(f"疑似原因: {cause}")
+    if location and location not in (ctx.business_line_name, ""):
+        lines.append(f"位置: {location}")
     if evidence_lines:
         lines.extend([
             "证据:",
@@ -1054,8 +1226,9 @@ async def _send_error_log_notification(ctx, webhook_url: str):
         )
         return
 
-    # Build a concise error summary from preprocessed logs
-    error_summary = normalized_summary
+    # Build a concise, deduplicated error summary from preprocessed logs
+    cleaned_summary = _clean_error_summary(normalized_summary)
+    error_summary = cleaned_summary or normalized_summary
     if len(error_summary) > 1500:
         error_summary = error_summary[:1500] + "\n... (更多日志请登录平台查看)"
 

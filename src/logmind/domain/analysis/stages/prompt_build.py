@@ -217,13 +217,13 @@ def _fallback_system_prompt(ctx: PipelineContext) -> str:
 请以 JSON 数组格式输出，每个元素包含：
 - result_type: "anomaly" | "root_cause" | "suggestion"
 - severity: "critical" | "warning" | "info"
-- content: 详细分析说明
+- content: 精简的问题现象与影响（不超过 100 字，禁止在 content 中贴大段日志、重复推测或冗长铺陈背景）
 - confidence_score: 置信度 0.0~1.0
-- root_cause: (强烈建议) 一句话说明最可能根因，便于告警通知直接定位。
-- root_service: (强烈建议) 最可能的根因服务/组件名；如果未知则留空。
+- root_cause: (强烈建议) 一句话说明最可能根因（不超过 60 字），便于告警通知直接定位。
+- root_service: (强烈建议) 发生异常的最具体位置/服务/组件名（如类名、方法名或微服务名，例如 QualityCheckConverter.batchQueryCompanyNames）；如果未知则留空。
 - root_cause_candidates: (强烈建议) 根因候选数组，每项包含 title/service/reason/score。
 - source_log_refs: (强烈建议) 支撑结论的原始日志引用或关键日志短句数组，最多 5 条。
-- next_verifications: (强烈建议) 值班同学下一步验证动作数组，最多 3 条。
+- next_verifications: (强烈建议) 值班同学下一步验证动作数组，最多 2 条（每条不超过 40 字）。
 - error_signals: (可选) 从日志中识别出的关键错误信号短语列表。
 - experience_rule: (可选) 一条可复用的分析经验规则。
 
@@ -254,7 +254,8 @@ C# Windows 路径请使用正斜杠（如 D:/WebCache/file.json），避免 JSON
 4. 对相同类型的错误请合并分析，说明出现频率和影响范围。
 5. 对于 severity 为 critical 或 warning 的结果，务必提供 error_signals 和 experience_rule 字段。
 6. 对于业务噪声日志，务必提供 noise_classification、noise_category、noise_reason 字段。
-7. **严禁输出否定套话罗列**：在输出分析结论时，严禁使用“未发现 A、B、C 等严重问题”的否定套话进行冗长罗列（如严禁写“未发现 DataIntegrityViolationException、SQL 数据截断、核心表写入失败...”）。若无严重异常，直接说明实际日志状态，切勿复述抄写未出现的异常名称。"""
+7. **严禁输出否定套话罗列**：在输出分析结论时，严禁使用“未发现 A、B、C 等严重问题”的否定套话进行冗长罗列（如严禁写“未发现 DataIntegrityViolationException、SQL 数据截断、核心表写入失败...”）。若无严重异常，直接说明实际日志状态，切勿复述抄写未出现的异常名称。
+8. **摘要必须精简聚焦**：content 严禁大段贴原始日志或写长篇论述，必须凝练为一到两句说明故障现象；异常发生的位置（类/方法/服务）写在 root_service 字段中，根因概括写在 root_cause 字段中。"""
 
     if ctx.has_stack_traces:
         if ctx.language == "csharp":

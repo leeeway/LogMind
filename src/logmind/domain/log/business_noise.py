@@ -101,6 +101,11 @@ STATIC_NOISE_PATTERNS: list[dict] = [
     {"pattern": "操作频繁", "category": "biz_validation", "reason": "频率限制属于正常防护"},
     {"pattern": "请求过于频繁", "category": "biz_validation", "reason": "频率限制属于正常防护"},
     {"pattern": "请稍后再试", "category": "biz_validation", "reason": "限流降级属于正常防护"},
+    {"pattern": "跳过无效", "category": "biz_validation", "reason": "数据处理跳过无效记录属于正常业务流程"},
+    {"pattern": "跳过", "category": "biz_validation", "reason": "业务流程跳过处理属于正常业务流程",
+     "requires_additional": ["无效", "记录", "代理商", "重复", "已存在", "已处理", "忽略"]},
+    {"pattern": "无效代理商", "category": "biz_validation", "reason": "代理商状态校验属于正常业务流程"},
+    {"pattern": "跳过处理", "category": "biz_validation", "reason": "流程跳过属于正常业务流程"},
 
     # ── 支付/交易流程日志 ──────────────────────────────────
     {"pattern": "支付失败", "category": "payment_flow", "reason": "支付失败属于业务流程日志",

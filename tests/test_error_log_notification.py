@@ -109,7 +109,7 @@ async def test_send_error_log_notification_uses_normalized_summary(monkeypatch):
     aggregator_should_send.assert_awaited_once()
     notify_error_logs.assert_awaited_once()
     assert aggregator_should_send.await_args.kwargs["alert_summary"] == "[ERROR] Database timeout"
-    assert notify_error_logs.await_args.kwargs["error_summary"] == "[ERROR] Database timeout"
+    assert notify_error_logs.await_args.kwargs["error_summary"] == "• Database timeout"
 
 
 @pytest.mark.asyncio
@@ -202,3 +202,60 @@ async def test_maybe_send_plain_error_fallback_dispatches_notification(monkeypat
 
     assert sent is True
     send_error_log_notification.assert_awaited_once_with(ctx, "")
+
+
+def test_normalize_error_summary_removes_middle_events_omitted():
+    summary = "\n... (middle events omitted) ...\n"
+    assert analysis_tasks._normalize_error_summary(summary) == ""
+    assert analysis_tasks._is_meaningful_error_summary(summary) is False
+
+
+def test_clean_error_summary_deduplicates_and_strips_metadata():
+    raw_logs = (
+        "[2026-09-05 20:49:29] [WARNING] [domain:slowcoach-merchant-admin, branch:master, host:TM14710] "
+        "[occurrences:40] 2026-09-05 20:49:29.425 [http-nio-8081-exec-9] [4ec40da2202d000, 00010e680000f26c] "
+        "WARN sc.merchant.admin.utils.QualityCheckConverter - [质量检查] 关键异常\n"
+        "[2026-09-05 20:49:30] [WARNING] [domain:slowcoach-merchant-admin, branch:master, host:TM14710] "
+        "[occurrences:40] 2026-09-05 20:49:30.425 [http-nio-8081-exec-9] [4ec40da2202d000, 00010e680000f26c] "
+        "WARN sc.merchant.admin.utils.QualityCheckConverter - [质量检查] 关键异常\n"
+    )
+    cleaned = analysis_tasks._clean_error_summary(raw_logs)
+    assert "(重复 2 次)" in cleaned
+    assert "sc.merchant.admin.utils.QualityCheckConverter - [质量检查] 关键异常" in cleaned
+    assert "branch:master" not in cleaned
+    assert "http-nio-8081" not in cleaned
+
+
+@pytest.mark.asyncio
+async def test_send_error_log_notification_skips_agent_skip_business_noise(monkeypatch):
+    aggregator_should_send = AsyncMock(return_value=(True, 0))
+    notify_error_logs = AsyncMock()
+
+    monkeypatch.setattr(
+        "logmind.domain.alert.aggregator.alert_aggregator.should_send",
+        aggregator_should_send,
+    )
+    monkeypatch.setattr(
+        "logmind.domain.alert.channels.webhook.notify_error_logs",
+        notify_error_logs,
+    )
+
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-1",
+        business_line_id="biz-1",
+        business_line_name="在线客服-merchant-admin",
+        processed_logs=(
+            "[2026-09-05 20:49:29] [WARNING] [domain:slowcoach-merchant-admin, branch:master, host:TM14710] "
+            "WARN sc.merchant.admin.utils.QualityCheckConverter - [质量检查批量转换] 跳过无效代理商记录, merchantId:3\n"
+            "[2026-09-05 20:49:30] [WARNING] [domain:slowcoach-merchant-admin, branch:master, host:TM14710] "
+            "WARN sc.merchant.admin.utils.QualityCheckConverter - [质量检查批量转换] 跳过无效代理商记录, merchantId:4\n"
+        ),
+        log_count=2,
+    )
+
+    await analysis_tasks._send_error_log_notification(ctx, webhook_url="")
+
+    aggregator_should_send.assert_not_awaited()
+    notify_error_logs.assert_not_awaited()
+

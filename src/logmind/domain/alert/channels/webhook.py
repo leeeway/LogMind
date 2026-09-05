@@ -184,7 +184,7 @@ def _build_error_log_alert(
     settings = get_settings()
     app_url = (getattr(settings, "public_app_url", "") or "").strip().rstrip("/")
     if app_url:
-        lines.append(f"> 🔗 **排查入口**: [点击查看平台日志详情]({app_url})")
+        lines.append(f"> 请及时排查处理。[登录 LogMind 平台查看完整日志]({app_url})")
     else:
         lines.append(f"> 请及时排查处理。登录 LogMind 平台查看完整日志。")
     return "\n".join(lines)
@@ -249,7 +249,7 @@ def _build_ai_analysis_alert(
     settings = get_settings()
     app_url = (getattr(settings, "public_app_url", "") or "").strip().rstrip("/")
     if app_url:
-        lines.append(f"> 🔗 **排查入口**: [点击查看完整分析报告与调用栈]({app_url}/analysis/{task_id})")
+        lines.append(f"> 请及时处理。[登录 LogMind 平台查看完整分析报告]({app_url}/analysis/{task_id})")
     else:
         lines.append(f"> 请及时处理。登录 LogMind 平台查看完整分析报告。")
 
