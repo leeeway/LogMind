@@ -132,9 +132,32 @@ class ProviderManager:
                 )
                 return response, config.id
             except Exception as e:
-                error_msg = f"{config.name} ({config.provider_type}): {e}"
+                import httpx
+
+                err_detail = ""
+                if isinstance(e, httpx.HTTPStatusError):
+                    status_code = e.response.status_code
+                    body_hint = ""
+                    try:
+                        resp_json = e.response.json()
+                        body_hint = (
+                            resp_json.get("error", {}).get("message")
+                            or resp_json.get("message")
+                            or str(resp_json)
+                        )
+                    except Exception:
+                        body_hint = e.response.text[:200]
+                    err_detail = f"HTTP {status_code} ({body_hint})" if body_hint else f"HTTP {status_code}"
+                elif isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout)):
+                    err_detail = f"{type(e).__name__} (请求 AI 网关超时，上游服务未在配置时限内响应)"
+                elif isinstance(e, (httpx.ConnectError, httpx.NetworkError)):
+                    err_detail = f"{type(e).__name__} (连接 AI 网关失败: {str(e) or '无法建立网络连接'})"
+                else:
+                    err_detail = str(e).strip() or repr(e) or type(e).__name__
+
+                error_msg = f"{config.name} ({config.provider_type}): {err_detail}"
                 errors.append(error_msg)
-                logger.warning("provider_chat_failed", provider=config.name, error=str(e))
+                logger.warning("provider_chat_failed", provider=config.name, error=err_detail)
                 # Invalidate cached instance on failure
                 keys_to_remove = [k for k in _provider_cache.keys() if k.startswith(f"{config.id}_")]
                 for k in keys_to_remove:
