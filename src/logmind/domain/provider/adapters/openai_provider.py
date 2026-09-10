@@ -137,6 +137,7 @@ class OpenAIProvider(BaseProvider):
             for tc in message["tool_calls"]:
                 tool_calls.append({
                     "id": tc.get("id", ""),
+                    "type": tc.get("type", "function"),
                     "function": {
                         "name": tc["function"]["name"],
                         "arguments": tc["function"]["arguments"],

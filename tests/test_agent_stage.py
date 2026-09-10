@@ -165,6 +165,57 @@ async def test_smart_truncation():
     assert result.tool_call_records[0]["result_length"] < len(long_result)
 
 
+@pytest.mark.asyncio
+async def test_raw_messages_passed_when_tools_withdrawn_on_step_limit():
+    """When max_steps=2 and a tool is called on step 1, tools are withdrawn on step 2,
+    but _raw_messages must still be passed to preserve assistant tool-calls and avoid 400 Bad Request."""
+    from logmind.domain.analysis.agent_stage import AgentInferenceStage
+
+    mock_manager = AsyncMock()
+
+    # Step 1: Tool call
+    tool_response = _make_response(
+        content="",
+        tool_calls=[_make_tool_call("search_logs", {"keyword": "test"}, call_id="call_abc123")],
+    )
+    # Step 2: Final response
+    final_response = _make_response(content='[{"severity":"info","content":"resolved"}]')
+
+    mock_manager.chat_with_fallback = AsyncMock(side_effect=[
+        (tool_response, "prov-1"),
+        (final_response, "prov-1"),
+    ])
+
+    stage = AgentInferenceStage(mock_manager)
+    ctx = _make_ctx()
+
+    with patch("logmind.domain.analysis.agent_stage.get_settings") as mock_settings:
+        mock_settings.return_value = MagicMock(
+            analysis_agent_max_steps=2,
+            analysis_agent_enabled=True,
+        )
+        with patch("logmind.core.database.get_db_context") as mock_db:
+            mock_db.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+            mock_db.return_value.__aexit__ = AsyncMock(return_value=False)
+            with patch("logmind.domain.analysis.agent_stage.execute_tool") as mock_tool:
+                mock_tool.return_value = json.dumps({"found": 5})
+                result = await stage.execute(ctx)
+
+    assert result.ai_response == '[{"severity":"info","content":"resolved"}]'
+    assert mock_manager.chat_with_fallback.call_count == 2
+
+    # Verify call 2 (step 2) arguments:
+    # tools should be None, but extra_params['_raw_messages'] must exist and contain the assistant message and tool message!
+    call_args_step2 = mock_manager.chat_with_fallback.call_args_list[1].kwargs["request"]
+    assert call_args_step2.tools is None
+    assert "_raw_messages" in call_args_step2.extra_params
+    raw_msgs = call_args_step2.extra_params["_raw_messages"]
+    roles = [m["role"] for m in raw_msgs]
+    assert "assistant" in roles
+    assert "tool" in roles
+
+
+
 class TestPriorityEngineTimezone:
     """Test the timezone fix in PriorityDecisionEngine."""
 

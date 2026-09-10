@@ -111,7 +111,7 @@ class AgentInferenceStage(PipelineStage):
                     tools=tools,
                     temperature=0.3,
                     max_tokens=4096,
-                    extra_params={"_raw_messages": messages} if tools else {},
+                    extra_params={"_raw_messages": messages},
                 )
 
                 response, provider_id = await self.provider_manager.chat_with_fallback(
