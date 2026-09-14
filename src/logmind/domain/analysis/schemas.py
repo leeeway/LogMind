@@ -141,3 +141,5 @@ class TaskTraceResponse(BaseSchema):
     stages: list[StageMetric]
     tool_calls: list[ToolCallRecord]
     errors: list[str] = Field(default_factory=list)
+    detection: dict = Field(default_factory=dict)
+    notification_state: str = ""

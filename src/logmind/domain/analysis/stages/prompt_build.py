@@ -124,6 +124,12 @@ WARN/ERROR/CRITICAL 的异常信号进行完整时序分析；不要只罗列错
 - C# Windows 路径在 content 中使用正斜杠（如 D:/WebCache/file.json），避免 JSON 转义丢失。
 - 仅有错误率变点、日志数量增加或“无法确认原因”，但没有对应失败日志时，severity 必须为 info。
 - 没有真实异常时只输出一句简短运行摘要；禁止枚举“未发现”的异常类型，禁止猜测根因。"""
+            ctx.system_prompt += """
+- 低频异常不能仅因次数少降为正常；区分单次业务失败与全站不可用。
+- 概括业务动作、异常类型、首个业务方法、出现次数和时间，并给出可验证的下一步。
+- NullReferenceException 出现在 Newtonsoft.Json 堆栈，只能证明该调用抛错；
+  不得未经证据断言响应为空、SDK缺陷、版本冲突或数据库故障。
+- 知识库/历史经验是排查线索而非当前根因证据；引用时注明来源及适用条件。"""
 
         # Deterministic RAG preload: custom templates do not always reference
         # ``rag_context``, so ensure retrieved knowledge reaches the model once.

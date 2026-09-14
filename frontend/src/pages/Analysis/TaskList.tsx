@@ -29,6 +29,7 @@ const statusMap: Record<string, { color: string; label: string }> = {
   running: { color: '#1677ff', label: '运行中' },
   failed: { color: '#ff4d4f', label: '失败' },
   pending: { color: '#8c8c8c', label: '等待' },
+  notification_pending: { color: '#faad14', label: '通知待补发' },
 };
 
 const TaskList: React.FC = () => {

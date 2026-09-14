@@ -101,6 +101,32 @@ def run_analysis_task(self, task_id: str):
 
 # ── Cost Estimation ──────────────────────────────────────
 
+@celery_app.task(name="logmind.domain.analysis.tasks.retry_analysis_notifications")
+def retry_analysis_notifications():
+    run_async(_retry_analysis_notifications())
+
+
+async def _retry_analysis_notifications():
+    from sqlalchemy import select
+    from logmind.core.database import get_db_context
+    from logmind.domain.analysis.models import LogAnalysisTask
+    async with get_db_context() as session:
+        ids = list((await session.scalars(select(LogAnalysisTask.id).where(
+            LogAnalysisTask.status == "notification_pending",
+        ).order_by(LogAnalysisTask.updated_at).limit(100))).all())
+    for task_id in ids:
+        retry_analysis_notification.delay(task_id)
+
+
+@celery_app.task(name="logmind.domain.analysis.tasks.retry_analysis_notification", soft_time_limit=300, time_limit=360)
+def retry_analysis_notification(task_id):
+    from logmind.domain.analysis.delivery import deliver
+    try:
+        run_async(deliver(task_id))
+    except Exception as exc:
+        logger.warning("notification_retry_failed", task_id=task_id, error=type(exc).__name__)
+
+
 # Per-1K-token pricing (USD). Keyed by model name prefix.
 # Conservative estimates; update when provider pricing changes.
 _MODEL_PRICING: dict[str, dict[str, float]] = {
@@ -668,15 +694,21 @@ async def _execute_analysis(task_id: str):
             logger.error("task_not_found", task_id=task_id)
             return
 
+        delivery_state = json.loads(task.query_params or "{}").get("delivery", {}).get("state")
+        if delivery_state:
+            from logmind.domain.analysis.delivery import deliver
+            await deliver(task_id)
+            return
+
         task.status = "running"
         task.started_at = datetime.now(timezone.utc)
         await session.flush()
 
         # 2. Load business line
         biz = await session.get(BusinessLine, task.business_line_id)
-        if not biz:
+        if not biz or not biz.is_active:
             task.status = "failed"
-            task.error_message = "Business line not found"
+            task.error_message = "Business line not found or inactive"
             task.completed_at = datetime.now(timezone.utc)
             await session.flush()
             return
@@ -756,6 +788,7 @@ async def _execute_analysis(task_id: str):
         # Cross-service correlation config
         related_services=json.loads(biz.related_services) if biz.related_services else {},
     )
+    ctx.log_metadata["patrol"] = query_params.get("patrol", {})
 
     # 5. Execute pipeline
     from logmind.core.elasticsearch import close_celery_es_client
@@ -863,15 +896,24 @@ async def _execute_analysis(task_id: str):
             delay_morning = ctx.priority_decision.get("delay_until_morning", False)
             reason = ctx.priority_decision.get("reason", "")
 
-            if should_notify and ctx.alerts_fired:
+            from logmind.domain.analysis.delivery import save_checkpoint, deliver
+            if ctx.log_metadata.get("patrol", {}).get("shadow"):
+                await save_checkpoint(ctx, "shadow")
+            elif should_notify and ctx.alerts_fired:
                 logger.info(
                     "sending_priority_alert",
                     priority=priority,
                     reason=reason,
                     task_id=ctx.task_id,
                 )
-                await _send_ai_alerts(ctx, webhook_url, task_id)
+                await save_checkpoint(ctx, "pending")
+                try:
+                    await deliver(task_id)
+                except Exception as exc:
+                    # Pending data is durable; Beat retries without rerunning AI.
+                    logger.warning("notification_pending_retry", task_id=task_id, error=type(exc).__name__)
             elif delay_morning:
+                await save_checkpoint(ctx, "deferred")
                 logger.info(
                     "alert_delayed_to_morning",
                     priority=priority,
@@ -880,6 +922,7 @@ async def _execute_analysis(task_id: str):
                 )
                 # P1/P2 at night — stored for morning digest
             else:
+                await save_checkpoint(ctx, "suppressed")
                 logger.info(
                     "alert_suppressed",
                     priority=priority,
@@ -888,7 +931,8 @@ async def _execute_analysis(task_id: str):
                 )
 
             # Self-learning hooks (non-critical, fire-and-forget)
-            await _run_learning_hooks(ctx, task_id)
+            if not ctx.log_metadata.get("patrol", {}).get("shadow"):
+                await _run_learning_hooks(ctx, task_id)
         else:
             # ── AI-off mode: send direct error notification ──
             async with get_db_context() as session:
@@ -901,7 +945,10 @@ async def _execute_analysis(task_id: str):
                 await session.flush()
 
             # Send direct webhook notification if errors found
-            if ctx.log_count > 0:
+            if ctx.log_metadata.get("patrol", {}).get("shadow"):
+                from logmind.domain.analysis.delivery import save_checkpoint
+                await save_checkpoint(ctx, "shadow")
+            elif ctx.log_count > 0:
                 await _send_error_log_notification(
                     ctx,
                     webhook_url,
@@ -929,7 +976,7 @@ async def _execute_analysis(task_id: str):
             await session.flush()
 
         # If AI was enabled but pipeline failed, notify the AI/pipeline fault first.
-        if ai_enabled:
+        if ai_enabled and not ctx.log_metadata.get("patrol", {}).get("shadow"):
             await _send_pipeline_error_notification(ctx, str(e), webhook_url)
             await _maybe_send_plain_error_fallback(ctx, e, webhook_url)
     finally:
@@ -1119,7 +1166,7 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
             severity=severity,
             alert_message=content[:200],
         )
-        if storm.should_suppress:
+        if storm.should_suppress and not ctx.log_metadata.get("delivery_managed"):
             logger.info(
                 "alert_storm_suppressed",
                 storm_count=storm.storm_count,
@@ -1127,11 +1174,11 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
                 task_id=ctx.task_id,
             )
             continue  # Skip — already sent storm summary
-        if storm.storm_summary:
+        if storm.storm_summary and not ctx.log_metadata.get("delivery_managed"):
             content = storm.storm_summary  # Replace with aggregated summary
 
         # Check aggregation window
-        should_send, agg_count = await alert_aggregator.should_send(
+        should_send, agg_count = (True, 1) if ctx.log_metadata.get("delivery_managed") else await alert_aggregator.should_send(
             business_line_id=ctx.business_line_id,
             severity=severity,
             error_signature=ctx.error_signature,
@@ -1170,6 +1217,8 @@ async def _send_ai_alerts(ctx, webhook_url: str, task_id: str):
         except Exception as e:
             logger.error("ai_alert_notification_failed", error=str(e))
             notify_result_data = {"success": False, "error": str(e)[:200]}
+
+        ctx.log_metadata["delivery_succeeded"] = notify_success
 
         # Persist AlertHistory record
         alert_record_id = None

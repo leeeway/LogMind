@@ -309,6 +309,8 @@ class LogService:
         logs = []
         for hit in result["hits"]["hits"]:
             source = hit["_source"]
+            source["_es_index"] = hit.get("_index", request.index_pattern)
+            source["_es_id"] = hit["_id"]
             gy_meta = self._extract_gy_metadata(source)
             logs.append(LogEntry(
                 id=hit["_id"],
@@ -751,6 +753,10 @@ class LogService:
         # 3. C# NLog/log4net: parse from message content
         message = source.get("message", "")
         if isinstance(message, str):
+            from logmind.domain.log.csharp import parse_dotnet
+            inner_level = parse_dotnet(message).level
+            if inner_level:
+                return _normalize_level(inner_level)
             # Try NLog format first (most specific pattern)
             match = _NLOG_LEVEL_RE.search(message)
             if match:

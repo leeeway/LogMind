@@ -206,6 +206,11 @@ async def get_task_trace(task_id: str, session: DBSession, user: CurrentUser):
     if task.error_message:
         errors = [e.strip() for e in task.error_message.split(";") if e.strip()]
 
+    try:
+        params = json.loads(task.query_params or "{}")
+    except (ValueError, TypeError):
+        params = {}
+    patrol = params.get("patrol", {})
     return TaskTraceResponse(
         task_id=task.id,
         status=task.status,
@@ -213,6 +218,8 @@ async def get_task_trace(task_id: str, session: DBSession, user: CurrentUser):
         stages=stages,
         tool_calls=tool_call_items,
         errors=errors,
+        detection={k: patrol[k] for k in ("trigger", "current_errors", "concrete_faults", "detection_failed", "shadow") if k in patrol},
+        notification_state=params.get("delivery", {}).get("state", ""),
     )
 
 

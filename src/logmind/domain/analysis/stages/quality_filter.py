@@ -173,6 +173,9 @@ class LogQualityFilterStage(PipelineStage):
 
     @staticmethod
     def _is_business_noise(line: str) -> bool:
+        from logmind.domain.log.csharp import parse_dotnet
+        if parse_dotnet(line).concrete_fault:
+            return False
         noise_score = sum(1 for p in _NOISE_INDICATORS if p.search(line))
         if noise_score >= 2:
             return True

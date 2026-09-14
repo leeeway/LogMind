@@ -183,6 +183,10 @@ class Settings(BaseSettings):
     analysis_patrol_interval_minutes: int = 5
     analysis_anomaly_window_minutes: int = 5
     analysis_lookback_minutes: int = 10
+    analysis_concrete_fault_enabled: bool = True
+    analysis_concrete_fault_shadow: bool = True
+    analysis_patrol_overlap_minutes: int = 2
+    analysis_patrol_max_catchup_minutes: int = 60
     pipeline_error_cooldown_minutes: int = 240
     analysis_fingerprint_enabled: bool = True
     analysis_fingerprint_ttl_hours: int = 6

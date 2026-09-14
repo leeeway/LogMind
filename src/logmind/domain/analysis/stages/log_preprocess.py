@@ -146,6 +146,10 @@ class LogPreprocessStage(PipelineStage):
             level_extractor=self._extract_level,
             message_extractor=self._extract_message,
         )
+        # A rare trigger must survive ordinary sampling; append to preserve the
+        # latest-evidence side of the character budget as well.
+        pinned = [log for log in merged_logs if log.get("_trigger_evidence")]
+        sampled_logs = [log for log in sampled_logs if not log.get("_trigger_evidence")] + pinned
         actionable_level_count = sum(
             1
             for log in ctx.raw_logs
@@ -424,6 +428,10 @@ class LogPreprocessStage(PipelineStage):
         # 3. C# NLog/log4net message parsing
         message = source.get("message", "")
         if isinstance(message, str):
+            from logmind.domain.log.csharp import parse_dotnet
+            inner_level = parse_dotnet(message).level
+            if inner_level:
+                return _normalize_level(inner_level).upper()
             match = _NLOG_LEVEL_RE.search(message)
             if match:
                 return _normalize_level(match.group(1)).upper()
@@ -441,8 +449,9 @@ class LogPreprocessStage(PipelineStage):
 
     @staticmethod
     def _extract_message(source: dict) -> str:
+        from logmind.domain.log.csharp import parse_dotnet
         for field_name in ["message", "msg", "log", "content"]:
             val = source.get(field_name)
             if isinstance(val, str):
-                return val
+                return parse_dotnet(val).message
         return str(source)[:500]

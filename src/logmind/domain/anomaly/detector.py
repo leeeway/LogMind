@@ -12,8 +12,8 @@ Normal services are skipped → saves ~50%+ AI token cost.
 """
 
 import math
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 from logmind.core.logging import get_logger
 from logmind.domain.log.service import build_base_severity_filter
@@ -31,6 +31,7 @@ MIN_BASELINE_SAMPLES = 4  # Need at least 4 hourly data points
 @dataclass
 class AnomalyResult:
     """Result of anomaly detection for a single business line."""
+
     is_anomaly: bool = False
     level: str = "normal"  # normal / warning / critical
     z_score: float = 0.0
@@ -38,6 +39,10 @@ class AnomalyResult:
     baseline_mean: float = 0.0
     baseline_std: float = 0.0
     detail: str = ""
+    detection_failed: bool = False
+    concrete_faults: int = 0
+    trigger: str = "volume"
+    evidence_refs: list[dict] = field(default_factory=list)
 
 
 class AnomalyDetector:
@@ -53,6 +58,9 @@ class AnomalyDetector:
         index_pattern: str,
         window_minutes: int = CURRENT_WINDOW_MINUTES,
         severity_threshold: str = "error",
+        since: datetime | None = None,
+        until: datetime | None = None,
+        inspect_concrete_faults: bool = False,
     ) -> AnomalyResult:
         """
         Detect anomaly for a single service/index pattern.
@@ -69,11 +77,13 @@ class AnomalyDetector:
 
         try:
             es = get_es_client()
-            now = datetime.now(timezone.utc)
+            now = until or datetime.now(UTC)
+            window_start = since or now - timedelta(minutes=window_minutes)
 
             # 1. Current window error count
             current_errors = await self._count_errors(
-                es, index_pattern,
+                es,
+                index_pattern,
                 since=now - timedelta(minutes=window_minutes),
                 until=now,
                 severity_threshold=severity_threshold,
@@ -81,7 +91,8 @@ class AnomalyDetector:
 
             # 2. Historical baseline (24h hourly buckets)
             baseline_mean, baseline_std = await self._compute_baseline(
-                es, index_pattern,
+                es,
+                index_pattern,
                 since=now - timedelta(hours=BASELINE_HOURS),
                 until=now - timedelta(minutes=window_minutes),
                 bucket_minutes=window_minutes,
@@ -129,6 +140,18 @@ class AnomalyDetector:
                 detail=detail,
             )
 
+            if inspect_concrete_faults:
+                result.concrete_faults, result.evidence_refs = await self._concrete_faults(
+                    es, index_pattern, window_start, now
+                )
+                if result.concrete_faults and not result.is_anomaly:
+                    result.is_anomaly = True
+                    result.level = "warning"
+                    result.trigger = "concrete_exception"
+                    result.detail = (
+                        f"发现 {result.concrete_faults} 条明确异常证据，进入诊断（非直接通知）"
+                    )
+
             if is_anomaly:
                 logger.warning(
                     "anomaly_detected",
@@ -145,10 +168,65 @@ class AnomalyDetector:
             logger.error("anomaly_detection_failed", index=index_pattern, error=str(e))
             # On failure, assume anomaly to avoid missing real issues
             return AnomalyResult(
-                is_anomaly=True,
-                level="warning",
-                detail=f"检测失败(fallback=anomaly): {str(e)[:100]}",
+                detection_failed=True,
+                detail=f"检测失败: {type(e).__name__}",
             )
+
+    async def _concrete_faults(self, es, index, since, until) -> tuple[int, list[dict]]:
+        """Page current-window candidates; do not sample away a rare failure."""
+        from logmind.domain.log.csharp import normalized_fault, parse_dotnet
+        from logmind.domain.log.error_signals import EXCEPTION_SIGNALS
+
+        query = {
+            "bool": {
+                "filter": [
+                    {"range": {"@timestamp": {"gte": since.isoformat(), "lt": until.isoformat()}}},
+                    {
+                        "bool": {
+                            "should": [build_base_severity_filter("error")]
+                            + [{"match_phrase": {"message": s}} for s in EXCEPTION_SIGNALS],
+                            "minimum_should_match": 1,
+                        }
+                    },
+                ]
+            }
+        }
+        response = await es.search(
+            index=index,
+            body={
+                "size": 500,
+                "query": query,
+                "sort": ["_doc"],
+                "_source": ["message", "content", "msg"],
+            },
+            scroll="1m",
+        )
+        scroll_id = response.get("_scroll_id")
+        count = 0
+        refs = []
+        patterns = set()
+        try:
+            while True:
+                hits = response.get("hits", {}).get("hits", [])
+                if not hits:
+                    break
+                for hit in hits:
+                    src = hit.get("_source", {})
+                    message = src.get("message") or src.get("content") or src.get("msg") or ""
+                    if parse_dotnet(message).concrete_fault:
+                        count += 1
+                        pattern = normalized_fault(message)
+                        if pattern not in patterns and len(refs) < 20:
+                            refs.append({"index": hit.get("_index", index), "id": hit["_id"]})
+                            patterns.add(pattern)
+                if not scroll_id:
+                    break
+                response = await es.scroll(scroll_id=scroll_id, scroll="1m")
+                scroll_id = response.get("_scroll_id", scroll_id)
+        finally:
+            if scroll_id:
+                await es.clear_scroll(scroll_id=scroll_id)
+        return count, refs
 
     async def _count_errors(
         self,
@@ -161,27 +239,32 @@ class AnomalyDetector:
         """Count logs at or above the configured severity in a time window."""
         body = {
             "size": 0,
+            "track_total_hits": True,
             "query": {
                 "bool": {
                     "filter": [
-                        {"range": {"@timestamp": {
-                            "gte": since.isoformat(),
-                            "lt": until.isoformat(),
-                        }}},
+                        {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": since.isoformat(),
+                                    "lt": until.isoformat(),
+                                }
+                            }
+                        },
                         self._build_severity_filter(severity_threshold),
                     ]
                 }
             },
         }
-        try:
-            resp = await es.search(index=index_pattern, body=body)
-            return resp.get("hits", {}).get("total", {}).get("value", 0)
-        except Exception:
-            return 0
+        resp = await es.search(index=index_pattern, body=body)
+        return resp.get("hits", {}).get("total", {}).get("value", 0)
 
     async def _compute_baseline(
-        self, es, index_pattern: str,
-        since: datetime, until: datetime,
+        self,
+        es,
+        index_pattern: str,
+        since: datetime,
+        until: datetime,
         bucket_minutes: int = 5,
         severity_threshold: str = "error",
     ) -> tuple[float, float]:
@@ -196,10 +279,14 @@ class AnomalyDetector:
             "query": {
                 "bool": {
                     "filter": [
-                        {"range": {"@timestamp": {
-                            "gte": since.isoformat(),
-                            "lt": until.isoformat(),
-                        }}},
+                        {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": since.isoformat(),
+                                    "lt": until.isoformat(),
+                                }
+                            }
+                        },
                         self._build_severity_filter(severity_threshold),
                     ]
                 }
@@ -209,6 +296,12 @@ class AnomalyDetector:
                     "date_histogram": {
                         "field": "@timestamp",
                         "fixed_interval": f"{bucket_minutes}m",
+                        "offset": f"{int(since.timestamp()) % (bucket_minutes * 60)}s",
+                        "min_doc_count": 0,
+                        "extended_bounds": {
+                            "min": since.isoformat(),
+                            "max": (until - timedelta(milliseconds=1)).isoformat(),
+                        },
                     }
                 }
             },
@@ -230,7 +323,7 @@ class AnomalyDetector:
             return mean, std
 
         except Exception:
-            return 0.0, 0.0
+            raise
 
     @staticmethod
     def _build_severity_filter(severity_threshold: str) -> dict:

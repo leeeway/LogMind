@@ -12,7 +12,8 @@ import dayjs from 'dayjs';
 const { Title, Text } = Typography;
 
 const severityColors: Record<string, string> = { critical: '#ff4d4f', warning: '#faad14', info: '#1677ff' };
-const statusColors: Record<string, string> = { completed: '#52c41a', running: '#1677ff', failed: '#ff4d4f', pending: '#8c8c8c' };
+const statusColors: Record<string, string> = { completed: '#52c41a', running: '#1677ff', failed: '#ff4d4f', pending: '#8c8c8c', notification_pending: '#faad14' };
+const deliveryLabels: Record<string, string> = { pending: '待发送', failed: '失败待补发', deferred: '按夜间策略延后', shadow: '影子诊断，不通知', sent: '已送达', suppressed: '策略不通知', duplicate: '已送达，影响未扩大' };
 const evidenceKindLabels: Record<string, string> = {
   log_sample: '日志证据',
   change_point: '变点',
@@ -23,6 +24,7 @@ const evidenceKindLabels: Record<string, string> = {
   ai_finding: 'AI 发现',
 };
 const pipelineStageLabels: Record<string, string> = {
+  notification: '通知投递',
   knowledge_retrieval: '知识库预检索',
   semantic_dedup: '历史经验匹配',
   prompt_build: '分析上下文组装',
@@ -175,6 +177,9 @@ const TaskDetail: React.FC = () => {
       <Card size="small" style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12, marginBottom: 16 }}>
         <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }}>
           <Descriptions.Item label="任务类型">{task.task_type}</Descriptions.Item>
+          {trace?.notification_state && <Descriptions.Item label="通知状态">{deliveryLabels[trace.notification_state] || trace.notification_state}</Descriptions.Item>}
+          {trace?.detection?.trigger && <Descriptions.Item label="检测入口">{trace.detection.trigger === 'concrete_exception' ? '低频明确异常' : '数量突增检测'}</Descriptions.Item>}
+          {trace?.detection?.current_errors != null && <Descriptions.Item label="检测匹配数">{trace.detection.current_errors}（明确异常 {trace.detection.concrete_faults || 0}）</Descriptions.Item>}
           <Descriptions.Item label="日志数"><span style={{ fontWeight: 600 }}>{task.log_count?.toLocaleString()}</span></Descriptions.Item>
           <Descriptions.Item label="Token">{task.token_usage?.toLocaleString()}</Descriptions.Item>
           <Descriptions.Item label="成本"><span style={{ color: '#52c41a' }}>${task.cost_usd?.toFixed(4)}</span></Descriptions.Item>
@@ -197,7 +202,7 @@ const TaskDetail: React.FC = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {trace.stages?.map((stage: any, i: number) => {
               const pct = trace.total_duration_ms > 0 ? Math.max((stage.duration_ms / trace.total_duration_ms) * 100, 2) : 0;
-              const icon = stage.status === 'ok' ? '✅' : stage.status === 'skipped' ? '⏭️' : '❌';
+              const icon = ['ok', 'sent'].includes(stage.status) ? '✅' : ['error', 'failed'].includes(stage.status) ? '❌' : '⏭️';
               return (
                 <Tooltip key={i} title={`${pipelineStageLabels[stage.stage] || stage.stage}: ${stage.duration_ms}ms — ${stage.status}`}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>

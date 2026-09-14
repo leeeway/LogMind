@@ -52,6 +52,11 @@ celery_app.autodiscover_tasks([
 
 # ── Beat Schedule (定时任务) ──────────────────────────────
 celery_app.conf.beat_schedule = {
+    "retry-analysis-notifications": {
+        "task": "logmind.domain.analysis.tasks.retry_analysis_notifications",
+        "schedule": crontab(minute="*/5"),
+        "options": {"queue": "analysis"},
+    },
     # Scheduled log patrol — runs every 5 minutes by default
     # Only analyzes ERROR/CRITICAL severity to control AI costs
     "scheduled-log-patrol": {

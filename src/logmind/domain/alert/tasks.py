@@ -14,6 +14,7 @@ Benefits:
 """
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 from logmind.core.async_task import run_async
@@ -138,12 +139,46 @@ async def _patrol_single(business_line_id: str):
             logger.warning("patrol_biz_not_found_or_inactive", biz_id=business_line_id)
             return
 
-        # ── Anomaly Detection Pre-filter ─────────────────
+        from sqlalchemy import select
+        # A durable successful scan is the watermark, not wall-clock Beat time.
+        previous = await session.scalar(select(LogAnalysisTask).where(
+            LogAnalysisTask.business_line_id == biz.id,
+            LogAnalysisTask.tenant_id == biz.tenant_id,
+            LogAnalysisTask.task_type == "scheduled",
+            LogAnalysisTask.status != "failed",
+        ).order_by(LogAnalysisTask.time_to.desc()).limit(1))
+        since = now - timedelta(minutes=settings.effective_anomaly_window_minutes)
+        if previous and previous.time_to:
+            last = previous.time_to.replace(tzinfo=timezone.utc) if previous.time_to.tzinfo is None else previous.time_to
+            since = min(since, last - timedelta(minutes=settings.analysis_patrol_overlap_minutes))
+        since = max(since, now - timedelta(minutes=settings.analysis_patrol_max_catchup_minutes))
+        # Inspect content as well as configured language: mislabelled C# sites
+        # must not miss exceptions. The parser requires .NET/SDK evidence.
         anomaly = await anomaly_detector.detect(
             index_pattern=biz.es_index_pattern,
             window_minutes=settings.effective_anomaly_window_minutes,
             severity_threshold=biz.severity_threshold,
+            since=since,
+            until=now,
+            inspect_concrete_faults=settings.analysis_concrete_fault_enabled,
         )
+        metadata = {
+            "trigger": anomaly.trigger,
+            "current_errors": anomaly.current_errors,
+            "concrete_faults": anomaly.concrete_faults,
+            "evidence_refs": anomaly.evidence_refs,
+            "detection_failed": anomaly.detection_failed,
+            "shadow": anomaly.trigger == "concrete_exception" and settings.analysis_concrete_fault_shadow,
+        }
+        if anomaly.detection_failed:
+            session.add(LogAnalysisTask(
+                tenant_id=biz.tenant_id, business_line_id=biz.id,
+                task_type="scheduled", status="failed", time_from=since, time_to=now,
+                query_params=json.dumps({"patrol": metadata}),
+                error_message=anomaly.detail, completed_at=now,
+            ))
+            await session.commit()
+            return
 
         if anomaly.is_anomaly:
             logger.info(
@@ -161,9 +196,9 @@ async def _patrol_single(business_line_id: str):
                 business_line_id=biz.id,
                 task_type="scheduled",
                 status="pending",
-                time_from=now - timedelta(minutes=settings.effective_lookback_minutes),
+                time_from=min(since, now - timedelta(minutes=settings.effective_lookback_minutes)),
                 time_to=now,
-                query_params="{}",
+                query_params=json.dumps({"patrol": metadata, "severity": "error" if anomaly.concrete_faults else biz.severity_threshold}),
             )
             session.add(task)
             await session.flush()
@@ -178,6 +213,15 @@ async def _patrol_single(business_line_id: str):
                 z_score=anomaly.z_score,
             )
             return  # Realtime anomaly handled — skip predictive check
+
+        session.add(LogAnalysisTask(
+            tenant_id=biz.tenant_id, business_line_id=biz.id,
+            task_type="scheduled", status="completed", time_from=since, time_to=now,
+            query_params=json.dumps({"patrol": metadata}),
+            log_count=anomaly.current_errors, completed_at=now,
+            error_message="未触发诊断：未发现数量突增或明确异常",
+        ))
+        await session.commit()
 
         # ── Predictive Alerting ───────────────────────────
         # Z-Score is normal now, but check if trend is rising toward threshold

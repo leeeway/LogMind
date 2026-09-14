@@ -11,6 +11,10 @@ class _FakeSettings:
     analysis_lookback_minutes = 10
     effective_anomaly_window_minutes = 5
     effective_lookback_minutes = 10
+    analysis_patrol_overlap_minutes = 2
+    analysis_patrol_max_catchup_minutes = 60
+    analysis_concrete_fault_enabled = True
+    analysis_concrete_fault_shadow = True
 
 
 class _FakeBiz:
@@ -35,6 +39,9 @@ class _FakeSession:
     async def get(self, model, object_id):
         return _FakeBiz()
 
+    async def scalar(self, stmt):
+        return None
+
     def add(self, task):
         self.created_task = task
 
@@ -49,7 +56,7 @@ class _FakeAnomalyDetector:
     def __init__(self):
         self.window_minutes = None
 
-    async def detect(self, *, index_pattern, window_minutes, severity_threshold):
+    async def detect(self, *, index_pattern, window_minutes, severity_threshold, **kwargs):
         from logmind.domain.anomaly.detector import AnomalyResult
 
         self.window_minutes = window_minutes

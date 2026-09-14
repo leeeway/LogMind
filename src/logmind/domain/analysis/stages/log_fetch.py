@@ -34,8 +34,23 @@ class LogFetchStage(PipelineStage):
         )
         result = await self.log_service.search_logs(request)
         ctx.raw_logs = [log.raw for log in result.logs]
-        ctx.log_count = result.total
-        ctx.log_metadata["matched_count"] = result.total
+        refs = ctx.log_metadata.get("patrol", {}).get("evidence_refs", [])
+        if refs:
+            # Pin rare trigger evidence even when the ordinary fetch hits 10k.
+            from logmind.core.elasticsearch import get_es_client
+            response = await get_es_client().mget(docs=[
+                {"_index": ref["index"], "_id": ref["id"]} for ref in refs[:20]
+            ])
+            for doc in response.get("docs", []):
+                if doc.get("found"):
+                    ctx.raw_logs.append({**doc["_source"], "_es_index": doc["_index"], "_es_id": doc["_id"], "_trigger_evidence": True})
+        unique = {}
+        for i, raw in enumerate(ctx.raw_logs):
+            key = (raw.get("_es_index"), raw.get("_es_id")) if raw.get("_es_id") else (None, i)
+            unique[key] = raw
+        ctx.raw_logs = list(unique.values())
+        ctx.log_count = max(result.total, len(ctx.raw_logs))
+        ctx.log_metadata["matched_count"] = ctx.log_count
         ctx.log_metadata["fetched_count"] = len(ctx.raw_logs)
 
         # Extract GYYX business context from first log entry
