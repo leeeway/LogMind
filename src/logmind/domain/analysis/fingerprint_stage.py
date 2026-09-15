@@ -40,13 +40,14 @@ class ErrorFingerprintStage(PipelineStage):
     async def execute(self, ctx: PipelineContext) -> PipelineContext:
         if ctx.full_log_analysis or not get_settings().analysis_fingerprint_enabled:
             return ctx
-        keys = list(
-            dict.fromkeys(
-                _generate_fingerprint(f"{ctx.tenant_id}:{ctx.business_line_id}", event)
-                for event in split_events(ctx.processed_logs)
-            )
-        )
+        counts = {}
+        for event in split_events(ctx.processed_logs):
+            key = _generate_fingerprint(f"{ctx.tenant_id}:{ctx.business_line_id}", event)
+            occurrences = re.search(r"\[occurrences:(\d+)\]", event)
+            counts[key] = counts.get(key, 0) + (int(occurrences.group(1)) if occurrences else 1)
+        keys = list(counts)
         ctx.log_metadata["fingerprint_keys"] = keys
+        ctx.log_metadata["fingerprint_counts"] = counts
         ctx.log_metadata["fingerprint_new"] = len(keys)
         # No cache/suppression here: AI may fail or priority may have escalated.
         return ctx
@@ -64,8 +65,8 @@ async def delivered_unchanged(ctx: PipelineContext) -> bool:
         redis = get_redis_client()
         priority = ctx.priority_decision.get("priority", "P1")
         rank = {"P0": 0, "P1": 1, "P2": 2}
-        count = max(ctx.log_metadata.get("matched_count", ctx.log_count), 1)
         for key in keys:
+            count = max(ctx.log_metadata.get("fingerprint_counts", {}).get(key, ctx.log_count), 1)
             raw = await redis.get(key)
             if not raw:
                 return False
@@ -88,14 +89,16 @@ async def mark_delivered(ctx: PipelineContext) -> None:
 
     try:
         redis = get_redis_client()
-        state = json.dumps(
-            {
-                "priority": ctx.priority_decision.get("priority", "P1"),
-                "count": max(ctx.log_metadata.get("matched_count", ctx.log_count), 1),
-                "task_id": ctx.task_id,
-            }
-        )
         for key in ctx.log_metadata.get("fingerprint_keys", []):
+            state = json.dumps(
+                {
+                    "priority": ctx.priority_decision.get("priority", "P1"),
+                    "count": max(
+                        ctx.log_metadata.get("fingerprint_counts", {}).get(key, ctx.log_count), 1
+                    ),
+                    "task_id": ctx.task_id,
+                }
+            )
             await redis.setex(key, get_settings().analysis_fingerprint_ttl_hours * 3600, state)
     except Exception as exc:
         logger.warning("fingerprint_delivery_write_failed", error=type(exc).__name__)

@@ -415,7 +415,12 @@ def _is_redundant_alert_text(candidate: str, reference: str) -> bool:
         return True
 
     shorter, longer = sorted((candidate_norm, reference_norm), key=len)
-    return len(shorter) >= 40 and shorter in longer
+    if len(shorter) >= 40 and shorter in longer:
+        return True
+    # Independently truncated issue/cause strings often share the same opening.
+    from os.path import commonprefix
+    shared = len(commonprefix((shorter, longer)))
+    return shared >= 80 and shared >= len(shorter) * 0.5
 
 
 def _analysis_entry_text(task_id: str) -> str:

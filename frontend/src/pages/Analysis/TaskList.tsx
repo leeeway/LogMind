@@ -172,6 +172,7 @@ const TaskList: React.FC = () => {
               { value: 'running', label: '运行中' },
               { value: 'failed', label: '失败' },
               { value: 'pending', label: '等待' },
+              { value: 'notification_pending', label: '通知待补发' },
             ]}
             style={{ width: 120 }}
           />

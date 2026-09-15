@@ -88,6 +88,8 @@ def test_stable_fingerprint_and_method_separation():
         "b", SAMPLE.replace("GetUser", "GetAccount")
     )
     assert _generate_fingerprint("b", SAMPLE) != _generate_fingerprint("c", SAMPLE)
+    formatted = "[2026-09-12T04:58:04Z] [ERROR] [host:TM3298] " + parse_dotnet(SAMPLE).message
+    assert _generate_fingerprint("b", SAMPLE) == _generate_fingerprint("b", formatted)
 
 
 @pytest.mark.asyncio
@@ -153,8 +155,13 @@ async def test_delivery_only_fingerprints_after_success(monkeypatch):
     await mark_delivered(ctx)
     assert await delivered_unchanged(ctx)
     ctx.log_count = 2
+    key = ctx.log_metadata["fingerprint_keys"][0]
+    ctx.log_metadata["fingerprint_counts"][key] = 2
     assert not await delivered_unchanged(ctx)
     ctx.log_count = 1
+    ctx.log_metadata["fingerprint_counts"][key] = 1
+    ctx.log_metadata["matched_count"] = 1000
+    assert await delivered_unchanged(ctx)  # Unrelated scan volume is not impact.
     ctx.priority_decision["priority"] = "P0"
     assert not await delivered_unchanged(ctx)
     memory.clear()  # Recovered/expired event may alert again.
@@ -170,3 +177,34 @@ def test_checkpoint_does_not_store_raw_logs_or_credentials():
     data = snapshot(ctx)
     assert "raw_logs" not in data and "system_prompt" not in data
     assert restore(data).task_id == ctx.task_id
+
+
+@pytest.mark.asyncio
+async def test_scroll_reaches_rare_error_after_10000_candidates():
+    es = SimpleNamespace(
+        search=AsyncMock(
+            return_value={
+                "_scroll_id": "s",
+                "hits": {
+                    "hits": [
+                        {"_id": str(i), "_source": {"message": "[ERROR] 参数错误"}}
+                        for i in range(10000)
+                    ]
+                },
+            }
+        ),
+        scroll=AsyncMock(
+            side_effect=[
+                {
+                    "_scroll_id": "s",
+                    "hits": {"hits": [{"_id": "rare", "_source": {"message": SAMPLE}}]},
+                },
+                {"_scroll_id": "s", "hits": {"hits": []}},
+            ]
+        ),
+        clear_scroll=AsyncMock(),
+    )
+    now = datetime.now(UTC)
+    count, refs = await AnomalyDetector()._concrete_faults(es, "site", now, now)
+    assert count == 1 and refs[0]["id"] == "rare"
+    es.clear_scroll.assert_awaited_once_with(scroll_id="s")

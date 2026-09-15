@@ -20,12 +20,49 @@ _FIELDS = (
     "host_name",
     "language",
     "log_count",
+    "has_stack_traces",
+    "full_log_analysis",
     "alerts_fired",
     "priority_decision",
     "error_signature",
     "log_metadata",
     "analysis_results",
 )
+
+
+def notification_summary(findings):
+    """One task, one notification; retain full findings in analysis_results."""
+    from difflib import SequenceMatcher
+
+    from logmind.domain.analysis.tasks import _normalize_alert_text_for_compare
+
+    rank = {"critical": 3, "error": 2, "warning": 1, "info": 0}
+    candidates = sorted(
+        (
+            f
+            for f in findings
+            if f.get("alertable") is not False and str(f.get("content", "")).strip()
+        ),
+        key=lambda f: (rank.get(f.get("severity"), 0), f.get("result_type") == "root_cause"),
+        reverse=True,
+    )
+    if not candidates:
+        return []
+    unique = []
+    for finding in candidates:
+        text = _normalize_alert_text_for_compare(finding["content"])
+        if any(
+            SequenceMatcher(None, text[:500], previous[:500]).ratio() >= 0.75 for previous in unique
+        ):
+            continue
+        unique.append(text)
+    primary = dict(candidates[0])
+    if len(unique) > 1:
+        # Do not multiply webhook messages by the number of model output items.
+        primary["content"] = (
+            primary["content"][:260] + f"；另有 {len(unique) - 1} 项分析结论，详见后台。"
+        )
+    return [primary]
 
 
 def snapshot(ctx):
@@ -64,6 +101,8 @@ async def save_checkpoint(ctx, state, sent=None):
         task = await session.get(LogAnalysisTask, ctx.task_id, with_for_update=True)
         params = json.loads(task.query_params or "{}")
         old = params.get("delivery", {})
+        if not old and state in {"pending", "deferred"}:
+            ctx.alerts_fired = notification_summary(ctx.alerts_fired)
         params["delivery"] = {
             "state": state,
             "context": snapshot(ctx),
@@ -125,6 +164,8 @@ async def deliver(task_id):
         ctx.business_weight, ctx.is_core_path = biz.business_weight, biz.is_core_path
         ctx.estimated_dau = biz.estimated_dau
     await PriorityDecisionStage().execute(ctx)
+    # Re-scoring policy must not change the persisted item order / sent indexes.
+    ctx.alerts_fired = data["context"]["alerts_fired"]
     if not ctx.priority_decision.get("should_notify"):
         await save_checkpoint(
             ctx, "deferred" if ctx.priority_decision.get("delay_until_morning") else "suppressed"
@@ -146,6 +187,11 @@ async def deliver(task_id):
             await save_checkpoint(ctx, "duplicate")
             return
         sent = data.get("sent", [])
+        # Upgrade an unsent checkpoint created by the previous per-finding
+        # sender. Never reorder partially delivered checkpoints.
+        if not sent and len(ctx.alerts_fired) > 1:
+            ctx.alerts_fired = notification_summary(ctx.alerts_fired)
+            await save_checkpoint(ctx, "pending", sent)
         alerts = list(ctx.alerts_fired)
         for i, alert in enumerate(alerts):
             if i in sent:

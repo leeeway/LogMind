@@ -245,6 +245,8 @@ class Settings(BaseSettings):
         "analysis_patrol_interval_minutes",
         "analysis_anomaly_window_minutes",
         "analysis_lookback_minutes",
+        "analysis_patrol_overlap_minutes",
+        "analysis_patrol_max_catchup_minutes",
         "http_access_window_minutes",
         "http_access_metrics_retention_days",
         "http_access_baseline_days",
