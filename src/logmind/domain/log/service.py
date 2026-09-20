@@ -27,7 +27,7 @@ from logmind.domain.log.schemas import (
 
 logger = get_logger(__name__)
 
-# ── Java: gy.filetype → standard log level mapping ──────
+# ── Java & Filebeat: gy.filetype → standard log level mapping ──────
 _FILETYPE_LEVEL_MAP: dict[str, str] = {
     "error.log": "error",
     "info.log": "info",
@@ -35,17 +35,31 @@ _FILETYPE_LEVEL_MAP: dict[str, str] = {
     "warning.log": "warning",
     "debug.log": "debug",
     "trace.log": "debug",
+    "error.log.txt": "error",
+    "warn.log.txt": "warning",
+    "warning.log.txt": "warning",
+    "info.log.txt": "info",
+    "debug.log.txt": "debug",
+    "trace.log.txt": "debug",
 }
 
-# Java: reverse mapping for severity → filetype ES filter
-# NOTE: warn.log is included in error mapping because Java developers
+# Reverse mapping for severity → filetype ES filter
+# NOTE: warn.log is included in error mapping because developers
 # frequently log real exceptions at WARN level (e.g. Spring's
 # DataIntegrityViolationException). QualityFilter handles noise.
 _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
-    "error": ["error.log", "warn.log"],
-    "warning": ["warn.log", "warning.log"],
-    "info": ["info.log"],
-    "debug": ["debug.log", "trace.log"],
+    "error": [
+        "error.log", "warn.log",
+        "error.log.txt", "warn.log.txt",
+        "Error.Log.txt", "Warn.Log.txt",
+    ],
+    "warning": [
+        "warn.log", "warning.log",
+        "warn.log.txt", "warning.log.txt",
+        "Warn.Log.txt",
+    ],
+    "info": ["info.log", "info.log.txt", "Info.Log.txt"],
+    "debug": ["debug.log", "trace.log", "debug.log.txt", "Debug.Log.txt"],
 }
 
 # ── C# NLog/log4net filetypes (mixed-level log files) ───
@@ -743,10 +757,10 @@ class LogService:
             if val:
                 return _normalize_level(str(val))
 
-        # 2. Java: gy.filetype mapping (only for known single-level files)
+        # 2. gy.filetype mapping (only for known single-level files)
         gy = source.get("gy", {})
         if isinstance(gy, dict):
-            filetype = gy.get("filetype", "")
+            filetype = gy.get("filetype", "").lower()
             if filetype in _FILETYPE_LEVEL_MAP:
                 return _FILETYPE_LEVEL_MAP[filetype]
 
@@ -773,7 +787,14 @@ class LogService:
             if match:
                 return _normalize_level(match.group(1))
 
-        return ""
+        # 4. Fallback: log level keywords in message
+        if isinstance(message, str):
+            for level, keywords in _SEVERITY_MSG_KEYWORDS.items():
+                for kw in keywords:
+                    if kw in message:
+                        return level
+
+        return "unknown"
 
     @staticmethod
     def _extract_message(source: dict) -> str:
@@ -791,12 +812,12 @@ class LogService:
         Common fields (all sites):
           gy.domain   → site domain name
           gy.filetype → log file type
-        Java K8s only:
-          gy.podname  → pod name with version suffix
+        Java/Go K8s:
+          gy.podname  → pod name with version suffix (e.g. name_2.0.1.28)
           gy.branch   → code branch (master=prod, develop=test)
           image.version → container image version
-        C# Windows VM:
-          host.name   → Windows machine name (e.g. 10_14_83_74)
+        Host / VM:
+          host.name or agent.name → machine name (e.g. TM14710, PM0342)
         """
         gy = source.get("gy", {})
         if not isinstance(gy, dict):
@@ -810,13 +831,25 @@ class LogService:
         if not isinstance(host, dict):
             host = {}
 
+        agent = source.get("agent", {})
+        if not isinstance(agent, dict):
+            agent = {}
+
+        pod_name = gy.get("podname", "")
+        image_version = image.get("version", "")
+        if not image_version and pod_name and "_" in pod_name:
+            # GYYX Filebeat often appends version to podname, e.g. "pod_2.0.1.28.704"
+            image_version = pod_name.rsplit("_", 1)[-1]
+
+        host_name = host.get("name") or agent.get("name", "")
+
         return {
             "domain": gy.get("domain", ""),
-            "pod_name": gy.get("podname", ""),
+            "pod_name": pod_name,
             "branch": gy.get("branch", ""),
             "filetype": gy.get("filetype", ""),
-            "image_version": image.get("version", ""),
-            "host_name": host.get("name", ""),
+            "image_version": image_version,
+            "host_name": host_name,
         }
 
 

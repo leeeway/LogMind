@@ -28,12 +28,16 @@ logger = get_logger(__name__)
 # These are generic field names that commonly appear across systems.
 # Derived from real production logs (tong-kernel, interface.security, actionv3).
 _SENSITIVE_KEYS = frozenset({
-    # Authentication tokens
+    # Authentication tokens & credentials
     "access_token", "accesstoken", "refresh_token", "refreshtoken",
     "token", "auth_token", "authtoken", "bearer", "jwt",
     "session_id", "sessionid", "session_token",
     "api_key", "apikey", "secret", "secret_key", "secretkey",
-    "password", "passwd", "pwd",
+    "app_secret", "appsecret", "client_secret", "clientsecret",
+    "password", "passwd", "pwd", "userpwd", "user_pwd", "loginpwd", "login_pwd",
+    "oldpwd", "newpwd", "triencryptpwd", "encryptpwd", "encrypt_pwd",
+    "salt", "bisalt", "usersalt", "passwordsalt",
+    "sign", "signature", "private_key", "privatekey",
     # Personal identifiers
     "phone", "phone_no", "phoneno", "phone_number", "phonenumber",
     "mobile", "mobile_no", "mobileno", "cellphone", "tel",
@@ -83,14 +87,16 @@ def _build_kv_pattern() -> re.Pattern:
     """Build a regex that matches any sensitive key followed by its value."""
     # Escape key names and join with alternation
     keys_pattern = "|".join(re.escape(k) for k in sorted(_SENSITIVE_KEYS, key=len, reverse=True))
+    compound_pattern = r'[a-zA-Z0-9_.]*(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)[a-zA-Z0-9_.]*'
+    full_pattern = f"(?:{compound_pattern}|{keys_pattern})"
     return re.compile(
         r'(?i)'                          # Case-insensitive
         r'(?:"|\')?' + r''               # Optional quote before key
-        r'(' + keys_pattern + r')'       # Group 1: key name
+        r'(' + full_pattern + r')'       # Group 1: key name
         r'(?:"|\')?' + r''               # Optional quote after key
         r'\s*[:=]\s*'                    # Separator (: or =)
         r'(?:"|\')?' + r''               # Optional quote before value
-        r'([^"\',}\s&\]]{3,})'           # Group 2: value (at least 3 chars, non-delimiter)
+        r'([^"\',}\s&\])]{3,})'          # Group 2: value (at least 3 chars, non-delimiter)
         r'(?:"|\')?' + r'',              # Optional quote after value
     )
 

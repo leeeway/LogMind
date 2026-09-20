@@ -232,13 +232,13 @@ class TestMinNotifyPriority:
             business_weight=5,
         )
         # Verify it calculates as P1, but suppressed by default P0 threshold
-        dec_default = engine.decide(factors)
+        dec_default = engine.decide(factors, night_policy="alert")
         assert dec_default.priority == "P1"
         assert dec_default.actions.should_notify is False
         assert "低于最低通知级别门槛限制 P0" in dec_default.actions.reason
 
         # Override min_notify_priority to P1 -> should notify
-        dec_override = engine.decide(factors, min_notify_priority="P1")
+        dec_override = engine.decide(factors, min_notify_priority="P1", night_policy="alert")
         assert dec_override.priority == "P1"
         assert dec_override.actions.should_notify is True
 
@@ -255,11 +255,11 @@ class TestMinNotifyPriority:
             mock_settings.return_value.analysis_min_notification_priority = "P0"
 
             # Should be suppressed by global setting
-            dec = engine.decide(factors, min_notify_priority="default")
+            dec = engine.decide(factors, min_notify_priority="default", night_policy="alert")
             assert dec.actions.should_notify is False
             assert "低于最低通知级别门槛限制 P0" in dec.actions.reason
 
             # Should override global setting back to P1 and notify
-            dec_override = engine.decide(factors, min_notify_priority="P1")
+            dec_override = engine.decide(factors, min_notify_priority="P1", night_policy="alert")
             assert dec_override.actions.should_notify is True
 

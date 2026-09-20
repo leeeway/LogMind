@@ -40,7 +40,7 @@ _CSHARP_STACK_RE = re.compile(
     r"(?:\s+in\s+.*?:line\s+\d+)?"     # optional Windows/Linux source location
 )
 
-# Common stack trace continuation markers (both Java + C#)
+# Common stack trace continuation markers (Java, C#, Go, Python)
 _STACK_CONTINUATION_PREFIXES = (
     "at ",
     "Caused by:",
@@ -48,12 +48,35 @@ _STACK_CONTINUATION_PREFIXES = (
     "--- End of",           # C#: --- End of inner exception stack trace ---
     "--- End of stack",     # C#: --- End of stack trace from previous location ---
     "Exception rethrown",   # C# rethrow marker
+    'File "',               # Python: File "app.py", line 12, in ...
+    "goroutine ",           # Go: goroutine 1 [running]:
 )
 
 # Pattern to extract exception class name from message
 _EXCEPTION_CLASS_RE = re.compile(
     r"([\w.]+(?:Exception|Error|Throwable|Fault))"
 )
+
+# ── Deduplication Key Normalization Patterns ─────────────
+_DEDUP_TIMESTAMP_PREFIX_RE = re.compile(
+    r"^\[?\d{4}[-/]\d{2}[-/]\d{2}[T\s]\d{2}:\d{2}:\d{2}[,.\d]*\]?\s*"
+)
+_DEDUP_THREAD_GOROUTINE_PREFIX_RE = re.compile(
+    r"^(?:\[[0-9a-zA-Z_\-.:]+\]\s*)+"
+)
+_DEDUP_VOLATILE_CONTEXT_RE = re.compile(
+    r"\b(?:request_?id|trace_?id|span_?id|correlation_?id|merchant_?id|user_?id|guild|order_?id|task_?id)\s*[:=]\s*[A-Za-z0-9._:\-]+",
+    re.IGNORECASE,
+)
+_DEDUP_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+_DEDUP_HEX_ID_RE = re.compile(
+    r"\b[0-9a-f]{16,32}\b",
+    re.IGNORECASE,
+)
+_DEDUP_DYNAMIC_NUM_RE = re.compile(r"\b\d+\b")
 
 # ── Constants ────────────────────────────────────────────
 MAX_SAMPLED_LOGS = 200
@@ -106,12 +129,13 @@ class LogPreprocessStage(PipelineStage):
         merged_logs = self._merge_stack_traces(ctx.raw_logs)
         configured_language = ctx.language
         detected_language = self._detect_language(merged_logs)
-        if detected_language == "csharp" and ctx.language != "csharp":
-            ctx.language = "csharp"
+        if detected_language and detected_language != ctx.language:
+            ctx.language = detected_language
             logger.info(
-                "csharp_language_auto_detected",
+                "language_auto_detected",
                 task_id=ctx.task_id,
                 configured_language=configured_language,
+                detected_language=detected_language,
             )
 
         # Phase 2: Deduplicate
@@ -171,9 +195,10 @@ class LogPreprocessStage(PipelineStage):
             domain = gy.get("domain", "")
             branch = gy.get("branch", "")
 
-            # Host context (for C# VM-deployed services)
+            # Host context (for C# VM / container deployed services)
             host = log.get("host", {}) if isinstance(log.get("host"), dict) else {}
-            host_name = host.get("name", "")
+            agent = log.get("agent", {}) if isinstance(log.get("agent"), dict) else {}
+            host_name = host.get("name", "") or agent.get("name", "")
 
             # Kubernetes context (backward compatible)
             k8s = log.get("kubernetes", {})
@@ -293,6 +318,14 @@ class LogPreprocessStage(PipelineStage):
         if _CSHARP_STACK_RE.match(msg):
             return True
 
+        # Go source line continuation (tab-indented path:line, e.g. \t/app/main.go:42)
+        if re.match(r"^\t+/.+?\.go:\d+", msg):
+            return True
+
+        # Python traceback line
+        if re.match(r'^\s*File\s+".+?\.py",\s+line\s+\d+', msg):
+            return True
+
         return False
 
     @staticmethod
@@ -316,9 +349,11 @@ class LogPreprocessStage(PipelineStage):
 
     @staticmethod
     def _detect_language(logs: list[dict]) -> str | None:
-        """Detect strong .NET evidence so default-Java services still get C# analysis."""
+        """Detect language evidence so default-configured services get language-aware analysis."""
         csharp_score = 0
         java_score = 0
+        go_score = 0
+        python_score = 0
         for log in logs[:200]:
             msg = LogPreprocessStage._extract_message(log)
             gy = log.get("gy", {}) if isinstance(log.get("gy"), dict) else {}
@@ -342,21 +377,51 @@ class LogPreprocessStage(PipelineStage):
             if "Caused by:" in msg:
                 java_score += 1
 
-            if csharp_score >= 4 and java_score == 0:
-                return "csharp"
+            # Go detection
+            if re.search(r"(?:^|\s)(?:[\w./-]+\.)\(\*?[A-Za-z_][A-Za-z0-9_]*\)\s*\[", msg):
+                go_score += 3
+            if re.search(r"\bgoroutine\s+\d+\s+\[", msg):
+                go_score += 3
+            if re.search(r"\b(?:github\.com|golang\.org|google\.golang\.org)/", msg):
+                go_score += 2
+            if re.search(r"\.go:\d+\b", msg):
+                go_score += 2
+
+            # Python detection
+            if "Traceback (most recent call last):" in msg:
+                python_score += 3
+            if re.search(r'File\s+".*?\.py",\s+line\s+\d+', msg):
+                python_score += 3
+            if re.search(r"\b(?:TypeError|ValueError|KeyError|AttributeError|ImportError|RuntimeError|ModuleNotFoundError):", msg):
+                python_score += 2
+
+        if csharp_score >= 4 and java_score == 0:
+            return "csharp"
+        if go_score >= 4 and java_score == 0 and csharp_score == 0:
+            return "go"
+        if python_score >= 4 and java_score == 0 and csharp_score == 0:
+            return "python"
 
         return None
 
     @staticmethod
     def _make_dedup_key(msg: str) -> str:
-        """Generate a deduplication key for a log message."""
+        """Generate a deduplication key for a log message, stripping volatile context."""
         if not msg:
             return ""
+        first_line = msg.split("\n")[0].strip()
+        cleaned = _DEDUP_TIMESTAMP_PREFIX_RE.sub("", first_line)
+        cleaned = _DEDUP_THREAD_GOROUTINE_PREFIX_RE.sub("", cleaned)
+        cleaned = _DEDUP_VOLATILE_CONTEXT_RE.sub("", cleaned)
+        cleaned = _DEDUP_UUID_RE.sub("<UUID>", cleaned)
+        cleaned = _DEDUP_HEX_ID_RE.sub("<HEX>", cleaned)
+        cleaned = _DEDUP_DYNAMIC_NUM_RE.sub("<N>", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,-;:[]")
+
         exc_match = _EXCEPTION_CLASS_RE.search(msg)
         if exc_match:
-            first_line = msg.split("\n")[0][:200]
-            return f"{exc_match.group(1)}:{first_line}"
-        return msg[:200]
+            return f"{exc_match.group(1)}:{cleaned[:160]}"
+        return cleaned[:200] or msg[:200]
 
     def _diversity_sample(self, logs: list[dict], max_count: int) -> list[dict]:
         """

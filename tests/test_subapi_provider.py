@@ -50,7 +50,7 @@ async def test_provider_manager_timeout_error_formatting():
         api_base_url="https://aiproxy.example.com",
         default_model="gpt-5.4-mini",
         priority=0,
-        rate_limit_rpm=60,
+        rate_limit_rpm=0,
         is_active=True,
     )
 

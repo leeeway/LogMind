@@ -19,6 +19,7 @@ def _context() -> PipelineContext:
         business_weight=8,
         is_core_path=True,
         min_notify_priority="P1",
+        night_policy="alert",
     )
 
 

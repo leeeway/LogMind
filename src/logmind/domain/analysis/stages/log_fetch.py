@@ -60,12 +60,19 @@ class LogFetchStage(PipelineStage):
             if isinstance(gy, dict):
                 ctx.domain = ctx.domain or gy.get("domain", "")
                 ctx.branch = ctx.branch or gy.get("branch", "")
+                podname = gy.get("podname", "")
+                if not ctx.image_version and podname and "_" in podname:
+                    # GYYX Filebeat often appends version to podname, e.g. "pod_2.0.1.28.704"
+                    ctx.image_version = podname.rsplit("_", 1)[-1]
             image = first_log.get("image", {})
             if isinstance(image, dict):
                 ctx.image_version = ctx.image_version or image.get("version", "")
             host = first_log.get("host", {})
             if isinstance(host, dict):
                 ctx.host_name = ctx.host_name or host.get("name", "")
+            agent = first_log.get("agent", {})
+            if isinstance(agent, dict):
+                ctx.host_name = ctx.host_name or agent.get("name", "")
 
         logger.info("log_fetch_completed", count=ctx.log_count, task_id=ctx.task_id)
         return ctx

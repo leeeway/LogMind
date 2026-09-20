@@ -61,6 +61,15 @@ class TestMaskSensitive:
         result = mask_sensitive(text)
         assert "abc123def456ghi789" not in result
 
+    def test_compound_password_and_salt_masked(self):
+        text = 'SecurityUserInfo(triEncryptPwd=2f1d34500480aa852879e797793bbaeb, biSalt=nioyj92v, userId=2136526)'
+        result = mask_sensitive(text)
+        assert "2f1d34500480aa852879e797793bbaeb" not in result
+        assert "nioyj92v" not in result
+        assert "2136526" not in result
+        assert "triEncryptPwd=" in result
+        assert "biSalt=" in result
+
     # ── Standalone Phone Numbers ────────────────────────
 
     def test_phone_number_masked(self):
