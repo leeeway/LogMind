@@ -7,7 +7,7 @@ import { businessLineApi } from '@/api/services';
 const { Title, Text } = Typography;
 
 const languageLabels: Record<string, string> = {
-  java: 'Java', csharp: 'C#', python: 'Python', go: 'Go', other: '通用',
+  auto: '自动识别', java: 'Java', csharp: 'C#', python: 'Python', go: 'Go', other: '通用',
 };
 
 const BusinessLineList: React.FC = () => {

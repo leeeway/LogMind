@@ -111,6 +111,7 @@ class StageMetric(BaseSchema):
     duration_ms: int = 0
     status: str = "ok"  # ok / skipped / error
     error: str | None = None
+    details: dict = Field(default_factory=dict)
 
 
 class ToolCallRecord(BaseSchema):
@@ -143,3 +144,4 @@ class TaskTraceResponse(BaseSchema):
     errors: list[str] = Field(default_factory=list)
     detection: dict = Field(default_factory=dict)
     notification_state: str = ""
+    diagnostics: dict = Field(default_factory=dict)

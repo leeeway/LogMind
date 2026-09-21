@@ -79,8 +79,8 @@ async def test_live_tail_uses_canonical_warning_filter(monkeypatch):
     clauses = body["query"]["bool"]["must"]
     assert any(
         clause.get("bool", {}).get("should")
-        and {"term": {"gy.filetype.keyword": "warn.log"}}
-        in clause["bool"]["should"]
+        and any({"term": {"gy.filetype.keyword": {"value": "warn.log", "case_insensitive": True}}}
+                in item.get("bool", {}).get("filter", []) for item in clause["bool"]["should"])
         for clause in clauses
     )
     assert any(

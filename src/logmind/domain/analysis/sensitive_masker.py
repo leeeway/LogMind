@@ -16,42 +16,134 @@ Design principles:
   - Idempotent: masking already-masked text produces the same result
 """
 
+import json
 import re
-from functools import lru_cache
 
 from logmind.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+REDACTED = "[REDACTED]"
+_CREDENTIAL_KEY_RE = re.compile(
+    r"(?i)(?:.*(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature).*"
+    r"|sign|session_?id|bearer|jwt|private_?key|authorization|proxy-authorization|cookie|set-cookie)"
+)
+_QUOTED_VALUE = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
+_CREDENTIAL_TEXT_RE = re.compile(
+    r"""(?i)(?<![\w.-])["']?([\w.-]*(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)[\w.-]*"""
+    r"""|sign|session_?id|bearer|jwt|private_?key)["']?\s*[:=]\s*("""
+    + _QUOTED_VALUE
+    + r"|\[REDACTED\]|(?:(?!\s+[\w.-]+\s*[:=])[^,;\r\n}&)\]])+)"
+)
+_HEADER_RE = re.compile(
+    r"(?im)(?<![\w-])(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*"
+    r"[^\r\n]+"
+)
+
+
+def _mask_credentials(text: str) -> str:
+    text = _HEADER_RE.sub(lambda m: m.group(1) + ": " + REDACTED, text)
+
+    def replace(match):
+        return match.group(1) + "=" + REDACTED
+
+    return _CREDENTIAL_TEXT_RE.sub(replace, text)
+
 
 # ── Sensitive key names (case-insensitive, used in key-value pair detection) ──
 # These are generic field names that commonly appear across systems.
 # Derived from real production logs (tong-kernel, interface.security, actionv3).
-_SENSITIVE_KEYS = frozenset({
-    # Authentication tokens & credentials
-    "access_token", "accesstoken", "refresh_token", "refreshtoken",
-    "token", "auth_token", "authtoken", "bearer", "jwt",
-    "session_id", "sessionid", "session_token",
-    "api_key", "apikey", "secret", "secret_key", "secretkey",
-    "app_secret", "appsecret", "client_secret", "clientsecret",
-    "password", "passwd", "pwd", "userpwd", "user_pwd", "loginpwd", "login_pwd",
-    "oldpwd", "newpwd", "triencryptpwd", "encryptpwd", "encrypt_pwd",
-    "salt", "bisalt", "usersalt", "passwordsalt",
-    "sign", "signature", "private_key", "privatekey",
-    # Personal identifiers
-    "phone", "phone_no", "phoneno", "phone_number", "phonenumber",
-    "mobile", "mobile_no", "mobileno", "cellphone", "tel",
-    "id_card", "idcard", "id_number", "idnumber", "identity",
-    "email", "mail", "e_mail",
-    # Account / user identifiers
-    "account", "account_no", "accountno",
-    "user_id", "userid", "member_id", "memberid",
-    "device_id", "deviceid", "device_token", "devicetoken",
-    "unique_id", "uniqueid", "uid", "openid", "unionid",
-    "imei", "imsi", "mac_address", "macaddress",
-    # Financial
-    "bank_card", "bankcard", "card_no", "cardno",
-})
+_SENSITIVE_KEYS = frozenset(
+    {
+        # Authentication tokens & credentials
+        "access_token",
+        "accesstoken",
+        "refresh_token",
+        "refreshtoken",
+        "token",
+        "auth_token",
+        "authtoken",
+        "bearer",
+        "jwt",
+        "session_id",
+        "sessionid",
+        "session_token",
+        "api_key",
+        "apikey",
+        "secret",
+        "secret_key",
+        "secretkey",
+        "app_secret",
+        "appsecret",
+        "client_secret",
+        "clientsecret",
+        "password",
+        "passwd",
+        "pwd",
+        "userpwd",
+        "user_pwd",
+        "loginpwd",
+        "login_pwd",
+        "oldpwd",
+        "newpwd",
+        "triencryptpwd",
+        "encryptpwd",
+        "encrypt_pwd",
+        "salt",
+        "bisalt",
+        "usersalt",
+        "passwordsalt",
+        "sign",
+        "signature",
+        "private_key",
+        "privatekey",
+        # Personal identifiers
+        "phone",
+        "phone_no",
+        "phoneno",
+        "phone_number",
+        "phonenumber",
+        "mobile",
+        "mobile_no",
+        "mobileno",
+        "cellphone",
+        "tel",
+        "id_card",
+        "idcard",
+        "id_number",
+        "idnumber",
+        "identity",
+        "email",
+        "mail",
+        "e_mail",
+        # Account / user identifiers
+        "account",
+        "account_no",
+        "accountno",
+        "user_id",
+        "userid",
+        "member_id",
+        "memberid",
+        "device_id",
+        "deviceid",
+        "device_token",
+        "devicetoken",
+        "unique_id",
+        "uniqueid",
+        "uid",
+        "openid",
+        "unionid",
+        "imei",
+        "imsi",
+        "mac_address",
+        "macaddress",
+        # Financial
+        "bank_card",
+        "bankcard",
+        "card_no",
+        "cardno",
+    }
+)
 
 
 def _mask_value_by_length(value: str) -> str:
@@ -76,28 +168,29 @@ def _mask_value_by_length(value: str) -> str:
 
 
 # ── Phone number format detector (for KV replacer) ──────────
-_PHONE_VALUE_RE = re.compile(r'^1[3-9]\d{9}$')
+_PHONE_VALUE_RE = re.compile(r"^1[3-9]\d{9}$")
 
 
 # ── Pattern 1: Key-Value Pairs ──────────────────────────────
 # Matches: "key":"value", "key": "value", key=value, key: value
 # Works for JSON, log4j MDC, Spring properties, URL params, etc.
 
+
 def _build_kv_pattern() -> re.Pattern:
     """Build a regex that matches any sensitive key followed by its value."""
     # Escape key names and join with alternation
     keys_pattern = "|".join(re.escape(k) for k in sorted(_SENSITIVE_KEYS, key=len, reverse=True))
-    compound_pattern = r'[a-zA-Z0-9_.]*(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)[a-zA-Z0-9_.]*'
+    compound_pattern = r"[a-zA-Z0-9_.]*(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)[a-zA-Z0-9_.]*"
     full_pattern = f"(?:{compound_pattern}|{keys_pattern})"
     return re.compile(
-        r'(?i)'                          # Case-insensitive
-        r'(?:"|\')?' + r''               # Optional quote before key
-        r'(' + full_pattern + r')'       # Group 1: key name
-        r'(?:"|\')?' + r''               # Optional quote after key
-        r'\s*[:=]\s*'                    # Separator (: or =)
-        r'(?:"|\')?' + r''               # Optional quote before value
-        r'([^"\',}\s&\])]{3,})'          # Group 2: value (at least 3 chars, non-delimiter)
-        r'(?:"|\')?' + r'',              # Optional quote after value
+        r"(?i)"  # Case-insensitive
+        r'(?:"|\')?' + r""  # Optional quote before key
+        r"(" + full_pattern + r")"  # Group 1: key name
+        r'(?:"|\')?' + r""  # Optional quote after key
+        r"\s*[:=]\s*"  # Separator (: or =)
+        r'(?:"|\')?' + r""  # Optional quote before value
+        r'([^"\',}\s&\])]{3,})'  # Group 2: value (at least 3 chars, non-delimiter)
+        r'(?:"|\')?' + r"",  # Optional quote after value
     )
 
 
@@ -114,14 +207,21 @@ def _kv_replacer(match: re.Match) -> str:
     """
     full = match.group(0)
     value = match.group(2)
+    if value.startswith("[REDACTED"):
+        return full
 
     # Phone number detection: apply standard phone masking
-    if _PHONE_VALUE_RE.match(value):
+    if _CREDENTIAL_KEY_RE.fullmatch(match.group(1)):
+        masked = REDACTED
+    elif "****" in value or value == REDACTED:
+        masked = value
+    elif _PHONE_VALUE_RE.match(value):
         masked = value[:3] + "****" + value[-4:]
     else:
         masked = _mask_value_by_length(value)
 
-    return full.replace(value, masked, 1)
+    start = match.start(2) - match.start()
+    return full[:start] + masked + full[start + len(value) :]
 
 
 # ── Pattern 2: Standalone Data Formats ──────────────────────
@@ -129,29 +229,29 @@ def _kv_replacer(match: re.Match) -> str:
 
 # Chinese mainland phone numbers: 1[3-9]X-XXXX-XXXX
 _PHONE_RE = re.compile(
-    r'(?<![0-9a-fA-F-])'    # Not preceded by hex/dash (avoid UUID fragments)
-    r'(1[3-9]\d)\d{4}(\d{4})'
-    r'(?![0-9a-fA-F-])'     # Not followed by hex/dash
+    r"(?<![0-9a-fA-F-])"  # Not preceded by hex/dash (avoid UUID fragments)
+    r"(1[3-9]\d)\d{4}(\d{4})"
+    r"(?![0-9a-fA-F-])"  # Not followed by hex/dash
 )
 
 # Chinese ID card numbers: 18 digits (last may be X)
 _IDCARD_RE = re.compile(
-    r'(?<![0-9])'
-    r'(\d{6})\d{8}(\d{3}[0-9Xx])'
-    r'(?![0-9])'
+    r"(?<![0-9])"
+    r"(\d{6})\d{8}(\d{3}[0-9Xx])"
+    r"(?![0-9])"
 )
 
 # Email addresses
 _EMAIL_RE = re.compile(
-    r'([a-zA-Z0-9._%+-]{1,3})[a-zA-Z0-9._%+-]*'
-    r'(@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+    r"([a-zA-Z0-9._%+-]{1,3})[a-zA-Z0-9._%+-]*"
+    r"(@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
 )
 
 # Bank card numbers: 16-19 consecutive digits
 _BANKCARD_RE = re.compile(
-    r'(?<![0-9a-fA-F-])'
-    r'(\d{4})\d{8,11}(\d{4})'
-    r'(?![0-9a-fA-F-])'
+    r"(?<![0-9a-fA-F-])"
+    r"(\d{4})\d{8,11}(\d{4})"
+    r"(?![0-9a-fA-F-])"
 )
 
 # One-time verification codes should never leave the platform in notifications
@@ -167,6 +267,7 @@ _VERIFICATION_CODE_RE = re.compile(
 
 def _verification_code_replacer(match: re.Match) -> str:
     return f"{match.group('label')}******"
+
 
 # IPv4 internal addresses with port (mask the port is unnecessary, but mask IP)
 # We DON'T mask IPs — they have diagnostic value and are not PII.
@@ -189,24 +290,56 @@ def mask_sensitive(text: str) -> str:
     Returns:
         Sanitized text with sensitive values masked
     """
-    if not text or len(text) < 10:
+    if not text:
         return text
 
     try:
-        # Phase 1: Key-value pair masking (highest priority, most precise)
-        result = _KV_PATTERN.sub(_kv_replacer, text)
+        # Parse complete or prefixed JSON before text substitution. Never apply
+        # regexes to serialized JSON: escaped quotes and nested values matter.
+        for start, char in enumerate(text):
+            if char not in "{[":
+                continue
+            try:
+                obj, length = json.JSONDecoder().raw_decode(text[start:])
+            except ValueError:
+                continue
+            if not isinstance(obj, (dict, list)):
+                continue
+
+            def clean(value):
+                if isinstance(value, dict):
+                    return {
+                        k: REDACTED
+                        if _CREDENTIAL_KEY_RE.fullmatch(k)
+                        else _mask_value_by_length(str(v))
+                        if k.lower() in _SENSITIVE_KEYS and v is not None
+                        else clean(v)
+                        for k, v in value.items()
+                    }
+                if isinstance(value, list):
+                    return [clean(v) for v in value]
+                return mask_sensitive(value) if isinstance(value, str) else value
+
+            return (
+                mask_sensitive(text[:start])
+                + json.dumps(clean(obj), ensure_ascii=False)
+                + mask_sensitive(text[start + length :])
+            )
+
+        result = _mask_credentials(text)
+        result = _KV_PATTERN.sub(_kv_replacer, result)
 
         # Phase 2: Standalone phone numbers (not already caught by KV)
-        result = _PHONE_RE.sub(r'\1****\2', result)
+        result = _PHONE_RE.sub(r"\1****\2", result)
 
         # Phase 3: ID card numbers
-        result = _IDCARD_RE.sub(r'\1********\2', result)
+        result = _IDCARD_RE.sub(r"\1********\2", result)
 
         # Phase 4: Email addresses
-        result = _EMAIL_RE.sub(r'\1****\2', result)
+        result = _EMAIL_RE.sub(r"\1****\2", result)
 
         # Phase 5: Bank card numbers (16-19 digits)
-        result = _BANKCARD_RE.sub(r'\1********\2', result)
+        result = _BANKCARD_RE.sub(r"\1********\2", result)
 
         # Phase 6: OTP/dynamic-code values with an explicit semantic label
         result = _VERIFICATION_CODE_RE.sub(_verification_code_replacer, result)
@@ -215,8 +348,8 @@ def mask_sensitive(text: str) -> str:
 
     except Exception as e:
         # Masking failure should NEVER break the pipeline
-        logger.warning("sensitive_mask_error", error=str(e))
-        return text
+        logger.warning("sensitive_mask_error", error=type(e).__name__)
+        return REDACTED
 
 
 def mask_sensitive_bulk(texts: list[str]) -> list[str]:

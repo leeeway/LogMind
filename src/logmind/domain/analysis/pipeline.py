@@ -196,6 +196,11 @@ class AnalysisPipeline:
                     "duration_ms": duration_ms,
                     "status": "ok",
                     "error": None,
+                    "details": {k: ctx.log_metadata[k] for k in (
+                        "normalization_version", "language_conflict", "detected_language",
+                        "configured_language", "instances", "image_versions", "event_evidence",
+                        "fingerprint_mode", "fingerprint_collisions",
+                    ) if k in ctx.log_metadata} if stage.name in {"log_preprocess", "error_fingerprint"} else {},
                 })
                 # Prometheus metrics
                 from logmind.core.metrics import record_stage_duration

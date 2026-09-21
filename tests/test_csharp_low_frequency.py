@@ -137,6 +137,8 @@ async def test_exact_count_above_es_default_cap():
 
 @pytest.mark.asyncio
 async def test_delivery_only_fingerprints_after_success(monkeypatch):
+    monkeypatch.setattr("logmind.domain.analysis.fingerprint_stage.persisted_delivery_records", AsyncMock(return_value={}))
+    monkeypatch.setattr("logmind.domain.analysis.delivery.save_checkpoint", AsyncMock())
     memory = {}
 
     async def get(key):

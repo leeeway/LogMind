@@ -185,6 +185,7 @@ class Settings(BaseSettings):
     analysis_lookback_minutes: int = 10
     analysis_concrete_fault_enabled: bool = True
     analysis_concrete_fault_shadow: bool = True
+    analysis_event_fingerprint_mode: Literal["shadow", "enabled"] = "shadow"
     analysis_patrol_overlap_minutes: int = 2
     analysis_patrol_max_catchup_minutes: int = 60
     pipeline_error_cooldown_minutes: int = 240

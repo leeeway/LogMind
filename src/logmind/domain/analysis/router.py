@@ -220,6 +220,11 @@ async def get_task_trace(task_id: str, session: DBSession, user: CurrentUser):
         errors=errors,
         detection={k: patrol[k] for k in ("trigger", "current_errors", "concrete_faults", "detection_failed", "shadow") if k in patrol},
         notification_state=params.get("delivery", {}).get("state", ""),
+        diagnostics={
+            **{k: v for stage in stages for k, v in stage.details.items()},
+            **{k: v for k, v in params.get("delivery", {}).get("context", {}).get("log_metadata", {}).items()
+               if k in {"dedup_reason", "fingerprint_mode", "fingerprint_collisions"}},
+        },
     )
 
 

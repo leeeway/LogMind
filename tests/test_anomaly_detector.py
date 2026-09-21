@@ -45,8 +45,9 @@ def test_build_severity_filter_includes_java_filetypes():
     severity_filter = AnomalyDetector._build_severity_filter("error")
     should = severity_filter["bool"]["should"]
 
-    assert {"term": {"gy.filetype.keyword": "error.log"}} in should
-    assert {"term": {"gy.filetype.keyword": "warn.log"}} in should
+    fallbacks = [c["bool"] for c in should if "bool" in c]
+    for filename in ("error.log", "warn.log"):
+        assert any({"term": {"gy.filetype.keyword": {"value": filename, "case_insensitive": True}}} in c["filter"] and c["must_not"] for c in fallbacks)
 
 
 def test_build_severity_filter_includes_fatal_for_critical():

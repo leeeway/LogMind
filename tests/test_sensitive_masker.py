@@ -48,7 +48,7 @@ class TestMaskSensitive:
         text = '{"password":"MySecretP@ss123"}'
         result = mask_sensitive(text)
         assert "MySecretP@ss123" not in result
-        assert "****" in result
+        assert "[REDACTED]" in result
 
     def test_log_key_value_masked(self):
         text = 'phone_no=13812345678 uid=user_123456'

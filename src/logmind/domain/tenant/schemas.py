@@ -78,8 +78,8 @@ class BusinessLineCreate(BaseModel):
     severity_threshold: str = Field("error", pattern=r"^(debug|info|warning|error|critical)$")
     language: str = Field(
         "java",
-        pattern=r"^(java|csharp|python|go|other)$",
-        description="Development language: java/csharp/python/go/other. "
+        pattern=r"^(auto|java|csharp|python|go|other)$",
+        description="Development language: auto/java/csharp/python/go/other. "
         "Determines log parsing strategy and stack trace detection.",
     )
     field_mapping: dict = Field(
@@ -116,7 +116,7 @@ class BusinessLineUpdate(BaseModel):
     log_parse_config: dict | None = None
     default_filters: dict | None = None
     severity_threshold: str | None = None
-    language: str | None = Field(None, pattern=r"^(java|csharp|python|go|other)$")
+    language: str | None = Field(None, pattern=r"^(auto|java|csharp|python|go|other)$")
     field_mapping: dict | None = None
     ai_enabled: bool | None = None
     webhook_url: str | None = None
@@ -205,4 +205,3 @@ class DiscoveredIndexResponse(BaseSchema):
     status: str  # pending / confirmed / ignored
     business_line_id: str | None = None
     created_at: datetime
-

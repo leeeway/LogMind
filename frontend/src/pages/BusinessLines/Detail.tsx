@@ -18,7 +18,7 @@ import dayjs from 'dayjs';
 const { Title, Text } = Typography;
 
 const statusColors: Record<string, string> = { completed: '#52c41a', running: '#1677ff', failed: '#ff4d4f', pending: '#8c8c8c' };
-const languageLabels: Record<string, string> = { java: 'Java', csharp: 'C#', python: 'Python', go: 'Go', other: '通用' };
+const languageLabels: Record<string, string> = { auto: '自动识别', java: 'Java', csharp: 'C#', python: 'Python', go: 'Go', other: '通用' };
 const nightPolicyLabels: Record<string, { label: string; color: string }> = {
   always: { label: '始终通知', color: '#ff4d4f' },
   p0_only: { label: '仅 P0', color: '#fa8c16' },

@@ -177,6 +177,11 @@ const TaskDetail: React.FC = () => {
       <Card size="small" style={{ background: 'var(--lm-bg-card)', border: '1px solid var(--lm-border-light)', borderRadius: 12, marginBottom: 16 }}>
         <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 4 }}>
           <Descriptions.Item label="任务类型">{task.task_type}</Descriptions.Item>
+          {trace?.diagnostics?.normalization_version && <Descriptions.Item label="事件归一化">{trace.diagnostics.normalization_version}</Descriptions.Item>}
+          {trace?.diagnostics?.language_conflict && <Descriptions.Item label="语言冲突"><Text type="warning">配置 {trace.diagnostics.configured_language} / 检测 {trace.diagnostics.detected_language}（保留配置）</Text></Descriptions.Item>}
+          {trace?.diagnostics?.image_versions?.length > 0 && <Descriptions.Item label="涉及版本">{trace.diagnostics.image_versions.join('、')}</Descriptions.Item>}
+          {trace?.diagnostics?.fingerprint_mode && <Descriptions.Item label="新指纹">{trace.diagnostics.fingerprint_mode === 'shadow' ? '影子对比' : '已启用'} / 旧键碰撞 {trace.diagnostics.fingerprint_collisions || 0}</Descriptions.Item>}
+          {trace?.diagnostics?.dedup_reason && <Descriptions.Item label="去重依据">{trace.diagnostics.dedup_reason}</Descriptions.Item>}
           {trace?.notification_state && <Descriptions.Item label="通知状态">{deliveryLabels[trace.notification_state] || trace.notification_state}</Descriptions.Item>}
           {trace?.detection?.trigger && <Descriptions.Item label="检测入口">{trace.detection.trigger === 'concrete_exception' ? '低频明确异常' : '数量突增检测'}</Descriptions.Item>}
           {trace?.detection?.current_errors != null && <Descriptions.Item label="检测匹配数">{trace.detection.current_errors}（明确异常 {trace.detection.concrete_faults || 0}）</Descriptions.Item>}

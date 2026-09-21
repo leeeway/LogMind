@@ -150,29 +150,9 @@ async def deliver(task_id):
         data = json.loads(task.query_params or "{}").get("delivery", {})
         if data.get("state") not in {"pending", "failed", "deferred"}:
             return
-        ctx = restore(data["context"])
-        biz = await session.get(BusinessLine, ctx.business_line_id)
-        if not biz or biz.tenant_id != ctx.tenant_id or not biz.is_active or not biz.ai_enabled:
-            await save_checkpoint(ctx, "suppressed")
-            return
-        webhook = biz.webhook_url or ""
-        # Re-evaluate the current policy when sending, including delayed retries.
-        from logmind.domain.analysis.stages.priority_decision import PriorityDecisionStage
-
-        ctx.night_policy, ctx.night_hours = biz.night_policy, biz.night_hours
-        ctx.min_notify_priority = biz.min_notify_priority
-        ctx.business_weight, ctx.is_core_path = biz.business_weight, biz.is_core_path
-        ctx.estimated_dau = biz.estimated_dau
-    await PriorityDecisionStage().execute(ctx)
-    # Re-scoring policy must not change the persisted item order / sent indexes.
-    ctx.alerts_fired = data["context"]["alerts_fired"]
-    if not ctx.priority_decision.get("should_notify"):
-        await save_checkpoint(
-            ctx, "deferred" if ctx.priority_decision.get("delay_until_morning") else "suppressed"
-        )
-        return
+        tenant_id, business_line_id = task.tenant_id, task.business_line_id
     redis = get_redis_client()
-    key = f"logmind:delivery:v2:{ctx.tenant_id}:{ctx.business_line_id}"
+    key = f"logmind:delivery:v2:{tenant_id}:{business_line_id}"
     token = uuid.uuid4().hex
     if not await redis.set(key, token, nx=True, ex=360):
         return
@@ -182,6 +162,25 @@ async def deliver(task_id):
             task = await session.get(LogAnalysisTask, task_id)
             data = json.loads(task.query_params or "{}").get("delivery", {})
         if data.get("state") not in {"pending", "failed", "deferred"}:
+            return
+        ctx = restore(data["context"])
+        if ctx.tenant_id != tenant_id or ctx.business_line_id != business_line_id:
+            raise ValueError("notification checkpoint scope mismatch")
+        async with get_db_context() as session:
+            biz = await session.get(BusinessLine, business_line_id)
+            if not biz or biz.tenant_id != tenant_id or not biz.is_active or not biz.ai_enabled:
+                await save_checkpoint(ctx, "suppressed")
+                return
+            webhook = biz.webhook_url or ""
+            ctx.night_policy, ctx.night_hours = biz.night_policy, biz.night_hours
+            ctx.min_notify_priority = biz.min_notify_priority
+            ctx.business_weight, ctx.is_core_path = biz.business_weight, biz.is_core_path
+            ctx.estimated_dau = biz.estimated_dau
+        from logmind.domain.analysis.stages.priority_decision import PriorityDecisionStage
+        await PriorityDecisionStage().execute(ctx)
+        ctx.alerts_fired = data["context"]["alerts_fired"]
+        if not ctx.priority_decision.get("should_notify"):
+            await save_checkpoint(ctx, "deferred" if ctx.priority_decision.get("delay_until_morning") else "suppressed")
             return
         if await delivered_unchanged(ctx):
             await save_checkpoint(ctx, "duplicate")

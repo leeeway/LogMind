@@ -147,10 +147,17 @@ def build_base_severity_filter(
         for value in level_values:
             severity_should.append({"term": {field: value}})
 
-    # Dedicated Java files are homogeneous enough to identify their level.
-    # Mixed-level C# files are intentionally excluded here.
-    for filetype in _SEVERITY_FILETYPE_MAP.get(normalized, []):
-        severity_should.append({"term": {"gy.filetype.keyword": filetype}})
+    # Filename is a fallback, not authority over an explicit message level.
+    explicit = [{"exists": {"field": field}} for field in ("level", "log.level", "severity", "loglevel")]
+    explicit += [{"match_phrase": {"message": marker}} for marker in (
+        "[ERROR]", "[INFO]", "[DEBUG]", "[WARN]", "[TRACE]", "[FATAL]", "[CRITICAL]",
+        "[ERR]", "[INF]", "[DBG]", "[WRN]", "[FTL]", "[TRC]",
+    )]
+    for filetype in dict.fromkeys(f.lower() for f in _SEVERITY_FILETYPE_MAP.get(normalized, [])):
+        severity_should.append({"bool": {
+            "filter": [{"term": {"gy.filetype.keyword": {"value": filetype, "case_insensitive": True}}}],
+            "must_not": explicit,
+        }})
 
     message_markers = {
         "error": [
@@ -740,9 +747,9 @@ class LogService:
 
         Priority:
           1. Dedicated fields: level, log.level, severity, loglevel
-          2. Java: gy.filetype mapping (error.log → error, etc.)
-          3. C# NLog: parse from message "timestamp [thread] LEVEL Class - msg"
-          4. Bracket format: [ERROR], [WARN], etc. in message
+          2. Inner JSON and message prefix (NLog, brackets, Serilog)
+          3. Case-insensitive filename fallback
+          4. Message keyword fallback
         """
         # 1. Dedicated level fields
         for field in ["level", "log.level", "severity", "loglevel"]:
@@ -756,13 +763,6 @@ class LogService:
                     break
             if val:
                 return _normalize_level(str(val))
-
-        # 2. gy.filetype mapping (only for known single-level files)
-        gy = source.get("gy", {})
-        if isinstance(gy, dict):
-            filetype = gy.get("filetype", "").lower()
-            if filetype in _FILETYPE_LEVEL_MAP:
-                return _FILETYPE_LEVEL_MAP[filetype]
 
         # 3. C# NLog/log4net: parse from message content
         message = source.get("message", "")
@@ -787,7 +787,14 @@ class LogService:
             if match:
                 return _normalize_level(match.group(1))
 
-        # 4. Fallback: log level keywords in message
+        # 4. Filename is used only when structured/message levels are absent.
+        gy = source.get("gy", {})
+        if isinstance(gy, dict):
+            filetype = str(gy.get("filetype") or "").lower()
+            if filetype in _FILETYPE_LEVEL_MAP:
+                return _FILETYPE_LEVEL_MAP[filetype]
+
+        # 5. Fallback: log level keywords in message
         if isinstance(message, str):
             for level, keywords in _SEVERITY_MSG_KEYWORDS.items():
                 for kw in keywords:
@@ -806,51 +813,8 @@ class LogService:
 
     @staticmethod
     def _extract_gy_metadata(source: dict) -> dict:
-        """
-        Extract GYYX business metadata from gy.* fields.
-
-        Common fields (all sites):
-          gy.domain   → site domain name
-          gy.filetype → log file type
-        Java/Go K8s:
-          gy.podname  → pod name with version suffix (e.g. name_2.0.1.28)
-          gy.branch   → code branch (master=prod, develop=test)
-          image.version → container image version
-        Host / VM:
-          host.name or agent.name → machine name (e.g. TM14710, PM0342)
-        """
-        gy = source.get("gy", {})
-        if not isinstance(gy, dict):
-            gy = {}
-
-        image = source.get("image", {})
-        if not isinstance(image, dict):
-            image = {}
-
-        host = source.get("host", {})
-        if not isinstance(host, dict):
-            host = {}
-
-        agent = source.get("agent", {})
-        if not isinstance(agent, dict):
-            agent = {}
-
-        pod_name = gy.get("podname", "")
-        image_version = image.get("version", "")
-        if not image_version and pod_name and "_" in pod_name:
-            # GYYX Filebeat often appends version to podname, e.g. "pod_2.0.1.28.704"
-            image_version = pod_name.rsplit("_", 1)[-1]
-
-        host_name = host.get("name") or agent.get("name", "")
-
-        return {
-            "domain": gy.get("domain", ""),
-            "pod_name": pod_name,
-            "branch": gy.get("branch", ""),
-            "filetype": gy.get("filetype", ""),
-            "image_version": image_version,
-            "host_name": host_name,
-        }
+        from logmind.domain.log.events import metadata
+        return metadata(source)
 
 
 def _normalize_level(raw: str) -> str:

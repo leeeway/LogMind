@@ -26,6 +26,8 @@ def delivery_env(monkeypatch):
         log_metadata={"fingerprint_keys": ["incident-key"]},
     )
     task = SimpleNamespace(
+        tenant_id="tenant",
+        business_line_id="biz",
         query_params=json.dumps(
             {"delivery": {"state": "pending", "sent": [], "context": snapshot(ctx)}}
         ),
@@ -57,6 +59,10 @@ def delivery_env(monkeypatch):
             return task if object_id == "task" else biz
 
     monkeypatch.setattr("logmind.core.database.get_db_context", Session)
+    monkeypatch.setattr(
+        "logmind.domain.analysis.fingerprint_stage.persisted_delivery_records",
+        AsyncMock(return_value={}),
+    )
     memory = {}
 
     async def get(key):
@@ -220,3 +226,97 @@ async def test_old_unsent_two_finding_checkpoint_sends_once(delivery_env, monkey
     await deliver("task")
     assert len(calls) == 1
     assert json.loads(task.query_params)["delivery"]["state"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_cache_write_failure_keeps_durable_delivery_and_suppresses_retry(
+    delivery_env, monkeypatch
+):
+    from logmind.domain.analysis.fingerprint_stage import delivered_unchanged
+
+    task, _, redis, ctx = delivery_env
+    redis.setex = AsyncMock(side_effect=ConnectionError("cache unavailable"))
+
+    async def send(context, webhook, task_id):
+        context.log_metadata["delivery_succeeded"] = True
+
+    monkeypatch.setattr("logmind.domain.analysis.tasks._send_ai_alerts", send)
+    await deliver("task")
+    checkpoint = json.loads(task.query_params)["delivery"]
+    assert checkpoint["state"] == "sent"
+    records = checkpoint["context"]["log_metadata"]["delivered_records"]
+    assert records["incident-key"]["task_id"] == "task"
+    monkeypatch.setattr(
+        "logmind.domain.analysis.fingerprint_stage.persisted_delivery_records",
+        AsyncMock(return_value=records),
+    )
+    ctx.task_id = "next-task"
+    assert await delivered_unchanged(ctx)
+
+
+@pytest.mark.asyncio
+async def test_durable_lookup_failure_does_not_resend(delivery_env, monkeypatch):
+    task, _, _, _ = delivery_env
+    monkeypatch.setattr(
+        "logmind.domain.analysis.fingerprint_stage.persisted_delivery_records",
+        AsyncMock(side_effect=ConnectionError("db unavailable")),
+    )
+    send = AsyncMock()
+    monkeypatch.setattr("logmind.domain.analysis.tasks._send_ai_alerts", send)
+    with pytest.raises(ConnectionError):
+        await deliver("task")
+    send.assert_not_called()
+    assert json.loads(task.query_params)["delivery"]["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_context_is_reloaded_after_lock_acquisition(delivery_env, monkeypatch):
+    task, _, redis, _ = delivery_env
+
+    async def acquire(*args, **kwargs):
+        data = json.loads(task.query_params)
+        data["delivery"]["state"] = "sent"
+        task.query_params = json.dumps(data)
+        return True
+
+    redis.set = acquire
+    send = AsyncMock()
+    monkeypatch.setattr("logmind.domain.analysis.tasks._send_ai_alerts", send)
+    await deliver("task")
+    send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_durable_lookup_ignores_unsent_checkpoints(monkeypatch):
+    from logmind.domain.analysis.fingerprint_stage import persisted_delivery_records
+
+    rows = []
+    for state in ("pending", "failed", "shadow", "sent", "duplicate"):
+        rows.append(
+            json.dumps(
+                {
+                    "delivery": {
+                        "state": state,
+                        "context": {"log_metadata": {"delivered_records": {state: {"count": 1}}}},
+                    }
+                }
+            )
+        )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def scalars(self, query):
+            params = query.compile().params
+            assert "tenant-scope" in params.values()
+            assert "biz-scope" in params.values()
+            assert "completed" in params.values()
+            return SimpleNamespace(all=lambda: rows)
+
+    monkeypatch.setattr("logmind.core.database.get_db_context", Session)
+    ctx = PipelineContext(tenant_id="tenant-scope", business_line_id="biz-scope", task_id="new")
+    assert set(await persisted_delivery_records(ctx)) == {"sent", "duplicate"}

@@ -53,26 +53,22 @@ class LogFetchStage(PipelineStage):
         ctx.log_metadata["matched_count"] = ctx.log_count
         ctx.log_metadata["fetched_count"] = len(ctx.raw_logs)
 
-        # Extract GYYX business context from first log entry
-        if ctx.raw_logs:
-            first_log = ctx.raw_logs[0]
-            gy = first_log.get("gy", {})
-            if isinstance(gy, dict):
-                ctx.domain = ctx.domain or gy.get("domain", "")
-                ctx.branch = ctx.branch or gy.get("branch", "")
-                podname = gy.get("podname", "")
-                if not ctx.image_version and podname and "_" in podname:
-                    # GYYX Filebeat often appends version to podname, e.g. "pod_2.0.1.28.704"
-                    ctx.image_version = podname.rsplit("_", 1)[-1]
-            image = first_log.get("image", {})
-            if isinstance(image, dict):
-                ctx.image_version = ctx.image_version or image.get("version", "")
-            host = first_log.get("host", {})
-            if isinstance(host, dict):
-                ctx.host_name = ctx.host_name or host.get("name", "")
-            agent = first_log.get("agent", {})
-            if isinstance(agent, dict):
-                ctx.host_name = ctx.host_name or agent.get("name", "")
+        # Shared metadata policy; keep rolling-deployment versions per instance.
+        from logmind.domain.log.events import metadata
+        records = [metadata(log) for log in ctx.raw_logs]
+        for attribute, key in (("domain", "domain"), ("branch", "branch"), ("host_name", "host_name")):
+            values = list(dict.fromkeys(r[key] for r in records if r[key]))
+            if not getattr(ctx, attribute) and len(values) == 1:
+                setattr(ctx, attribute, values[0])
+        versions = list(dict.fromkeys(r["image_version"] for r in records if r["image_version"]))
+        ctx.image_version = versions[0] if len(versions) == 1 else ""
+        instances = {}
+        for item in records:
+            key = (item["pod_name"], item["host_name"], item["image_version"])
+            if key not in instances and len(instances) < 100:
+                instances[key] = item
+        ctx.log_metadata["instances"] = list(instances.values())
+        ctx.log_metadata["image_versions"] = versions[:100]
 
         logger.info("log_fetch_completed", count=ctx.log_count, task_id=ctx.task_id)
         return ctx
