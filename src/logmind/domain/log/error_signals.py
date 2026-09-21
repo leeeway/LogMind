@@ -33,6 +33,7 @@ Design principles:
 
 import hashlib
 import time
+from datetime import UTC
 
 from logmind.core.logging import get_logger
 
@@ -73,6 +74,8 @@ INFRA_SIGNALS: list[str] = [
     "UnknownHostException",
     "Name or service not known",
     "Temporary failure in name resolution",
+    "Bad Gateway",
+    "request failed",
 ]
 
 # ── Business failure signals (Chinese) ───────────────────
@@ -136,14 +139,21 @@ EXCEPTION_SIGNALS: list[str] = [
     "AggregateException",
     "End of inner exception stack trace",
     "连接被拒",
+    # Python candidates are validated by the concrete-fault parser before use.
+    "RuntimeError",
+    "TypeError",
+    "ValueError",
+    "AttributeError",
+    "KeyError",
+    "ImportError",
+    "ModuleNotFoundError",
+    "ConnectionError",
+    "TimeoutError",
 ]
 
 # ── Aggregate: all static signals ────────────────────────
 ALL_STATIC_SIGNALS: list[str] = (
-    INFRA_SIGNALS
-    + BUSINESS_FAILURE_SIGNALS
-    + ERROR_CODE_SIGNALS
-    + EXCEPTION_SIGNALS
+    INFRA_SIGNALS + BUSINESS_FAILURE_SIGNALS + ERROR_CODE_SIGNALS + EXCEPTION_SIGNALS
 )
 
 # Backward compatibility alias
@@ -203,7 +213,8 @@ async def store_learned_signal(
     Signals are only loaded into ES queries when they have sufficient
     confidence (>= 0.7), providing a natural quality gate.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from logmind.domain.log.service import log_service
 
     # Skip signals that are too short or already in static list
@@ -216,7 +227,7 @@ async def store_learned_signal(
         await _ensure_learned_index()
         es = log_service.es
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         doc_id = hashlib.md5(signal.encode("utf-8")).hexdigest()
 
         await es.update(
@@ -294,7 +305,10 @@ async def load_learned_signals(business_line_id: str = "") -> list[str]:
             if "403" in err_str or "Authorization" in err_str:
                 logger.info(
                     "learned_signals_index_not_accessible",
-                    hint="ES user lacks permission for logmind-learned-signals index. Using static signals only.",
+                    hint=(
+                        "ES user lacks permission for logmind-learned-signals index. "
+                        "Using static signals only."
+                    ),
                 )
             else:
                 logger.warning("learned_signals_check_failed", error=err_str[:100])
@@ -377,6 +391,7 @@ async def get_all_error_signals(business_line_id: str = "") -> list[str]:
 # ══════════════════════════════════════════════════════════
 #  Negative Learning — Feedback-Driven Signal Downgrade
 # ══════════════════════════════════════════════════════════
+
 
 async def downgrade_learned_signals(source_task_id: str):
     """

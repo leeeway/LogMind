@@ -39,9 +39,14 @@ _HEADER_RE = re.compile(
     r"(?im)(?<![\w-])(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*"
     r"[^\r\n]+"
 )
+_BASIC_AUTH_URL_RE = re.compile(r"(?i)(https?://)([^\s/:@]+):([^\s/@]+)@")
 
 
 def _mask_credentials(text: str) -> str:
+    text = _BASIC_AUTH_URL_RE.sub(
+        lambda m: m.group(1) + REDACTED + ":" + REDACTED + "@",
+        text,
+    )
     text = _HEADER_RE.sub(lambda m: m.group(1) + ": " + REDACTED, text)
 
     def replace(match):
@@ -180,7 +185,11 @@ def _build_kv_pattern() -> re.Pattern:
     """Build a regex that matches any sensitive key followed by its value."""
     # Escape key names and join with alternation
     keys_pattern = "|".join(re.escape(k) for k in sorted(_SENSITIVE_KEYS, key=len, reverse=True))
-    compound_pattern = r"[a-zA-Z0-9_.]*(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)[a-zA-Z0-9_.]*"
+    compound_pattern = (
+        r"[a-zA-Z0-9_.]*"
+        r"(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)"
+        r"[a-zA-Z0-9_.]*"
+    )
     full_pattern = f"(?:{compound_pattern}|{keys_pattern})"
     return re.compile(
         r"(?i)"  # Case-insensitive

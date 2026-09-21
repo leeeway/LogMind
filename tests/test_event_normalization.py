@@ -9,8 +9,31 @@ from logmind.domain.analysis.pipeline import PipelineContext
 from logmind.domain.analysis.sensitive_masker import mask_sensitive
 from logmind.domain.analysis.stages.log_fetch import LogFetchStage
 from logmind.domain.analysis.stages.log_preprocess import LogPreprocessStage
-from logmind.domain.log.events import event_key, metadata
+from logmind.domain.log.error_signals import EXCEPTION_SIGNALS
+from logmind.domain.log.events import event_key, is_concrete_fault, metadata
 from logmind.domain.log.service import LogService, build_base_severity_filter
+
+
+def test_python_exception_classes_use_concrete_fault_channel():
+    for exception in ("RuntimeError", "TypeError", "ValueError", "AttributeError"):
+        assert exception in EXCEPTION_SIGNALS
+
+
+def test_multilanguage_concrete_fault_requires_stack_evidence():
+    assert is_concrete_fault(
+        'Traceback (most recent call last):\n File "service.py", line 12, in run\n'
+        "RuntimeError: failed"
+    )
+    assert is_concrete_fault(
+        r'{"exception":"Traceback (most recent call last):\n '
+        r'File \"service.py\", line 12, in run\nRuntimeError: failed"}'
+    )
+    assert is_concrete_fault(
+        "java.lang.IllegalStateException: failed\n at app.Service.run(Service.java:12)"
+    )
+    assert not is_concrete_fault("INFO retrying after RuntimeError was handled")
+    assert is_concrete_fault("image request failed status_code=502 Bad Gateway")
+    assert not is_concrete_fault("image request failed status_code=400 content rejected")
 
 
 @pytest.mark.parametrize(
@@ -55,6 +78,57 @@ def test_explicit_volatile_context_collapses(a, b):
     assert event_key(a) == event_key(b)
 
 
+def test_production_dynamic_transport_fields_do_not_split_incident():
+    left = (
+        "ERROR upload failed request_id=a client_ip=113.17.22.60 "
+        "file_name=segment-a-99.webm order_id=100"
+    )
+    right = (
+        "ERROR upload failed request_id=b client_ip=180.141.39.253 "
+        "file_name=segment-b-28.webm order_id=200"
+    )
+    assert event_key(left) == event_key(right)
+
+
+def test_endpoint_ip_does_not_split_same_connection_failure_but_port_does():
+    assert event_key("connection refused 101.1.2.3:9150") == event_key(
+        "connection refused 182.9.8.7:9150"
+    )
+    assert event_key("connection refused 101.1.2.3:9150") != event_key(
+        "connection refused 101.1.2.3:3306"
+    )
+
+
+def test_chinese_order_labels_are_normalized():
+    assert event_key("订单号:202609141611128675 交易状态:Fail") == event_key(
+        "订单号:202609141703529262 交易状态:Fail"
+    )
+
+
+def test_runtime_counters_and_ephemeral_source_ports_do_not_split_incident():
+    left = "count=1 max_execution_time=34 read tcp 10.0.0.1:38246->10.0.0.2:8123"
+    right = "count=16 max_execution_time=32 read tcp 10.0.0.3:39999->10.0.0.4:8123"
+    assert event_key(left) == event_key(right)
+
+
+def test_object_storage_keys_keep_file_type_but_not_object_identity():
+    left = "COS failed key=sc/2026/9/14/one-id.webm err=context canceled"
+    right = "COS failed key=sc/2026/9/15/other-id.webm err=context canceled"
+    assert event_key(left) == event_key(right)
+    assert event_key(left) != event_key(
+        "COS failed key=sc/2026/9/15/other-id.jpg err=context canceled"
+    )
+
+
+def test_shard_number_does_not_split_same_table_failure():
+    assert event_key("table=upload_log_shard_17 deadlock") == event_key(
+        "table=upload_log_shard_76 deadlock"
+    )
+    assert event_key("table=upload_log_shard_17 deadlock") != event_key(
+        "table=order_log_shard_17 deadlock"
+    )
+
+
 @pytest.mark.parametrize(
     "text,secrets",
     [
@@ -66,6 +140,10 @@ def test_explicit_volatile_context_collapses(a, b):
         ("Cookie: a=example-one; b=example-two", ["example-one", "example-two"]),
         ("Set-Cookie: sessionid=example-three; Path=/", ["example-three"]),
         ('prefix {"password":"short secret","nested":{"salt":"xy"}}', ["short secret", "xy"]),
+        (
+            "Post http://service-user:service-password@example.internal/path",
+            ["service-user", "service-password"],
+        ),
     ],
 )
 def test_credentials_fully_redacted_and_idempotent(text, secrets):

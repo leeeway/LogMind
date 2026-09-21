@@ -406,10 +406,7 @@ class LogPreprocessStage(PipelineStage):
             return True
 
         # Python traceback line
-        if re.match(r'^\s*File\s+".+?\.py",\s+line\s+\d+', msg):
-            return True
-
-        return False
+        return bool(re.match(r'^\s*File\s+".+?\.py",\s+line\s+\d+', msg))
 
     @staticmethod
     def _message_has_stack(msg: str) -> bool:
@@ -420,13 +417,12 @@ class LogPreprocessStage(PipelineStage):
             return True
         if "Traceback (most recent call last):" in msg or re.search(r"\.go:\d+", msg):
             return True
-        if _EXCEPTION_CLASS_RE.search(msg):
-            if "\n" in msg:
-                for line in msg.split("\n")[1:]:
-                    stripped = line.strip()
-                    for prefix in _STACK_CONTINUATION_PREFIXES:
-                        if stripped.startswith(prefix):
-                            return True
+        if _EXCEPTION_CLASS_RE.search(msg) and "\n" in msg:
+            for line in msg.split("\n")[1:]:
+                stripped = line.strip()
+                for prefix in _STACK_CONTINUATION_PREFIXES:
+                    if stripped.startswith(prefix):
+                        return True
         return False
 
     @staticmethod
@@ -437,12 +433,17 @@ class LogPreprocessStage(PipelineStage):
     @staticmethod
     def _detect_language(logs: list[dict]) -> str | None:
         """Detect language evidence so default-configured services get language-aware analysis."""
+        from logmind.domain.log.service import LogService
+
         csharp_score = 0
         java_score = 0
         go_score = 0
         python_score = 0
         for log in logs[:200]:
-            msg = LogPreprocessStage._extract_message(log)
+            # Language signatures frequently live in the logging prefix
+            # (Go package/receiver, Java logger). The C# renderer intentionally
+            # strips that prefix for prompts, so detection must inspect raw text.
+            msg = LogService._extract_message(log)
             gy = log.get("gy", {}) if isinstance(log.get("gy"), dict) else {}
             filetype = str(gy.get("filetype", "")).lower()
 
@@ -487,7 +488,7 @@ class LogPreprocessStage(PipelineStage):
 
         if csharp_score >= 4 and java_score == 0:
             return "csharp"
-        if go_score >= 4 and java_score == 0 and csharp_score == 0:
+        if go_score >= 3 and java_score == 0 and csharp_score == 0:
             return "go"
         if python_score >= 4 and java_score == 0 and csharp_score == 0:
             return "python"

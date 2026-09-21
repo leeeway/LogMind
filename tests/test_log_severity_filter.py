@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -25,7 +25,9 @@ async def test_csharp_error_filter_never_uses_mixed_filetype_as_error(monkeypatc
     assert "application.log" not in serialized
     assert "error.log" in serialized
     assert "[ERR]" in serialized
-    assert "Unhandled exception" in serialized
+    # Semantic exceptions are handled by the concrete-fault channel; the
+    # volume filter must not count INFO lines merely mentioning exceptions.
+    assert "Unhandled exception" not in serialized
 
 
 @pytest.mark.asyncio
@@ -62,8 +64,8 @@ async def test_log_search_requests_exact_total_hits(monkeypatch):
 
     result = await LogService().search_logs(LogQueryRequest(
         index_pattern="csharp-*",
-        time_from=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
-        time_to=datetime(2026, 6, 28, 11, 0, tzinfo=timezone.utc),
+        time_from=datetime(2026, 6, 28, 10, 0, tzinfo=UTC),
+        time_to=datetime(2026, 6, 28, 11, 0, tzinfo=UTC),
         size=10,
     ))
 

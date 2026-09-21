@@ -12,9 +12,8 @@ Language-aware log parsing:
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 
-from logmind.core.elasticsearch import get_es_client
 from logmind.core.logging import get_logger
 from logmind.domain.log.schemas import (
     ESIndexInfo,
@@ -49,13 +48,18 @@ _FILETYPE_LEVEL_MAP: dict[str, str] = {
 # DataIntegrityViolationException). QualityFilter handles noise.
 _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
     "error": [
-        "error.log", "warn.log",
-        "error.log.txt", "warn.log.txt",
-        "Error.Log.txt", "Warn.Log.txt",
+        "error.log",
+        "warn.log",
+        "error.log.txt",
+        "warn.log.txt",
+        "Error.Log.txt",
+        "Warn.Log.txt",
     ],
     "warning": [
-        "warn.log", "warning.log",
-        "warn.log.txt", "warning.log.txt",
+        "warn.log",
+        "warning.log",
+        "warn.log.txt",
+        "warning.log.txt",
         "Warn.Log.txt",
     ],
     "info": ["info.log", "info.log.txt", "Info.Log.txt"],
@@ -85,7 +89,7 @@ _BRACKET_LEVEL_RE = re.compile(
 # Also:    "2026-04-13 19:09:56,856 [155] ERROR Gyyx.Core..."
 _NLOG_LEVEL_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.\d]*\s+"  # timestamp
-    r"\[[\w\-]+\]\s+"                                       # [thread_id]
+    r"\[[\w\-]+\]\s+"  # [thread_id]
     r"(ERROR|WARN|WARNING|INFO|DEBUG|CRITICAL|FATAL|TRACE)\b",  # LEVEL
     re.IGNORECASE,
 )
@@ -147,33 +151,94 @@ def build_base_severity_filter(
         for value in level_values:
             severity_should.append({"term": {field: value}})
 
+    def keyword_marker(value: str) -> dict:
+        # On a text field match_phrase analyzes punctuation away, so
+        # "[ERROR]" degenerates into the bare token "error".
+        return {
+            "wildcard": {
+                "message.keyword": {
+                    "value": value,
+                    "case_insensitive": True,
+                }
+            }
+        }
+
     # Filename is a fallback, not authority over an explicit message level.
-    explicit = [{"exists": {"field": field}} for field in ("level", "log.level", "severity", "loglevel")]
-    explicit += [{"match_phrase": {"message": marker}} for marker in (
-        "[ERROR]", "[INFO]", "[DEBUG]", "[WARN]", "[TRACE]", "[FATAL]", "[CRITICAL]",
-        "[ERR]", "[INF]", "[DBG]", "[WRN]", "[FTL]", "[TRC]",
-    )]
+    explicit = [
+        {"exists": {"field": field}} for field in ("level", "log.level", "severity", "loglevel")
+    ]
+    explicit += [
+        keyword_marker(marker)
+        for marker in (
+            "*[ERROR]*",
+            "*[INFO]*",
+            "*[DEBUG]*",
+            "*[WARN]*",
+            "*[TRACE]*",
+            "*[FATAL]*",
+            "*[CRITICAL]*",
+            "*[ERR]*",
+            "*[INF]*",
+            "*[DBG]*",
+            "*[WRN]*",
+            "*[FTL]*",
+            "*[TRC]*",
+            "*] ERROR *",
+            "*] INFO *",
+            "*] DEBUG *",
+            "*] WARN *",
+            "*] FATAL *",
+            "ERROR *",
+            "INFO *",
+            "DEBUG *",
+            "WARN *",
+            "FATAL *",
+        )
+    ]
     for filetype in dict.fromkeys(f.lower() for f in _SEVERITY_FILETYPE_MAP.get(normalized, [])):
-        severity_should.append({"bool": {
-            "filter": [{"term": {"gy.filetype.keyword": {"value": filetype, "case_insensitive": True}}}],
-            "must_not": explicit,
-        }})
+        severity_should.append(
+            {
+                "bool": {
+                    "filter": [
+                        {
+                            "term": {
+                                "gy.filetype.keyword": {"value": filetype, "case_insensitive": True}
+                            }
+                        }
+                    ],
+                    "must_not": explicit,
+                }
+            }
+        )
 
     message_markers = {
         "error": [
-            "[ERROR]", "[FATAL]", "[CRITICAL]", "] ERROR ", "] FATAL ",
-            "[ERR]", "[FTL]", "fail:", "crit:", "Exception:",
-            "Caused by:", "Unhandled exception", "InnerException",
-            "Traceback (most recent", "panic:", "产生异常",
+            "*[ERROR]*",
+            "*[FATAL]*",
+            "*[CRITICAL]*",
+            "*] ERROR *",
+            "*] FATAL *",
+            "*[ERR]*",
+            "*[FTL]*",
+            "ERROR *",
+            "FATAL *",
+            "fail:*",
+            "crit:*",
         ],
         "warning": [
-            "[WARN]", "[WARNING]", "] WARN ", "] WARNING ", "[WRN]", "warn:",
+            "*[WARN]*",
+            "*[WARNING]*",
+            "*] WARN *",
+            "*] WARNING *",
+            "*[WRN]*",
+            "WARN *",
+            "warn:*",
         ],
-        "info": ["[INFO]", "] INFO ", "[INF]", "info:"],
-        "debug": ["[DEBUG]", "] DEBUG ", "[DBG]", "dbug:", "[TRACE]", "trce:"],
+        "info": ["*[INFO]*", "*] INFO *", "*[INF]*", "INFO *", "info:*"],
+        "debug": ["*[DEBUG]*", "*] DEBUG *", "*[DBG]*", "DEBUG *", "dbug:*", "*[TRACE]*", "trce:*"],
     }.get(normalized, [])
     for marker in message_markers:
-        severity_should.append({"match_phrase": {"message": marker}})
+        severity_should.append(keyword_marker(marker))
 
     return {
         "bool": {
@@ -195,9 +260,7 @@ async def build_severity_filter(
         from logmind.domain.log.error_signals import get_all_error_signals
 
         for signal in await get_all_error_signals(business_line_id):
-            predicate["bool"]["should"].append(
-                {"match_phrase": {"message": signal}}
-            )
+            predicate["bool"]["should"].append({"match_phrase": {"message": signal}})
     return predicate
 
 
@@ -210,6 +273,7 @@ class LogService:
     @property
     def es(self):
         from logmind.core.elasticsearch import get_es_client
+
         return get_es_client()
 
     async def search_logs(self, request: LogQueryRequest) -> LogQueryResponse:
@@ -226,82 +290,78 @@ class LogService:
         filter_clauses = []
 
         # Time range
-        filter_clauses.append({
-            "range": {
-                "@timestamp": {
-                    "gte": request.time_from.isoformat(),
-                    "lte": request.time_to.isoformat(),
+        filter_clauses.append(
+            {
+                "range": {
+                    "@timestamp": {
+                        "gte": request.time_from.isoformat(),
+                        "lte": request.time_to.isoformat(),
+                    }
                 }
             }
-        })
+        )
 
         # Free text search — use match_phrase for CJK reliability
         # multi_match with phrase_prefix is unreliable for Chinese text
         if request.query:
             escaped_query = _escape_query_string(request.query)
-            must_clauses.append({
-                "bool": {
-                    "should": [
-                        # Strategy 1: match_phrase on message (most reliable for CJK)
-                        {"match_phrase": {"message": request.query}},
-                        # Strategy 2: keyword wildcard when message.keyword exists
-                        {
-                            "wildcard": {
-                                "message.keyword": {
-                                    "value": f"*{request.query}*",
-                                    "case_insensitive": True,
+            must_clauses.append(
+                {
+                    "bool": {
+                        "should": [
+                            # Strategy 1: match_phrase on message (most reliable for CJK)
+                            {"match_phrase": {"message": request.query}},
+                            # Strategy 2: keyword wildcard when message.keyword exists
+                            {
+                                "wildcard": {
+                                    "message.keyword": {
+                                        "value": f"*{request.query}*",
+                                        "case_insensitive": True,
+                                    }
                                 }
-                            }
-                        },
-                        # Strategy 3: escaped query_string wildcard (catches partial matches)
-                        {"query_string": {
-                            "query": f"*{escaped_query}*",
-                            "fields": ["message"],
-                            "analyze_wildcard": True,
-                        }},
-                    ],
-                    "minimum_should_match": 1,
+                            },
+                            # Strategy 3: escaped query_string wildcard (catches partial matches)
+                            {
+                                "query_string": {
+                                    "query": f"*{escaped_query}*",
+                                    "fields": ["message"],
+                                    "analyze_wildcard": True,
+                                }
+                            },
+                        ],
+                        "minimum_should_match": 1,
+                    }
                 }
-            })
+            )
 
         # ── Severity filter — language-aware ─────────────
         if request.severity:
-            filter_clauses.append(await build_severity_filter(
-                request.severity,
-                business_line_id=request.business_line_id or "",
-                language=request.language,
-            ))
+            filter_clauses.append(
+                await build_severity_filter(
+                    request.severity,
+                    business_line_id=request.business_line_id or "",
+                    language=request.language,
+                )
+            )
 
         # K8s metadata filters (backward compatible)
         if request.namespace:
-            filter_clauses.append(
-                {"term": {"kubernetes.namespace": request.namespace}}
-            )
+            filter_clauses.append({"term": {"kubernetes.namespace": request.namespace}})
         if request.pod_name:
-            filter_clauses.append(
-                {"wildcard": {"kubernetes.pod.name": f"*{request.pod_name}*"}}
-            )
+            filter_clauses.append({"wildcard": {"kubernetes.pod.name": f"*{request.pod_name}*"}})
         if request.container_name:
-            filter_clauses.append(
-                {"term": {"kubernetes.container.name": request.container_name}}
-            )
+            filter_clauses.append({"term": {"kubernetes.container.name": request.container_name}})
 
         # GYYX gy.* field filters
         if request.domain:
             if "." in request.domain:
                 # Exact domain like "stage-account-login-service.gyyx.cn"
-                filter_clauses.append(
-                    {"term": {"gy.domain.keyword": request.domain}}
-                )
+                filter_clauses.append({"term": {"gy.domain.keyword": request.domain}})
             else:
                 # Fuzzy domain like "login" — use wildcard
-                filter_clauses.append(
-                    {"wildcard": {"gy.domain.keyword": f"*{request.domain}*"}}
-                )
+                filter_clauses.append({"wildcard": {"gy.domain.keyword": f"*{request.domain}*"}})
         if request.filetype:
-            filter_clauses.append(
-                {"term": {"gy.filetype.keyword": request.filetype}}
-            )
+            filter_clauses.append({"term": {"gy.filetype.keyword": request.filetype}})
 
         # Extra filters from business line config
         for field, value in request.extra_filters.items():
@@ -323,9 +383,7 @@ class LogService:
             "_source": True,
         }
 
-        result = await self.es.search(
-            index=request.index_pattern, body=body
-        )
+        result = await self.es.search(index=request.index_pattern, body=body)
 
         logs = []
         for hit in result["hits"]["hits"]:
@@ -333,22 +391,24 @@ class LogService:
             source["_es_index"] = hit.get("_index", request.index_pattern)
             source["_es_id"] = hit["_id"]
             gy_meta = self._extract_gy_metadata(source)
-            logs.append(LogEntry(
-                id=hit["_id"],
-                timestamp=source.get("@timestamp", ""),
-                level=self._extract_level(source),
-                message=self._extract_message(source),
-                source=source,
-                kubernetes=source.get("kubernetes", {}),
-                raw=source,
-                # GYYX metadata
-                domain=gy_meta.get("domain", ""),
-                pod_name=gy_meta.get("pod_name", ""),
-                branch=gy_meta.get("branch", ""),
-                image_version=gy_meta.get("image_version", ""),
-                filetype=gy_meta.get("filetype", ""),
-                host_name=gy_meta.get("host_name", ""),
-            ))
+            logs.append(
+                LogEntry(
+                    id=hit["_id"],
+                    timestamp=source.get("@timestamp", ""),
+                    level=self._extract_level(source),
+                    message=self._extract_message(source),
+                    source=source,
+                    kubernetes=source.get("kubernetes", {}),
+                    raw=source,
+                    # GYYX metadata
+                    domain=gy_meta.get("domain", ""),
+                    pod_name=gy_meta.get("pod_name", ""),
+                    branch=gy_meta.get("branch", ""),
+                    image_version=gy_meta.get("image_version", ""),
+                    filetype=gy_meta.get("filetype", ""),
+                    host_name=gy_meta.get("host_name", ""),
+                )
+            )
 
         return LogQueryResponse(
             total=result["hits"]["total"]["value"],
@@ -367,25 +427,27 @@ class LogService:
         language: str | None = None,
     ) -> LogStatsResponse:
         """Get log statistics with aggregations."""
-        filters = [{
-            "range": {
-                "@timestamp": {
-                    "gte": time_from.isoformat(),
-                    "lte": time_to.isoformat(),
+        filters = [
+            {
+                "range": {
+                    "@timestamp": {
+                        "gte": time_from.isoformat(),
+                        "lte": time_to.isoformat(),
+                    }
                 }
             }
-        }]
+        ]
         if severity:
-            filters.append(await build_severity_filter(
-                severity,
-                business_line_id=business_line_id,
-                language=language,
-            ))
+            filters.append(
+                await build_severity_filter(
+                    severity,
+                    business_line_id=business_line_id,
+                    language=language,
+                )
+            )
 
         body = {
-            "query": {
-                "bool": {"filter": filters}
-            },
+            "query": {"bool": {"filter": filters}},
             "size": 0,
             "track_total_hits": True,
             "aggs": {
@@ -492,8 +554,8 @@ class LogService:
                         "type": "dense_vector",
                         "dims": vector_dim,
                         "index": True,
-                        "similarity": "cosine"
-                    }
+                        "similarity": "cosine",
+                    },
                 }
             }
             await self.es.indices.create(index=index_name, mappings=mapping)
@@ -503,16 +565,15 @@ class LogService:
     async def insert_chunks(self, index_name: str, chunks: list[dict]):
         """Bulk insert embedding chunks into ES index."""
         from elasticsearch.helpers import async_bulk
-        
-        actions = [
-            {
-                "_index": index_name,
-                "_source": chunk
-            }
-            for chunk in chunks
-        ]
+
+        actions = [{"_index": index_name, "_source": chunk} for chunk in chunks]
         success, failed = await async_bulk(self.es, actions)
-        logger.info("kb_chunks_inserted", index=index_name, success=success, failed=len(failed) if failed else 0)
+        logger.info(
+            "kb_chunks_inserted",
+            index=index_name,
+            success=success,
+            failed=len(failed) if failed else 0,
+        )
         return success
 
     async def knn_search(self, kb_id: str, query_vector: list[float], k: int = 3) -> list[dict]:
@@ -529,20 +590,22 @@ class LogService:
                     "field": "embedding",
                     "query_vector": query_vector,
                     "k": k,
-                    "num_candidates": 100
+                    "num_candidates": 100,
                 },
-                source=["content", "metadata", "doc_id"]
+                source=["content", "metadata", "doc_id"],
             )
             hits = resp.get("hits", {}).get("hits", [])
             results = []
             for hit in hits:
                 source = hit["_source"]
-                results.append({
-                    "score": hit["_score"],
-                    "content": source.get("content"),
-                    "metadata": source.get("metadata"),
-                    "doc_id": source.get("doc_id")
-                })
+                results.append(
+                    {
+                        "score": hit["_score"],
+                        "content": source.get("content"),
+                        "metadata": source.get("metadata"),
+                        "doc_id": source.get("doc_id"),
+                    }
+                )
             return results
         except Exception as e:
             logger.error("knn_search_failed", kb_id=kb_id, error=str(e))
@@ -566,16 +629,16 @@ class LogService:
                         "type": "dense_vector",
                         "dims": vector_dim,
                         "index": True,
-                        "similarity": "cosine"
+                        "similarity": "cosine",
                     },
                     "created_at": {"type": "date"},
                     "ttl_expire_at": {"type": "date"},
                     # ── Known Issue Library fields ──────────
-                    "status": {"type": "keyword"},      # open / resolved / ignored
-                    "hit_count": {"type": "integer"},    # cumulative match count
-                    "first_seen": {"type": "date"},      # first time this issue was seen
-                    "last_seen": {"type": "date"},        # last time this issue was matched
-                    "resolved_at": {"type": "date"},      # when issue was marked resolved
+                    "status": {"type": "keyword"},  # open / resolved / ignored
+                    "hit_count": {"type": "integer"},  # cumulative match count
+                    "first_seen": {"type": "date"},  # first time this issue was seen
+                    "last_seen": {"type": "date"},  # last time this issue was matched
+                    "resolved_at": {"type": "date"},  # when issue was marked resolved
                     "feedback_quality": {"type": "keyword"},  # verified / poor / null
                 }
             }
@@ -614,8 +677,9 @@ class LogService:
             return []
 
         try:
-            from datetime import datetime, timezone
-            now_iso = datetime.now(timezone.utc).isoformat()
+            from datetime import datetime
+
+            now_iso = datetime.now(UTC).isoformat()
 
             resp = await self.es.search(
                 index=index_name,
@@ -636,12 +700,20 @@ class LogService:
                                 {"term": {"status": "ignored"}},
                             ],
                         }
-                    }
+                    },
                 },
                 source=[
-                    "analysis_content", "severity", "error_signature", "task_id",
-                    "created_at", "status", "hit_count", "first_seen", "last_seen",
-                    "resolved_at", "feedback_quality",
+                    "analysis_content",
+                    "severity",
+                    "error_signature",
+                    "task_id",
+                    "created_at",
+                    "status",
+                    "hit_count",
+                    "first_seen",
+                    "last_seen",
+                    "resolved_at",
+                    "feedback_quality",
                 ],
                 min_score=min_score,
             )
@@ -649,21 +721,23 @@ class LogService:
             results = []
             for hit in hits:
                 source = hit["_source"]
-                results.append({
-                    "doc_id": hit["_id"],
-                    "score": hit["_score"],
-                    "analysis_content": source.get("analysis_content", ""),
-                    "severity": source.get("severity", "info"),
-                    "error_signature": source.get("error_signature", ""),
-                    "task_id": source.get("task_id", ""),
-                    "created_at": source.get("created_at", ""),
-                    "status": source.get("status", "open"),
-                    "hit_count": source.get("hit_count", 1),
-                    "first_seen": source.get("first_seen", ""),
-                    "last_seen": source.get("last_seen", ""),
-                    "resolved_at": source.get("resolved_at"),
-                    "feedback_quality": source.get("feedback_quality"),
-                })
+                results.append(
+                    {
+                        "doc_id": hit["_id"],
+                        "score": hit["_score"],
+                        "analysis_content": source.get("analysis_content", ""),
+                        "severity": source.get("severity", "info"),
+                        "error_signature": source.get("error_signature", ""),
+                        "task_id": source.get("task_id", ""),
+                        "created_at": source.get("created_at", ""),
+                        "status": source.get("status", "open"),
+                        "hit_count": source.get("hit_count", 1),
+                        "first_seen": source.get("first_seen", ""),
+                        "last_seen": source.get("last_seen", ""),
+                        "resolved_at": source.get("resolved_at"),
+                        "feedback_quality": source.get("feedback_quality"),
+                    }
+                )
             return results
         except Exception as e:
             logger.error("knn_search_analysis_history_failed", error=str(e))
@@ -676,8 +750,9 @@ class LogService:
         """
         index_name = "logmind-analysis-vectors"
         try:
-            from datetime import datetime, timedelta, timezone
-            now = datetime.now(timezone.utc)
+            from datetime import datetime, timedelta
+
+            now = datetime.now(UTC)
             new_expire = now + timedelta(hours=ttl_hours)
 
             await self.es.update(
@@ -712,20 +787,22 @@ class LogService:
         """
         index_name = "logmind-analysis-vectors"
         try:
-            from datetime import datetime, timezone
+            from datetime import datetime
+
             update_fields = {}
             if status is not None:
                 update_fields["status"] = status
             if status == "resolved":
-                update_fields["resolved_at"] = datetime.now(timezone.utc).isoformat()
+                update_fields["resolved_at"] = datetime.now(UTC).isoformat()
             if feedback_quality is not None:
                 update_fields["feedback_quality"] = feedback_quality
 
             # If verified, extend TTL to 365 days (effectively permanent)
             if feedback_quality == "verified":
                 from datetime import timedelta
+
                 update_fields["ttl_expire_at"] = (
-                    datetime.now(timezone.utc) + timedelta(days=365)
+                    datetime.now(UTC) + timedelta(days=365)
                 ).isoformat()
 
             await self.es.update(
@@ -768,6 +845,7 @@ class LogService:
         message = source.get("message", "")
         if isinstance(message, str):
             from logmind.domain.log.csharp import parse_dotnet
+
             inner_level = parse_dotnet(message).level
             if inner_level:
                 return _normalize_level(inner_level)
@@ -814,6 +892,7 @@ class LogService:
     @staticmethod
     def _extract_gy_metadata(source: dict) -> dict:
         from logmind.domain.log.events import metadata
+
         return metadata(source)
 
 

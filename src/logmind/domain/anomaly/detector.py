@@ -174,8 +174,8 @@ class AnomalyDetector:
 
     async def _concrete_faults(self, es, index, since, until) -> tuple[int, list[dict]]:
         """Page current-window candidates; do not sample away a rare failure."""
-        from logmind.domain.log.csharp import normalized_fault, parse_dotnet
-        from logmind.domain.log.error_signals import EXCEPTION_SIGNALS
+        from logmind.domain.log.error_signals import ALL_STATIC_SIGNALS
+        from logmind.domain.log.events import event_key, is_concrete_fault
 
         query = {
             "bool": {
@@ -184,7 +184,7 @@ class AnomalyDetector:
                     {
                         "bool": {
                             "should": [build_base_severity_filter("error")]
-                            + [{"match_phrase": {"message": s}} for s in EXCEPTION_SIGNALS],
+                            + [{"match_phrase": {"message": s}} for s in ALL_STATIC_SIGNALS],
                             "minimum_should_match": 1,
                         }
                     },
@@ -213,9 +213,9 @@ class AnomalyDetector:
                 for hit in hits:
                     src = hit.get("_source", {})
                     message = src.get("message") or src.get("content") or src.get("msg") or ""
-                    if parse_dotnet(message).concrete_fault:
+                    if is_concrete_fault(message):
                         count += 1
-                        pattern = normalized_fault(message)
+                        pattern = event_key(message)
                         if pattern not in patterns and len(refs) < 20:
                             refs.append({"index": hit.get("_index", index), "id": hit["_id"]})
                             patterns.add(pattern)

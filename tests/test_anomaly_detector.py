@@ -1,6 +1,16 @@
 import pytest
 
 from logmind.domain.anomaly.detector import AnomalyDetector
+from logmind.domain.log.service import build_base_severity_filter
+
+
+def test_severity_message_markers_use_keyword_wildcards_not_analyzed_phrases():
+    predicate = build_base_severity_filter("error")
+    serialized = str(predicate)
+    assert "match_phrase" not in serialized
+    assert "message.keyword" in serialized
+    assert "*[ERROR]*" in serialized
+    assert "Exception:" not in serialized
 
 
 class FakeES:
@@ -35,7 +45,9 @@ async def test_detect_uses_sync_es_client_without_fallback(monkeypatch):
 
     monkeypatch.setattr("logmind.core.elasticsearch.get_es_client", lambda: es)
 
-    result = await AnomalyDetector().detect("service-*", window_minutes=5, severity_threshold="error")
+    result = await AnomalyDetector().detect(
+        "service-*", window_minutes=5, severity_threshold="error"
+    )
 
     assert result.is_anomaly is False
     assert len(es.calls) == 2
@@ -47,7 +59,12 @@ def test_build_severity_filter_includes_java_filetypes():
 
     fallbacks = [c["bool"] for c in should if "bool" in c]
     for filename in ("error.log", "warn.log"):
-        assert any({"term": {"gy.filetype.keyword": {"value": filename, "case_insensitive": True}}} in c["filter"] and c["must_not"] for c in fallbacks)
+        assert any(
+            {"term": {"gy.filetype.keyword": {"value": filename, "case_insensitive": True}}}
+            in c["filter"]
+            and c["must_not"]
+            for c in fallbacks
+        )
 
 
 def test_build_severity_filter_includes_fatal_for_critical():
