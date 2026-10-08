@@ -46,6 +46,7 @@ async def _dispatch_patrols():
 
     from logmind.core.config import get_settings
     from logmind.core.database import get_db_context
+    from logmind.core.redis import get_celery_broker_redis_client, get_redis_client
     from logmind.domain.analysis.models import LogAnalysisTask
     from logmind.domain.tenant.models import BusinessLine
 
@@ -53,8 +54,28 @@ async def _dispatch_patrols():
     now = datetime.now(timezone.utc)
     cooldown = timedelta(minutes=settings.effective_patrol_interval_minutes)
 
+    # 1. Backpressure guard: check alert queue depth on Celery broker
+    try:
+        broker_redis = get_celery_broker_redis_client()
+        queue_len = await broker_redis.llen("alert")
+        max_depth = getattr(settings, "patrol_max_queue_depth", 50)
+        if queue_len >= max_depth:
+            logger.warning(
+                "patrol_dispatch_skipped_queue_backlog",
+                queue="alert",
+                queue_length=queue_len,
+                max_depth=max_depth,
+                action="skip_entire_patrol_cycle",
+            )
+            return
+    except Exception as e:
+        logger.debug("patrol_queue_depth_check_failed", error=str(e))
+
     dispatched = 0
     skipped = 0
+    skipped_inflight = 0
+
+    redis_client = get_redis_client()
 
     async with get_db_context() as session:
         # Get all active business lines
@@ -79,6 +100,18 @@ async def _dispatch_patrols():
                 skipped += 1
                 continue
 
+            # 2. In-flight guard: prevent duplicate queuing if previous task is still waiting or running
+            inflight_key = f"patrol:inflight:{biz.id}"
+            try:
+                ttl = getattr(settings, "patrol_inflight_ttl_seconds", 600)
+                is_new = await redis_client.set(inflight_key, "1", nx=True, ex=ttl)
+                if not is_new:
+                    logger.debug("patrol_inflight_skip", business_line=biz.name, biz_id=biz.id)
+                    skipped_inflight += 1
+                    continue
+            except Exception as e:
+                logger.debug("patrol_inflight_check_failed", error=str(e))
+
             # Dispatch independent patrol task for this business line
             patrol_single_business_line.delay(biz.id)
             dispatched += 1
@@ -88,7 +121,8 @@ async def _dispatch_patrols():
         "scheduled_patrol_dispatcher_done",
         dispatched=dispatched,
         skipped_cooldown=skipped,
-        total_business_lines=dispatched + skipped,
+        skipped_inflight=skipped_inflight,
+        total_business_lines=dispatched + skipped + skipped_inflight,
     )
 
 
@@ -118,6 +152,15 @@ def patrol_single_business_line(self, business_line_id: str):
             error=str(exc),
         )
         raise self.retry(exc=exc)
+    finally:
+        try:
+            from logmind.core.redis import get_redis_client
+            async def _cleanup():
+                client = get_redis_client()
+                await client.delete(f"patrol:inflight:{business_line_id}")
+            run_async(_cleanup())
+        except Exception:
+            pass
 
 
 async def _patrol_single(business_line_id: str):

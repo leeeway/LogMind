@@ -15,6 +15,9 @@ class _FakeSettings:
     analysis_patrol_max_catchup_minutes = 60
     analysis_concrete_fault_enabled = True
     analysis_concrete_fault_shadow = True
+    effective_patrol_interval_minutes = 5
+    patrol_max_queue_depth = 50
+    patrol_inflight_ttl_seconds = 600
 
 
 class _FakeBiz:
@@ -112,3 +115,55 @@ def test_patrol_single_retries_on_connection_reset(monkeypatch):
         alert_tasks.patrol_single_business_line.run.__func__(fake_self, "biz-1")
 
     assert isinstance(retry_called["exc"], ConnectionResetError)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_patrols_skips_when_queue_depth_exceeds_threshold(monkeypatch):
+    class FakeBrokerRedis:
+        async def llen(self, key):
+            return 100  # greater than max_depth 50
+
+    delayed_tasks = []
+    monkeypatch.setattr("logmind.core.config.get_settings", lambda: _FakeSettings())
+    monkeypatch.setattr("logmind.core.redis.get_celery_broker_redis_client", lambda: FakeBrokerRedis())
+    monkeypatch.setattr("logmind.domain.alert.tasks.patrol_single_business_line.delay", lambda biz_id: delayed_tasks.append(biz_id))
+
+    await alert_tasks._dispatch_patrols()
+    assert delayed_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_patrols_skips_when_biz_is_inflight(monkeypatch):
+    class FakeBrokerRedis:
+        async def llen(self, key):
+            return 0
+
+    class FakeRedisClient:
+        async def set(self, key, value, nx=False, ex=None):
+            return False  # Already in flight
+
+    class FakeBizListSession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return False
+        async def execute(self, stmt):
+            class Res:
+                def scalars(self):
+                    return self
+                def all(self):
+                    return [_FakeBiz()]
+                def scalar_one_or_none(self):
+                    return None
+            return Res()
+
+    delayed_tasks = []
+    monkeypatch.setattr("logmind.core.config.get_settings", lambda: _FakeSettings())
+    monkeypatch.setattr("logmind.core.redis.get_celery_broker_redis_client", lambda: FakeBrokerRedis())
+    monkeypatch.setattr("logmind.core.redis.get_redis_client", lambda: FakeRedisClient())
+    monkeypatch.setattr("logmind.core.database.get_db_context", lambda: FakeBizListSession())
+    monkeypatch.setattr("logmind.domain.alert.tasks.patrol_single_business_line.delay", lambda biz_id: delayed_tasks.append(biz_id))
+
+    await alert_tasks._dispatch_patrols()
+    assert delayed_tasks == []
+

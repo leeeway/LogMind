@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     # ── Celery ───────────────────────────────────────────
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
+    patrol_max_queue_depth: int = 50
+    patrol_inflight_ttl_seconds: int = 600
 
     # ── Elasticsearch ────────────────────────────────────
     es_hosts: str = "http://10.14.3.101:9200"
