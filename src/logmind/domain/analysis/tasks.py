@@ -800,31 +800,12 @@ async def _execute_analysis(task_id: str):
     try:
         ctx = await pipeline.run(ctx)
 
-        # Check if fingerprint stage filtered out ALL logs (no new errors)
-        fingerprint_new = ctx.log_metadata.get("fingerprint_new")
-        if ai_enabled and fingerprint_new is not None and fingerprint_new == 0:
-            # All errors were previously analyzed — skip notification
-            logger.info(
-                "task_skipped_all_fingerprinted",
-                task_id=task_id,
-                filtered=ctx.log_metadata.get("fingerprint_filtered", 0),
-            )
-            async with get_db_context() as session:
-                task = await session.get(LogAnalysisTask, task_id)
-                task.status = "completed"
-                task.log_count = ctx.log_count
-                task.token_usage = 0
-                task.completed_at = datetime.now(timezone.utc)
-                task.error_message = (
-                    f"跳过分析: 全部 {ctx.log_metadata.get('fingerprint_filtered', 0)} 条错误"
-                    f"已在近期分析过（指纹去重）"
-                )
-                task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
-                await session.flush()
-            return  # No notification needed
-
         # Check if log quality filter + business noise filter removed ALL logs
-        if ctx.log_count == 0 or not ctx.processed_logs.strip():
+        if (
+            ctx.log_count == 0
+            or not ctx.processed_logs.strip()
+            or ctx.processed_logs == "(No logs found matching the query)"
+        ):
             quality_filtered = ctx.log_metadata.get("quality_filtered", 0)
             noise_filtered = ctx.log_metadata.get("business_noise_filtered", 0)
             noise_categories = ctx.log_metadata.get("business_noise_categories", {})
@@ -860,6 +841,29 @@ async def _execute_analysis(task_id: str):
                 task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
                 await session.flush()
             return  # No real errors, no notification
+
+        # Check if fingerprint stage filtered out ALL logs (no new errors)
+        fingerprint_new = ctx.log_metadata.get("fingerprint_new")
+        if ai_enabled and fingerprint_new is not None and fingerprint_new == 0:
+            # All errors were previously analyzed — skip notification
+            logger.info(
+                "task_skipped_all_fingerprinted",
+                task_id=task_id,
+                filtered=ctx.log_metadata.get("fingerprint_filtered", 0),
+            )
+            async with get_db_context() as session:
+                task = await session.get(LogAnalysisTask, task_id)
+                task.status = "completed"
+                task.log_count = ctx.log_count
+                task.token_usage = 0
+                task.completed_at = datetime.now(timezone.utc)
+                task.error_message = (
+                    f"跳过分析: 全部 {ctx.log_metadata.get('fingerprint_filtered', 0)} 条错误"
+                    f"已在近期分析过（指纹去重）"
+                )
+                task.stage_metrics = json.dumps(ctx.stage_metrics, ensure_ascii=False)
+                await session.flush()
+            return  # No notification needed
 
         if ai_enabled:
             # ── AI mode: update task + send AI alert ──────

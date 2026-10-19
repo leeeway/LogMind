@@ -210,3 +210,33 @@ async def test_scroll_reaches_rare_error_after_10000_candidates():
     count, refs = await AnomalyDetector()._concrete_faults(es, "site", now, now)
     assert count == 1 and refs[0]["id"] == "rare"
     es.clear_scroll.assert_awaited_once_with(scroll_id="s")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "2026-10-19 07:32:10,123 [63] ERROR Gyyx.GameServer.Service.GameService.Game.WenDaoService - System.Exception: 调用问道WebService异常",
+        '2026-10-19 10:00:00,000 [12] ERROR LogModule - {"level":"ERROR","methodName":"OrderService.Save","content":"向数据库记录System.Exception异常失败"}',
+        "2026-10-19 05:39:44,993 [20] ERROR Gyyx.TreasureV3.BLL.AuthorizationBLL - System.ArgumentNullException: Value cannot be null. Parameter name: type at System.Attribute.GetCustomAttributes(MemberInfo element, Type type, Boolean inherit)",
+        "2026-10-19 13:45:27,428 [185] ERROR BeIT.MemCached.ServerPool - Error in Execute<T>: mem20032.wjpt.gyyxdl.cn:20032 System.IO.IOException: Unable to write data ---> System.Net.Sockets.SocketException at System.Net.Sockets.NetworkStream.Write(Byte[] buffer, Int32 offset, Int32 size)",
+        "2026-10-19 13:02:38,977 [42] INFO Gyyx.TreasureV3.Service.SellerService - <log4net.Error>Exception during StringFormat: Index (zero based) must be greater than or equal to zero",
+        "2026-10-19 11:20:00,000 [12] ERROR DefaultExceptionAttribute.OnException - 超时时间已到。在操作完成之前超时时间已过或服务器未响应。",
+        "2026-10-17 19:52:52,147 [8] ERROR Gyyx.Core.DBUtility.DataHelper - 执行错误:INSERT INTO interface_verify_sms_log (login_guid) VALUES ('1')",
+    ],
+)
+def test_live_es_csharp_fault_patterns_detected(message):
+    event = parse_dotnet(message)
+    assert event.concrete_fault
+    assert event.exceptions
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '2026-10-19 14:00:00,000 [10] DEBUG LogModule - {"level":"DEBUG","methodName":"EKeyService.Verify","content":"ErrorCode:ParameterError"}',
+        "2026-10-19 14:00:00,000 [10] INFO DefaultExceptionAttribute.OnException - request completed",
+    ],
+)
+def test_debug_parameter_error_and_method_suffix_not_concrete_fault(message):
+    assert not parse_dotnet(message).concrete_fault
+

@@ -40,6 +40,14 @@ _FILETYPE_LEVEL_MAP: dict[str, str] = {
     "info.log.txt": "info",
     "debug.log.txt": "debug",
     "trace.log.txt": "debug",
+    "error.txt": "error",
+    "log.error.txt": "error",
+    "warn.txt": "warning",
+    "log.warn.txt": "warning",
+    "info.txt": "info",
+    "log.info.txt": "info",
+    "debug.txt": "debug",
+    "log.debug.txt": "debug",
 }
 
 # Reverse mapping for severity → filetype ES filter
@@ -54,6 +62,14 @@ _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
         "warn.log.txt",
         "Error.Log.txt",
         "Warn.Log.txt",
+        "error.txt",
+        "Error.txt",
+        "log.error.txt",
+        "Log.Error.txt",
+        "common\\error.log.txt",
+        "log\\common\\error.log.txt",
+        "common\\warn.log.txt",
+        "log\\common\\warn.log.txt",
     ],
     "warning": [
         "warn.log",
@@ -61,9 +77,36 @@ _SEVERITY_FILETYPE_MAP: dict[str, list[str]] = {
         "warn.log.txt",
         "warning.log.txt",
         "Warn.Log.txt",
+        "warn.txt",
+        "Warn.txt",
+        "log.warn.txt",
+        "Log.Warn.txt",
+        "common\\warn.log.txt",
+        "log\\common\\warn.log.txt",
     ],
-    "info": ["info.log", "info.log.txt", "Info.Log.txt"],
-    "debug": ["debug.log", "trace.log", "debug.log.txt", "Debug.Log.txt"],
+    "info": [
+        "info.log",
+        "info.log.txt",
+        "Info.Log.txt",
+        "info.txt",
+        "Info.txt",
+        "log.info.txt",
+        "Log.Info.txt",
+        "common\\info.log.txt",
+        "log\\common\\info.log.txt",
+    ],
+    "debug": [
+        "debug.log",
+        "trace.log",
+        "debug.log.txt",
+        "Debug.Log.txt",
+        "debug.txt",
+        "Debug.txt",
+        "log.debug.txt",
+        "Log.Debug.txt",
+        "common\\debug.log.txt",
+        "log\\common\\debug.log.txt",
+    ],
 }
 
 # ── C# NLog/log4net filetypes (mixed-level log files) ───
@@ -163,37 +206,12 @@ def build_base_severity_filter(
             }
         }
 
-    # Filename is a fallback, not authority over an explicit message level.
+    # Filename is a fallback when structured level fields are absent.
+    # Avoid putting message.keyword leading-wildcard clauses inside must_not:
+    # 1) message.keyword has ignore_above=256 on live ES indices;
+    # 2) N filetypes * 23 leading wildcards caused 92 regex scans per query and ES timeouts.
     explicit = [
         {"exists": {"field": field}} for field in ("level", "log.level", "severity", "loglevel")
-    ]
-    explicit += [
-        keyword_marker(marker)
-        for marker in (
-            "*[ERROR]*",
-            "*[INFO]*",
-            "*[DEBUG]*",
-            "*[WARN]*",
-            "*[TRACE]*",
-            "*[FATAL]*",
-            "*[CRITICAL]*",
-            "*[ERR]*",
-            "*[INF]*",
-            "*[DBG]*",
-            "*[WRN]*",
-            "*[FTL]*",
-            "*[TRC]*",
-            "*] ERROR *",
-            "*] INFO *",
-            "*] DEBUG *",
-            "*] WARN *",
-            "*] FATAL *",
-            "ERROR *",
-            "INFO *",
-            "DEBUG *",
-            "WARN *",
-            "FATAL *",
-        )
     ]
     for filetype in dict.fromkeys(f.lower() for f in _SEVERITY_FILETYPE_MAP.get(normalized, [])):
         severity_should.append(
@@ -868,7 +886,7 @@ class LogService:
         # 4. Filename is used only when structured/message levels are absent.
         gy = source.get("gy", {})
         if isinstance(gy, dict):
-            filetype = str(gy.get("filetype") or "").lower()
+            filetype = str(gy.get("filetype") or "").lower().replace("\\", "/").rsplit("/", 1)[-1]
             if filetype in _FILETYPE_LEVEL_MAP:
                 return _FILETYPE_LEVEL_MAP[filetype]
 

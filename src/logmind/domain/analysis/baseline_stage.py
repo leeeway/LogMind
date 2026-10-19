@@ -60,6 +60,7 @@ class ErrorBaselineStage(PipelineStage):
         try:
             baseline = await self._compute_baseline(ctx)
             ctx.log_metadata["baseline_error_count"] = baseline
+            ctx.log_metadata["baseline_computed"] = True
 
             logger.info(
                 "error_baseline_computed",
@@ -71,6 +72,7 @@ class ErrorBaselineStage(PipelineStage):
         except Exception as e:
             logger.warning("error_baseline_failed", error=str(e), task_id=ctx.task_id)
             ctx.log_metadata["baseline_error_count"] = 0
+            ctx.log_metadata["baseline_computed"] = False
 
         return ctx
 

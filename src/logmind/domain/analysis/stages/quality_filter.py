@@ -83,11 +83,18 @@ _REAL_ERROR_INDICATORS = [
 ]
 
 _CHINESE_FAULT_KEYWORDS = [
-    "异常", "超时", "连接失败", "连接被拒", "截断",
+    "异常", "超时", "超时时间已到", "连接失败", "连接被拒", "截断",
     "请求失败", "操作失败", "调用失败", "处理失败",
-    "通知失败", "发送失败", "同步失败", "执行失败",
+    "通知失败", "发送失败", "同步失败", "执行失败", "执行错误",
+    "异常失败", "调用异常", "处理异常",
     "服务不可用", "服务异常", "系统异常",
 ]
+
+_EVENT_HEADER_RE = re.compile(
+    r"^\[[^\n\]]+\]\s+\[(?:ERROR|WARN|WARNING|FATAL|CRITICAL|UNKNOWN|INFO|DEBUG)\]",
+    re.MULTILINE,
+)
+_OCCURRENCES_RE = re.compile(r"\[occurrences:(\d+)\]")
 
 
 def _extract_message_level(line: str) -> str | None:
@@ -109,6 +116,11 @@ def _has_real_error_indicator(line: str) -> bool:
     return False
 
 
+def _event_occurrences(item: str) -> int:
+    match = _OCCURRENCES_RE.search(item)
+    return int(match.group(1)) if match else 1
+
+
 class LogQualityFilterStage(PipelineStage):
     """Smart log quality filter — validates message-level severity."""
 
@@ -126,12 +138,19 @@ class LogQualityFilterStage(PipelineStage):
         threshold = (ctx.severity_threshold or "error").upper()
         threshold_rank = _SEVERITY_RANK.get(threshold, 4)
 
+        if _EVENT_HEADER_RE.search(ctx.processed_logs):
+            from logmind.domain.analysis.fingerprint_stage import split_events
+
+            units = split_events(ctx.processed_logs)
+        else:
+            units = ctx.processed_logs.split("\n")
+
         filtered_lines = []
         total_original = 0
         filtered_out = 0
         shallow_error_count = 0
 
-        for line in ctx.processed_logs.split("\n"):
+        for line in units:
             total_original += 1
 
             actual_level = _extract_message_level(line)
@@ -158,7 +177,7 @@ class LogQualityFilterStage(PipelineStage):
                         original_lines=total_original, filtered_out=filtered_out,
                         shallow_errors=shallow_error_count, remaining=len(filtered_lines))
             ctx.processed_logs = "\n".join(filtered_lines)
-            ctx.log_count = len(filtered_lines)
+            ctx.log_count = sum(_event_occurrences(item) for item in filtered_lines if item.strip())
             ctx.log_metadata["quality_filtered"] = filtered_out
             ctx.log_metadata["quality_remaining"] = len(filtered_lines)
             ctx.log_metadata["quality_shallow_errors"] = shallow_error_count
@@ -166,6 +185,7 @@ class LogQualityFilterStage(PipelineStage):
             if not filtered_lines or all(l.strip() == "" for l in filtered_lines):
                 ctx.processed_logs = ""
                 ctx.log_count = 0
+                ctx.log_metadata["all_logs_filtered"] = True
                 logger.info("log_quality_filter_all_removed", task_id=ctx.task_id,
                             reason="All logs were INFO/DEBUG, business noise, or shallow errors")
 
@@ -191,4 +211,4 @@ class LogQualityFilterStage(PipelineStage):
         level = _extract_message_level(line)
         if not level or level != "ERROR":
             return False
-        return not any(p.search(line) for p in _REAL_ERROR_INDICATORS)
+        return not _has_real_error_indicator(line)

@@ -413,7 +413,7 @@ class LogPreprocessStage(PipelineStage):
         """Check if a message contains embedded stack trace content."""
         if not msg:
             return False
-        if re.search(r"\bat\s+[\w.$+`<>]+\([^\n]*?\)", msg):
+        if re.search(r"\bat\s+[\w.$+`<>\[\],]+\([^\n]*?\)", msg):
             return True
         if "Traceback (most recent call last):" in msg or re.search(r"\.go:\d+", msg):
             return True
@@ -445,13 +445,20 @@ class LogPreprocessStage(PipelineStage):
             # strips that prefix for prompts, so detection must inspect raw text.
             msg = LogService._extract_message(log)
             gy = log.get("gy", {}) if isinstance(log.get("gy"), dict) else {}
-            filetype = str(gy.get("filetype", "")).lower()
+            filetype = str(gy.get("filetype", "")).lower().replace("\\", "/").rsplit("/", 1)[-1]
 
-            if filetype in {"sys.log.txt", "sys.log", "app.log.txt"}:
+            if filetype in {"sys.log.txt", "sys.log", "app.log.txt"} or filetype.endswith(".txt"):
                 csharp_score += 2
-            if re.search(r"\bSystem(?:\.[\w`]+)+(?:Exception|Error)\b", msg):
+            if re.search(
+                r"(?<![A-Za-z0-9_])(?:System|Microsoft|Newtonsoft|Gyyx|BeIT|ZooKeeperNet)"
+                r"(?:\.[A-Za-z0-9_`+]+)*(?:\.(?:Exception|Error)|[A-Za-z0-9_`+]+(?:Exception|Error))"
+                r"(?![A-Za-z0-9_])",
+                msg,
+            ):
                 csharp_score += 4
-            if re.search(r"\bat\s+[\w.$+`<>]+\s*(?:\(.*?\))?\s+in\s+.*?\.cs:line\s+\d+", msg):
+            if "LogModule" in msg or "<log4net.Error>" in msg:
+                csharp_score += 3
+            if re.search(r"\bat\s+[\w.$+`<>\[\],]+\s*(?:\(.*?\))?\s+in\s+.*?\.cs:line\s+\d+", msg):
                 csharp_score += 3
             if "--- End of inner exception" in msg or "InnerException" in msg:
                 csharp_score += 3

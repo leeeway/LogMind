@@ -205,6 +205,8 @@ class AnomalyDetector:
         count = 0
         refs = []
         patterns = set()
+        pages = 0
+        max_scroll_pages = 10
         try:
             while True:
                 hits = response.get("hits", {}).get("hits", [])
@@ -219,8 +221,9 @@ class AnomalyDetector:
                         if pattern not in patterns and len(refs) < 20:
                             refs.append({"index": hit.get("_index", index), "id": hit["_id"]})
                             patterns.add(pattern)
-                if not scroll_id:
+                if not scroll_id or pages >= max_scroll_pages:
                     break
+                pages += 1
                 response = await es.scroll(scroll_id=scroll_id, scroll="1m")
                 scroll_id = response.get("_scroll_id", scroll_id)
         finally:

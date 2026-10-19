@@ -162,6 +162,25 @@ class AnalysisPipeline:
     async def run(self, ctx: PipelineContext) -> PipelineContext:
         """Execute all pipeline stages in order, recording per-stage metrics."""
         for stage in self.stages:
+            if (
+                ctx.log_metadata.get("all_logs_filtered")
+                or (
+                    ctx.log_metadata.get("fetched_count") == 0
+                    and ctx.log_count == 0
+                    and stage.name != "log_fetch"
+                )
+            ):
+                logger.info("stage_skipped_no_logs", stage=stage.name, task_id=ctx.task_id)
+                ctx.stage_metrics.append({
+                    "stage": stage.name,
+                    "duration_ms": 0,
+                    "status": "skipped",
+                    "error": None,
+                })
+                from logmind.core.metrics import record_stage_duration
+                record_stage_duration(stage.name, 0, "skipped")
+                continue
+
             # Semantic dedup already populated analysis_results. Re-running the
             # parser sanitizes the reused historical result without reading the
             # empty AI response. Knowledge/prompt/model work is unnecessary.

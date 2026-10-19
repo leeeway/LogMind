@@ -167,3 +167,41 @@ async def test_quality_filter_removes_success_info_and_updates_count():
 
     assert result.processed_logs == ""
     assert result.log_count == 0
+    assert result.log_metadata.get("all_logs_filtered") is True
+
+
+@pytest.mark.asyncio
+async def test_multiline_event_header_not_decapitated_and_occurrences_preserved():
+    stage = LogQualityFilterStage()
+    noisy_info = (
+        "[2026-10-19T06:00:00Z] [INFO] [domain:ekey.module.gyyx.cn] "
+        '{"status": true, "message": "获取成功"}'
+    )
+    multiline_error = (
+        "[2026-10-19T06:00:01Z] [ERROR] [domain:ekey.module.gyyx.cn] [occurrences:25] "
+        "调用http://qiankunsuo.in/cbsite/authsys/api/verify\n"
+        "System.Net.WebException: The remote name could not be resolved: 'qiankunsuo.in'\n"
+        "   at System.Net.HttpWebRequest.GetResponse()"
+    )
+    ctx = PipelineContext(
+        tenant_id="t1",
+        task_id="task-2",
+        business_line_id="biz-1",
+        severity_threshold="error",
+        raw_logs=[{"message": "raw1"}, {"message": "raw2"}],
+        processed_logs=f"{noisy_info}\n{multiline_error}",
+        log_count=26,
+    )
+
+    result = await stage.execute(ctx)
+
+    assert "[occurrences:25]" in result.processed_logs
+    assert "System.Net.WebException" in result.processed_logs
+    assert result.log_count == 25
+
+
+def test_chinese_fault_error_not_treated_as_shallow_error():
+    stage = LogQualityFilterStage()
+    assert stage._is_shallow_error("[ERROR] 超时时间已到。在操作完成之前超时时间已过或服务器未响应。") is False
+    assert stage._is_shallow_error("[ERROR] 执行错误:INSERT INTO interface_verify_sms_log") is False
+

@@ -45,7 +45,10 @@ class PriorityDecisionStage(PipelineStage):
         )
         baseline_errors = ctx.log_metadata.get("baseline_error_count", 0)
         if baseline_errors == 0:
-            baseline_errors = max(current_errors, 1)
+            if ctx.log_metadata.get("baseline_computed"):
+                baseline_errors = 1
+            else:
+                baseline_errors = max(current_errors, 1)
 
         # Self-learning: load historical adjustments
         historical_adj = 0.0
@@ -60,12 +63,28 @@ class PriorityDecisionStage(PipelineStage):
         except Exception as e:
             logger.warning("priority_learning_failed", error=str(e))
 
+        has_concrete_evidence = bool(
+            ctx.has_stack_traces
+            or ctx.log_metadata.get("patrol", {}).get("trigger") == "concrete_exception"
+            or any(item.get("exceptions") for item in ctx.log_metadata.get("event_evidence", []))
+        )
+        effective_min_notify_priority = ctx.min_notify_priority
+        if (
+            (not effective_min_notify_priority or effective_min_notify_priority.lower() == "default")
+            and actionable_results
+            and (
+                ctx.language == "csharp"
+                or (has_concrete_evidence and top_severity in ("critical", "error"))
+            )
+        ):
+            effective_min_notify_priority = "P1"
+
         factors = PriorityFactors(
             ai_severity=top_severity, confidence=top_confidence,
             current_error_count=current_errors, baseline_error_count=baseline_errors,
             business_weight=ctx.business_weight, is_core_path=ctx.is_core_path,
             estimated_dau=ctx.estimated_dau, log_count=current_errors,
-            has_stack_traces=ctx.has_stack_traces,
+            has_stack_traces=ctx.has_stack_traces or has_concrete_evidence,
             unique_error_types=max(len(unique_errors), 1),
             historical_adjustment=historical_adj,
             is_suppressed=is_suppressed, suppression_reason=suppression_reason,
@@ -75,7 +94,7 @@ class PriorityDecisionStage(PipelineStage):
             factors=factors,
             night_policy=ctx.night_policy,
             night_hours=ctx.night_hours,
-            min_notify_priority=ctx.min_notify_priority,
+            min_notify_priority=effective_min_notify_priority,
         )
 
         ctx.priority_decision = {

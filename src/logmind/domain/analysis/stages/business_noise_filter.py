@@ -55,13 +55,25 @@ class BusinessNoiseFilterStage(PipelineStage):
             logger.warning("learned_noise_load_failed", error=str(e))
             learned_rules = []
 
-        # Classify each line
+        # Classify each event (or line when unformatted)
+        from logmind.domain.analysis.stages.quality_filter import (
+            _EVENT_HEADER_RE,
+            _event_occurrences,
+        )
+
+        if _EVENT_HEADER_RE.search(ctx.processed_logs):
+            from logmind.domain.analysis.fingerprint_stage import split_events
+
+            units = split_events(ctx.processed_logs)
+        else:
+            units = ctx.processed_logs.split("\n")
+
         kept_lines = []
         noise_lines = []
         noise_categories: dict[str, int] = {}
         noise_reasons: list[str] = []
 
-        for line in ctx.processed_logs.split("\n"):
+        for line in units:
             stripped = line.strip()
             if not stripped:
                 kept_lines.append(line)
@@ -94,6 +106,7 @@ class BusinessNoiseFilterStage(PipelineStage):
             )
 
             ctx.processed_logs = "\n".join(kept_lines)
+            ctx.log_count = sum(_event_occurrences(item) for item in kept_lines if item.strip())
             ctx.log_metadata["business_noise_filtered"] = noise_count
             ctx.log_metadata["business_noise_categories"] = noise_categories
             ctx.log_metadata["business_noise_reasons"] = noise_reasons[:5]
@@ -102,6 +115,7 @@ class BusinessNoiseFilterStage(PipelineStage):
             if not kept_lines or all(l.strip() == "" for l in kept_lines):
                 ctx.processed_logs = ""
                 ctx.log_count = 0
+                ctx.log_metadata["all_logs_filtered"] = True
                 logger.info(
                     "business_noise_filter_all_removed",
                     task_id=ctx.task_id,

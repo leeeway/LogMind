@@ -28,7 +28,8 @@ def split_events(text: str) -> list[str]:
     return [
         s
         for s in re.split(
-            r"\n(?=\[[^\n\]]+\]\s+\[(?:ERROR|WARN|FATAL|CRITICAL|UNKNOWN|INFO)\])", text
+            r"\n(?=\[[^\n\]]+\]\s+\[(?:ERROR|WARN|WARNING|FATAL|CRITICAL|UNKNOWN|INFO|DEBUG)\])",
+            text,
         )
         if s.strip()
     ]
