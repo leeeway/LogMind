@@ -71,6 +71,12 @@ class OpenAIProvider(BaseProvider):
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com",
+                "X-GitHub-Api-Version": "2025-01-01",
+                "Copilot-Integration-Id": "vscode-chat",
+                "Editor-Version": "vscode/1.100.0",
+                "Editor-Plugin-Version": "copilot/1.300.0",
+                "User-Agent": "GithubCopilot/1.300.0",
             },
             timeout=httpx.Timeout(120.0, connect=10.0),
         )
@@ -87,15 +93,36 @@ class OpenAIProvider(BaseProvider):
                 for m in request.messages
             ]
 
+        model = request.model or self.default_model
         payload = {
-            "model": request.model or self.default_model,
+            "model": model,
             "messages": messages,
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-            "top_p": request.top_p,
             "stream": stream,
+            **getattr(self, "extra_config", {}),
             **request.extra_params,
         }
+
+        # Check for reasoning models (e.g. terra, sol, luna, o1, o3, gpt-6, gpt-5) or gyai.dev
+        is_reasoning_or_modern = any(
+            k in model.lower() for k in ("terra", "sol", "luna", "o1", "o3", "gpt-6", "gpt-5")
+        ) or "gyai.dev" in self.api_base_url
+
+        if is_reasoning_or_modern:
+            if request.max_tokens is not None:
+                payload["max_completion_tokens"] = request.max_tokens
+            if "reasoning_effort" not in payload:
+                payload["reasoning_effort"] = "none"
+            if request.temperature is not None:
+                payload["temperature"] = request.temperature
+            if request.top_p is not None:
+                payload["top_p"] = request.top_p
+        else:
+            if request.temperature is not None:
+                payload["temperature"] = request.temperature
+            if request.max_tokens is not None:
+                payload["max_tokens"] = request.max_tokens
+            if request.top_p is not None:
+                payload["top_p"] = request.top_p
 
         # Add tools for function calling
         if request.tools:
