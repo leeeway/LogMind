@@ -35,13 +35,15 @@ logger = logging.getLogger(__name__)
 
 def _is_retryable_error(exception: BaseException) -> bool:
     """Determine if an error should trigger a retry."""
-    # Network errors are always retryable
+    # Network and transport errors are always retryable
+    # Note: httpx.TransportError covers RemoteProtocolError (peer closed connection midway)
     if isinstance(exception, (
         httpx.ConnectError,
         httpx.ConnectTimeout,
         httpx.ReadTimeout,
         httpx.PoolTimeout,
         httpx.NetworkError,
+        httpx.TransportError,
     )):
         return True
 
