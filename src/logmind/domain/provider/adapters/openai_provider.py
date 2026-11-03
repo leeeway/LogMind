@@ -68,6 +68,7 @@ class OpenAIProvider(BaseProvider):
         **kwargs,
     ):
         super().__init__(api_base_url, api_key, default_model, **kwargs)
+        self.use_responses_api = bool(kwargs.get("use_responses_api", False))
         self._client = httpx.AsyncClient(
             base_url=self.api_base_url,
             headers={
@@ -132,34 +133,153 @@ class OpenAIProvider(BaseProvider):
 
         return payload
 
-    def _get_request_headers(self) -> dict[str, str]:
-        """Hook for subclasses to supply extra per-request headers."""
-        return {}
+    def _build_responses_payload(self, request: ChatRequest, stream: bool = False) -> dict:
+        """
+        Build OpenAI Responses API (/v1/responses) payload.
+        Separates system instructions and tools into top-level parameters
+        to maximize KV-cache prefix hits (e.g. 12-hour prompt cache).
+        """
+        raw_messages = request.extra_params.pop("_raw_messages", None)
+        messages = raw_messages if raw_messages else [
+            {"role": m.role, "content": m.content}
+            for m in request.messages
+        ]
 
-    @retry(
-        retry=retry_if_exception(_is_retryable_error),
-        wait=wait_exponential(multiplier=1.5, min=2, max=15),
-        stop=stop_after_attempt(3),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        reraise=True,
-    )
-    async def chat(self, request: ChatRequest) -> ChatResponse:
-        """Synchronous chat completion (supports function calling)."""
-        payload = self._build_payload(request)
-        headers = self._get_request_headers()
-        resp = await self._client.post(
-            "/v1/chat/completions",
-            json=payload,
-            headers=headers if headers else None,
+        instructions: list[str] = []
+        input_items: list[dict] = []
+
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content")
+            if role == "system":
+                if content:
+                    instructions.append(content)
+            elif role == "assistant":
+                tool_calls = m.get("tool_calls")
+                if tool_calls:
+                    for tc in tool_calls:
+                        call_id = tc.get("id") or tc.get("call_id") or ""
+                        func = tc.get("function", {})
+                        input_items.append({
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": func.get("name", ""),
+                            "arguments": func.get("arguments", "{}"),
+                        })
+                if content:
+                    input_items.append({"role": "assistant", "content": content})
+            elif role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": m.get("tool_call_id", ""),
+                    "output": str(content or ""),
+                })
+            else:
+                if content:
+                    input_items.append({"role": "user", "content": content})
+
+        if len(input_items) == 1 and input_items[0].get("role") == "user" and not input_items[0].get("type"):
+            input_val = input_items[0].get("content", "")
+        else:
+            input_val = input_items
+
+        model = request.model or self.default_model
+        payload = {
+            "model": model,
+            "instructions": "\n\n".join(instructions),
+            "input": input_val,
+            "stream": stream,
+            **getattr(self, "extra_config", {}),
+            **request.extra_params,
+        }
+
+        # Parameter adaptation for /v1/responses
+        if request.max_tokens is not None:
+            payload["max_output_tokens"] = request.max_tokens
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+
+        # Tools formatting for Responses API
+        if request.tools:
+            converted_tools = []
+            for t in request.tools:
+                if "function" in t:
+                    fn = t["function"]
+                    converted_tools.append({
+                        "type": "function",
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {}),
+                    })
+                else:
+                    converted_tools.append(t)
+            payload["tools"] = converted_tools
+
+        return payload
+
+    def _parse_responses_data(self, data: dict, default_model: str) -> ChatResponse:
+        """Parse response payload from /v1/responses endpoint."""
+        content = ""
+        tool_calls = None
+        finish_reason = data.get("status") or "completed"
+
+        for item in data.get("output", []):
+            itype = item.get("type")
+            if itype == "message" or item.get("role") == "assistant":
+                item_content = item.get("content", "")
+                if isinstance(item_content, str):
+                    content += item_content
+                elif isinstance(item_content, list):
+                    for part in item_content:
+                        if isinstance(part, dict):
+                            if part.get("type") == "output_text":
+                                content += part.get("text", "")
+                            elif "text" in part:
+                                content += part["text"]
+                        elif isinstance(part, str):
+                            content += part
+            elif itype == "function_call":
+                if tool_calls is None:
+                    tool_calls = []
+                call_id = item.get("call_id") or item.get("id", "")
+                name = item.get("name", "")
+                args = item.get("arguments", "{}")
+                tool_calls.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args if isinstance(args, str) else json.dumps(args, ensure_ascii=False),
+                    },
+                })
+
+        if not content and "output_text" in data:
+            content = data["output_text"]
+
+        usage_dict = data.get("usage", {})
+        prompt_tokens = usage_dict.get("input_tokens") or usage_dict.get("prompt_tokens", 0)
+        completion_tokens = usage_dict.get("output_tokens") or usage_dict.get("completion_tokens", 0)
+        total_tokens = usage_dict.get("total_tokens", prompt_tokens + completion_tokens)
+
+        return ChatResponse(
+            content=content,
+            model=data.get("model", default_model),
+            usage=TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            ),
+            finish_reason=finish_reason,
+            tool_calls=tool_calls,
+            raw_response=data,
         )
-        resp.raise_for_status()
-        data = resp.json()
 
+    def _parse_chat_completion_data(self, data: dict, default_model: str) -> ChatResponse:
+        """Parse response payload from /v1/chat/completions endpoint."""
         choice = data["choices"][0]
         usage = data.get("usage", {})
         message = choice.get("message", {})
 
-        # Parse tool calls if present
         tool_calls = None
         if message.get("tool_calls"):
             tool_calls = []
@@ -175,7 +295,7 @@ class OpenAIProvider(BaseProvider):
 
         return ChatResponse(
             content=message.get("content") or "",
-            model=data.get("model", request.model or self.default_model),
+            model=data.get("model", default_model),
             usage=TokenUsage(
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
@@ -186,10 +306,83 @@ class OpenAIProvider(BaseProvider):
             raw_response=data,
         )
 
+    def _get_request_headers(self) -> dict[str, str]:
+        """Hook for subclasses to supply extra per-request headers."""
+        return {}
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_error),
+        wait=wait_exponential(multiplier=1.5, min=2, max=15),
+        stop=stop_after_attempt(3),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def chat(self, request: ChatRequest) -> ChatResponse:
+        """Synchronous chat completion (supports function calling)."""
+        headers = self._get_request_headers()
+        model_name = request.model or self.default_model
+
+        if getattr(self, "use_responses_api", False):
+            payload = self._build_responses_payload(request, stream=False)
+            resp = await self._client.post(
+                "/v1/responses",
+                json=payload,
+                headers=headers if headers else None,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "output" in data or "output_text" in data:
+                return self._parse_responses_data(data, model_name)
+            if "choices" in data:
+                return self._parse_chat_completion_data(data, model_name)
+
+        payload = self._build_payload(request)
+        resp = await self._client.post(
+            "/v1/chat/completions",
+            json=payload,
+            headers=headers if headers else None,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return self._parse_chat_completion_data(data, model_name)
+
     async def chat_stream(self, request: ChatRequest) -> AsyncIterator[str]:
         """Streaming chat completion — yields content chunks."""
-        payload = self._build_payload(request, stream=True)
         headers = self._get_request_headers()
+
+        if getattr(self, "use_responses_api", False):
+            payload = self._build_responses_payload(request, stream=True)
+            async with self._client.stream(
+                "POST",
+                "/v1/responses",
+                json=payload,
+                headers=headers if headers else None,
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        if chunk.get("type") == "response.output_text.delta":
+                            if text := chunk.get("delta"):
+                                yield text
+                        else:
+                            content = (
+                                chunk.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content")
+                            )
+                            if content:
+                                yield content
+                    except json.JSONDecodeError:
+                        continue
+            return
+
+        payload = self._build_payload(request, stream=True)
         async with self._client.stream(
             "POST",
             "/v1/chat/completions",
@@ -200,7 +393,7 @@ class OpenAIProvider(BaseProvider):
             async for line in resp.aiter_lines():
                 if not line or not line.startswith("data: "):
                     continue
-                data_str = line[6:]
+                data_str = line[6:].strip()
                 if data_str == "[DONE]":
                     break
                 try:

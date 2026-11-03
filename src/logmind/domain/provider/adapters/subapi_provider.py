@@ -24,8 +24,10 @@ class SubAPIProvider(OpenAIProvider):
         api_base_url: str = "http://subapi.internal",
         api_key: str = "",
         default_model: str = "gpt-5.4-mini",
+        use_responses_api: bool = True,
         **kwargs,
     ):
+        kwargs["use_responses_api"] = use_responses_api
         super().__init__(api_base_url, api_key, default_model, **kwargs)
         # Ensure default client headers identify as official Codex client
         self._client.headers["User-Agent"] = "codex_cli_rs/0.32.0 (Darwin 24.0.0; arm64)"
