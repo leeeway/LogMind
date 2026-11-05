@@ -144,8 +144,8 @@ class OpenAIProvider(BaseProvider):
     def _build_responses_payload(self, request: ChatRequest, stream: bool = False) -> dict:
         """
         Build OpenAI Responses API (/v1/responses) payload.
-        Separates system instructions and tools into top-level parameters
-        to maximize KV-cache prefix hits (e.g. 12-hour prompt cache).
+        Places system instructions into input[0] as role: "system" so gateways
+        (e.g. gyai-gateway prompt_cache) can match cache breakpoints for 12-hour prompt caching.
         """
         raw_messages = request.extra_params.pop("_raw_messages", None)
         messages = raw_messages if raw_messages else [
@@ -154,7 +154,7 @@ class OpenAIProvider(BaseProvider):
         ]
 
         instructions: list[str] = []
-        input_items: list[dict] = []
+        body_items: list[dict] = []
 
         for m in messages:
             role = m.get("role")
@@ -168,23 +168,31 @@ class OpenAIProvider(BaseProvider):
                     for tc in tool_calls:
                         call_id = tc.get("id") or tc.get("call_id") or ""
                         func = tc.get("function", {})
-                        input_items.append({
+                        body_items.append({
                             "type": "function_call",
                             "call_id": call_id,
                             "name": func.get("name", ""),
                             "arguments": func.get("arguments", "{}"),
                         })
                 if content:
-                    input_items.append({"role": "assistant", "content": content})
+                    body_items.append({"role": "assistant", "content": content})
             elif role == "tool":
-                input_items.append({
+                body_items.append({
                     "type": "function_call_output",
                     "call_id": m.get("tool_call_id", ""),
                     "output": str(content or ""),
                 })
             else:
                 if content:
-                    input_items.append({"role": "user", "content": content})
+                    body_items.append({"role": "user", "content": content})
+
+        # To enable explicit prompt caching on gateways like gyai.dev (which matches role: "system"
+        # in the input message list to set 12h cache breakpoints), put instructions as a system
+        # message at the head of input rather than top-level instructions.
+        input_items: list[dict] = []
+        if instructions:
+            input_items.append({"role": "system", "content": "\n\n".join(instructions)})
+        input_items.extend(body_items)
 
         if len(input_items) == 1 and input_items[0].get("role") == "user" and not input_items[0].get("type"):
             input_val = input_items[0].get("content", "")
@@ -196,16 +204,15 @@ class OpenAIProvider(BaseProvider):
         # Filter out internal adapter configuration and parameters unsupported by Responses API
         extra_config = {
             k: v for k, v in getattr(self, "extra_config", {}).items()
-            if k not in ("use_responses_api", "temperature", "top_p")
+            if k not in ("use_responses_api", "temperature", "top_p", "instructions")
         }
         extra_params = {
             k: v for k, v in request.extra_params.items()
-            if k not in ("use_responses_api", "_raw_messages", "temperature", "top_p")
+            if k not in ("use_responses_api", "_raw_messages", "temperature", "top_p", "instructions")
         }
 
         payload = {
             "model": model,
-            "instructions": "\n\n".join(instructions),
             "input": input_val,
             "stream": stream,
             **extra_config,
