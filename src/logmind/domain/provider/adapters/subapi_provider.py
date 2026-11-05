@@ -27,8 +27,8 @@ class SubAPIProvider(OpenAIProvider):
         use_responses_api: bool = True,
         **kwargs,
     ):
-        kwargs["use_responses_api"] = use_responses_api
         super().__init__(api_base_url, api_key, default_model, **kwargs)
+        self.use_responses_api = use_responses_api
         # Ensure default client headers identify as official Codex client
         self._client.headers["User-Agent"] = "codex_cli_rs/0.32.0 (Darwin 24.0.0; arm64)"
         self._client.headers["originator"] = "codex_cli_rs"

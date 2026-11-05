@@ -67,8 +67,8 @@ class OpenAIProvider(BaseProvider):
         default_model: str = "gpt-4o",
         **kwargs,
     ):
+        self.use_responses_api = bool(kwargs.pop("use_responses_api", False))
         super().__init__(api_base_url, api_key, default_model, **kwargs)
-        self.use_responses_api = bool(kwargs.get("use_responses_api", False))
         self._client = httpx.AsyncClient(
             base_url=self.api_base_url,
             headers={
@@ -97,12 +97,20 @@ class OpenAIProvider(BaseProvider):
             ]
 
         model = request.model or self.default_model
+        extra_config = {
+            k: v for k, v in getattr(self, "extra_config", {}).items()
+            if k not in ("use_responses_api",)
+        }
+        extra_params = {
+            k: v for k, v in request.extra_params.items()
+            if k not in ("use_responses_api", "_raw_messages")
+        }
         payload = {
             "model": model,
             "messages": messages,
             "stream": stream,
-            **getattr(self, "extra_config", {}),
-            **request.extra_params,
+            **extra_config,
+            **extra_params,
         }
 
         # Check for reasoning models (e.g. terra, sol, luna, o1, o3, gpt-6, gpt-5) or gyai.dev
@@ -184,20 +192,40 @@ class OpenAIProvider(BaseProvider):
             input_val = input_items
 
         model = request.model or self.default_model
+
+        # Filter out internal adapter configuration and parameters unsupported by Responses API
+        extra_config = {
+            k: v for k, v in getattr(self, "extra_config", {}).items()
+            if k not in ("use_responses_api", "temperature", "top_p")
+        }
+        extra_params = {
+            k: v for k, v in request.extra_params.items()
+            if k not in ("use_responses_api", "_raw_messages", "temperature", "top_p")
+        }
+
         payload = {
             "model": model,
             "instructions": "\n\n".join(instructions),
             "input": input_val,
             "stream": stream,
-            **getattr(self, "extra_config", {}),
-            **request.extra_params,
+            **extra_config,
+            **extra_params,
         }
 
         # Parameter adaptation for /v1/responses
         if request.max_tokens is not None:
             payload["max_output_tokens"] = request.max_tokens
-        if request.temperature is not None:
-            payload["temperature"] = request.temperature
+
+        # Reasoning models (gpt-6.1-terra, o1, etc.) on gyai.dev do not support temperature or top_p
+        is_reasoning_or_modern = any(
+            k in model.lower() for k in ("terra", "sol", "luna", "o1", "o3", "gpt-6", "gpt-5")
+        ) or "gyai.dev" in self.api_base_url
+
+        if not is_reasoning_or_modern:
+            if request.temperature is not None:
+                payload["temperature"] = request.temperature
+            if request.top_p is not None:
+                payload["top_p"] = request.top_p
 
         # Tools formatting for Responses API
         if request.tools:
