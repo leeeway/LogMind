@@ -233,6 +233,41 @@ async def _patrol_single(business_line_id: str):
                 detail=anomaly.detail,
             )
 
+            # ── Smart Patrol Cooldown for Known Routine Noise ──
+            # If this is a routine concrete_exception on a flat baseline (z_score < 2.0),
+            # check if the previous completed task within 60 minutes already verified it as non-alertable.
+            # Safety invariants: Never cool down if z_score >= 2.0 (volume spike), if errors surge,
+            # or if the previous diagnosis was an active alert (should_notify / P0 / P1).
+            if anomaly.trigger == "concrete_exception" and anomaly.z_score < 2.0:
+                is_cooldown, cooldown_reason = await _check_patrol_cooldown(
+                    session=session,
+                    biz=biz,
+                    current_errors=anomaly.current_errors,
+                    cooldown_minutes=60,
+                )
+                if is_cooldown:
+                    logger.info(
+                        "patrol_suppressed_known_noise_cooldown",
+                        business_line=biz.name,
+                        reason=cooldown_reason,
+                        faults=anomaly.concrete_faults,
+                        current_errors=anomaly.current_errors,
+                    )
+                    session.add(LogAnalysisTask(
+                        tenant_id=biz.tenant_id,
+                        business_line_id=biz.id,
+                        task_type="scheduled",
+                        status="completed",
+                        time_from=since,
+                        time_to=now,
+                        query_params=json.dumps({"patrol": metadata, "cooldown_suppressed": True, "reason": cooldown_reason}),
+                        log_count=anomaly.current_errors,
+                        completed_at=now,
+                        error_message=f"巡检跳过：常态业务报错处于冷却期（{cooldown_reason}），上轮诊断无系统故障，免重复调用 AI",
+                    ))
+                    await session.commit()
+                    return
+
             # Create patrol task with anomaly metadata
             task = LogAnalysisTask(
                 tenant_id=biz.tenant_id,
@@ -294,6 +329,74 @@ async def _patrol_single(business_line_id: str):
                 predicted_level=prediction.predicted_level,
                 trend_direction=prediction.trend_direction,
             )
+
+
+async def _check_patrol_cooldown(
+    session,
+    biz,
+    current_errors: int,
+    cooldown_minutes: int = 60,
+) -> tuple[bool, str]:
+    """
+    Check if routine concrete_exception patrol can be safely cooled down.
+
+    Safety invariants (NEVER cool down if):
+    1. Error count surged (> 2.0x of previous task error count).
+    2. The previous task triggered an active alert (should_notify=True or priority='P0'/'P1').
+    3. The cooldown window (e.g. 60m) has elapsed since the last AI diagnosis.
+    4. There was no previous completed task in the window.
+
+    Returns (is_cooldown, reason).
+    """
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import select
+    from logmind.domain.analysis.models import LogAnalysisTask
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
+
+    stmt = (
+        select(LogAnalysisTask)
+        .where(
+            LogAnalysisTask.business_line_id == biz.id,
+            LogAnalysisTask.status == "completed",
+            LogAnalysisTask.token_usage > 0,
+            LogAnalysisTask.completed_at >= cutoff,
+        )
+        .order_by(LogAnalysisTask.completed_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    last_task = result.scalar_one_or_none()
+
+    if not last_task:
+        return False, "no_recent_analysis"
+
+    # Inspect last task outcome
+    qp = {}
+    try:
+        qp = json.loads(last_task.query_params or "{}")
+    except Exception:
+        pass
+
+    delivery = qp.get("delivery", {})
+    decision = delivery.get("context", {}).get("priority_decision", {})
+    should_notify = decision.get("should_notify", False)
+    priority = decision.get("priority", "P2")
+
+    # If previous task triggered a real alert (should_notify or P0/P1), do NOT cool down
+    if should_notify or priority in ("P0", "P1"):
+        return False, f"previous_task_alerted_{priority}"
+
+    # Check for sudden volume surge: if current errors doubled compared to last task
+    last_errors = last_task.log_count or 1
+    if current_errors > max(last_errors * 2, 30):
+        return False, f"error_count_surge_{last_errors}_to_{current_errors}"
+
+    last_comp = last_task.completed_at
+    if last_comp and last_comp.tzinfo is None:
+        last_comp = last_comp.replace(tzinfo=timezone.utc)
+    elapsed_mins = int((datetime.now(timezone.utc) - (last_comp or cutoff)).total_seconds() / 60)
+    return True, f"last_task_{str(last_task.id)[:8]}_non_alertable_{elapsed_mins}m_ago"
 
 
 async def _fire_predictive_alert(biz, prediction, now, session):

@@ -131,14 +131,14 @@ WARN/ERROR/CRITICAL 的异常信号进行完整时序分析；不要只罗列错
   不得未经证据断言响应为空、SDK缺陷、版本冲突或数据库故障。
 - 知识库/历史经验是排查线索而非当前根因证据；引用时注明来源及适用条件。"""
 
-        # Deterministic RAG preload: custom templates do not always reference
-        # ``rag_context``, so ensure retrieved knowledge reaches the model once.
+        # Deterministic RAG preload: inject into user_prompt so that system_prompt
+        # remains 100% stable and byte-identical across all tasks for 12h KV cache hits.
         if (
             ctx.rag_context
             and ctx.rag_context not in ctx.system_prompt
             and ctx.rag_context not in ctx.user_prompt
         ):
-            ctx.system_prompt += (
+            ctx.user_prompt += (
                 "\n\n## 内部知识库预检索结果\n"
                 + ctx.rag_context
             )
@@ -146,12 +146,12 @@ WARN/ERROR/CRITICAL 的异常信号进行完整时序分析；不要只罗列错
             ctx.log_metadata["knowledge_context_injected"] = True
             ctx.log_metadata["knowledge_sources"] = ctx.rag_sources[:10]
 
-        # Inject business line intelligence profile
+        # Inject business line intelligence profile into user_prompt (preserves static system_prompt)
         try:
             from logmind.domain.analysis.business_profile import build_profile_context
             profile = await build_profile_context(ctx.business_line_id)
             if profile:
-                ctx.system_prompt = ctx.system_prompt + "\n\n" + profile
+                ctx.user_prompt = ctx.user_prompt + "\n\n" + profile
                 if "自学习业务画像" not in ctx.rag_sources:
                     ctx.rag_sources.append("自学习业务画像")
                 ctx.log_metadata["business_profile_injected"] = True

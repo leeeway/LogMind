@@ -72,7 +72,107 @@ _DEDUP_DYNAMIC_NUM_RE = re.compile(r"\b\d+\b")
 
 # ── Constants ────────────────────────────────────────────
 MAX_SAMPLED_LOGS = 200
-MAX_PROCESSED_CHARS = 32000
+MAX_PROCESSED_CHARS = 16000
+
+_FRAMEWORK_STACK_PREFIXES = (
+    "org.springframework.",
+    "org.apache.catalina.",
+    "org.apache.tomcat.",
+    "org.apache.coyote.",
+    "org.apache.commons.",
+    "io.netty.",
+    "org.eclipse.jetty.",
+    "java.lang.reflect.",
+    "sun.reflect.",
+    "jdk.internal.",
+    "java.util.concurrent.",
+    "Microsoft.AspNetCore.",
+    "Microsoft.Extensions.",
+    "System.Runtime.",
+    "System.Threading.",
+    "System.Net.",
+    "Newtonsoft.Json.",
+)
+
+
+def _is_framework_frame(line: str) -> bool:
+    stripped = line.strip()
+    if not (stripped.startswith("at ") or stripped.startswith("in ") or stripped.startswith("File ")):
+        return False
+    return any(p in stripped for p in _FRAMEWORK_STACK_PREFIXES)
+
+
+def _fold_stack_trace(msg: str, max_consecutive_framework: int = 2) -> str:
+    """
+    Intelligently fold deep consecutive framework stack frames while preserving:
+    - Exception class and message
+    - Top business code call sites (first 3 frames)
+    - All 'Caused by:' / 'Inner Exception' headers and their top frames
+    - The bottom entry point
+    """
+    if "\n" not in msg or not any(k in msg for k in (" at ", "   at ", "Caused by:", "Traceback")):
+        return msg
+
+    lines = msg.split("\n")
+    if len(lines) <= 8:
+        return msg
+
+    folded = []
+    consecutive_fw = 0
+    in_exception_head = True
+    head_frames_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        is_cause_or_header = (
+            stripped.startswith("Caused by:")
+            or "Exception" in stripped
+            or "Error" in stripped
+            or "--- End of" in stripped
+            or stripped.startswith("Traceback")
+        )
+
+        if is_cause_or_header and not (stripped.startswith("at ") or stripped.startswith("in ")):
+            if consecutive_fw > max_consecutive_framework:
+                folded.append(f"    ... [{consecutive_fw} framework frames omitted] ...")
+            consecutive_fw = 0
+            in_exception_head = True
+            head_frames_count = 0
+            folded.append(line)
+            continue
+
+        is_frame = stripped.startswith("at ") or stripped.startswith("in ") or stripped.startswith("File ")
+        if not is_frame:
+            if consecutive_fw > max_consecutive_framework:
+                folded.append(f"    ... [{consecutive_fw} framework frames omitted] ...")
+            consecutive_fw = 0
+            folded.append(line)
+            continue
+
+        # Stack frame line
+        if in_exception_head:
+            head_frames_count += 1
+            folded.append(line)
+            if head_frames_count >= 3:
+                in_exception_head = False
+            continue
+
+        if _is_framework_frame(line):
+            consecutive_fw += 1
+            if consecutive_fw <= max_consecutive_framework:
+                folded.append(line)
+            continue
+
+        # Business code frame
+        if consecutive_fw > max_consecutive_framework:
+            folded.append(f"    ... [{consecutive_fw} framework frames omitted] ...")
+        consecutive_fw = 0
+        folded.append(line)
+
+    if consecutive_fw > max_consecutive_framework:
+        folded.append(f"    ... [{consecutive_fw} framework frames omitted] ...")
+
+    return "\n".join(folded)
 
 
 def _fit_complete_events(events: list[str], max_chars: int) -> str:
@@ -219,7 +319,9 @@ class LogPreprocessStage(PipelineStage):
         for log in sampled_logs:
             ts = log.get("@timestamp", "")
             level = self._extract_level(log)
-            msg = mask_sensitive(self._extract_message(log))
+            raw_msg = self._extract_message(log)
+            folded_msg = _fold_stack_trace(raw_msg)
+            msg = mask_sensitive(folded_msg)
             item = evidence(log, self._detect_language([log]))
             item.update(groups[self._make_dedup_key(self._extract_message(log))])
             selected_evidence.append(item)
