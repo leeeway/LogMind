@@ -387,9 +387,10 @@ async def _check_patrol_cooldown(
     if should_notify or priority in ("P0", "P1"):
         return False, f"previous_task_alerted_{priority}"
 
-    # Check for sudden volume surge: if current errors doubled compared to last task
-    last_errors = last_task.log_count or 1
-    if current_errors > max(last_errors * 2, 30):
+    # Check for sudden volume surge: if current errors doubled compared to last patrol's raw error count
+    last_patrol = qp.get("patrol", {})
+    last_errors = last_patrol.get("current_errors") or last_task.log_count or 1
+    if current_errors > max(last_errors * 2, 50):
         return False, f"error_count_surge_{last_errors}_to_{current_errors}"
 
     last_comp = last_task.completed_at
