@@ -176,6 +176,7 @@ def build_base_severity_filter(
     severity: str,
     *,
     language: str | None = None,
+    include_message_wildcards: bool = True,
 ) -> dict:
     """Build the static portion of the canonical ES severity predicate."""
     normalized = (severity or "").lower()
@@ -229,34 +230,35 @@ def build_base_severity_filter(
             }
         )
 
-    message_markers = {
-        "error": [
-            "*[ERROR]*",
-            "*[FATAL]*",
-            "*[CRITICAL]*",
-            "*] ERROR *",
-            "*] FATAL *",
-            "*[ERR]*",
-            "*[FTL]*",
-            "ERROR *",
-            "FATAL *",
-            "fail:*",
-            "crit:*",
-        ],
-        "warning": [
-            "*[WARN]*",
-            "*[WARNING]*",
-            "*] WARN *",
-            "*] WARNING *",
-            "*[WRN]*",
-            "WARN *",
-            "warn:*",
-        ],
-        "info": ["*[INFO]*", "*] INFO *", "*[INF]*", "INFO *", "info:*"],
-        "debug": ["*[DEBUG]*", "*] DEBUG *", "*[DBG]*", "DEBUG *", "dbug:*", "*[TRACE]*", "trce:*"],
-    }.get(normalized, [])
-    for marker in message_markers:
-        severity_should.append(keyword_marker(marker))
+    if include_message_wildcards:
+        message_markers = {
+            "error": [
+                "*[ERROR]*",
+                "*[FATAL]*",
+                "*[CRITICAL]*",
+                "*] ERROR *",
+                "*] FATAL *",
+                "*[ERR]*",
+                "*[FTL]*",
+                "ERROR *",
+                "FATAL *",
+                "fail:*",
+                "crit:*",
+            ],
+            "warning": [
+                "*[WARN]*",
+                "*[WARNING]*",
+                "*] WARN *",
+                "*] WARNING *",
+                "*[WRN]*",
+                "WARN *",
+                "warn:*",
+            ],
+            "info": ["*[INFO]*", "*] INFO *", "*[INF]*", "INFO *", "info:*"],
+            "debug": ["*[DEBUG]*", "*] DEBUG *", "*[DBG]*", "DEBUG *", "dbug:*", "*[TRACE]*", "trce:*"],
+        }.get(normalized, [])
+        for marker in message_markers:
+            severity_should.append(keyword_marker(marker))
 
     return {
         "bool": {

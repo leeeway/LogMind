@@ -113,3 +113,10 @@ async def test_concrete_faults_timeout_degrades_gracefully_instead_of_failing_pa
     assert result.is_anomaly is True
     assert result.level == "critical"
 
+
+def test_anomaly_detector_severity_filter_excludes_slow_message_wildcards():
+    severity_filter = AnomalyDetector._build_severity_filter("error")
+    should = severity_filter["bool"]["should"]
+    assert all("wildcard" not in clause for clause in should)
+
+

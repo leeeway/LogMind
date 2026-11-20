@@ -217,12 +217,12 @@ class AnomalyDetector:
                         patterns.add(pattern)
             return count, refs
 
-        # Stage 1: Fast error-severity query (cheap term/keyword filter, no scroll)
+        # Stage 1: Fast error-severity query (structured level/filetype only, no leading wildcards)
         fast_query = {
             "bool": {
                 "filter": [
                     time_range,
-                    build_base_severity_filter("error"),
+                    self._build_severity_filter("error"),
                 ]
             }
         }
@@ -368,8 +368,17 @@ class AnomalyDetector:
 
     @staticmethod
     def _build_severity_filter(severity_threshold: str) -> dict:
-        """Build an ES filter aligned with LogService severity matching."""
-        return build_base_severity_filter(severity_threshold or "error")
+        """
+        Build a fast structured ES filter for anomaly detection & 24h baseline
+        aggregations. Excludes leading-wildcard message.keyword clauses (e.g.
+        *[ERROR]*) that cause O(N) full-index scans and ES timeouts on
+        high-volume indices; unstructured exception detection is handled by
+        _concrete_faults() Stage 2.
+        """
+        return build_base_severity_filter(
+            severity_threshold or "error",
+            include_message_wildcards=False,
+        )
 
 
 # Singleton
