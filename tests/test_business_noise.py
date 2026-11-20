@@ -291,6 +291,31 @@ class TestClassifyLine:
         assert is_noise is True
         assert rule["category"] == "payment_custom"
 
+    def test_custom_forced_pattern_overrides_fault_protection(self):
+        """Explicit force=True custom rule can suppress expected 3rd-party exceptions."""
+        custom = [
+            {
+                "pattern": "qiankunsuo.in",
+                "category": "decommissioned_third_party",
+                "reason": "三方域名已下线，预期失败",
+                "force": True,
+            },
+        ]
+        line = (
+            "[ERROR] System.Net.WebException: 未能解析此远程名称: 'qiankunsuo.in'\n"
+            "  at System.Net.HttpWebRequest.GetResponse()"
+        )
+        # Without force=True, fault protection keeps it
+        is_noise_default, _ = classify_line(
+            line, custom_patterns=[{"pattern": "qiankunsuo.in", "category": "test"}]
+        )
+        assert is_noise_default is False
+
+        # With force=True, operator override filters it out cleanly
+        is_noise_forced, rule = classify_line(line, custom_patterns=custom)
+        assert is_noise_forced is True
+        assert rule["category"] == "decommissioned_third_party"
+
     def test_learned_rules(self):
         """Test AI-learned noise rules."""
         learned = [

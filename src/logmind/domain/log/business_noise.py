@@ -535,6 +535,8 @@ def classify_line(
     Returns: (is_noise: bool, matched_rule: dict | None)
 
     Priority:
+      0. Operator-forced custom patterns (force=True) → explicit per-business-line ignore
+         (e.g. decommissioned 3rd-party domains whose exceptions/stack traces are expected)
       1. Fault protection check → if line has real fault indicators, always non-noise
       2. Static noise patterns → most common, hand-curated
       3. Custom per-business-line patterns → operator-defined
@@ -542,6 +544,14 @@ def classify_line(
 
     This function is the core classifier used by BusinessNoiseFilterStage.
     """
+    # Layer 0: Explicit operator-forced per-business-line ignore rules
+    if custom_patterns:
+        forced_rules = [r for r in custom_patterns if r.get("force") is True]
+        if forced_rules:
+            match = match_custom_noise(line, forced_rules)
+            if match:
+                return True, match
+
     # Safety first: never filter lines with real fault indicators
     if has_fault_protection(line):
         return False, None
