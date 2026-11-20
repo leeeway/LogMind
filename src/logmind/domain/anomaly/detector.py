@@ -141,9 +141,18 @@ class AnomalyDetector:
             )
 
             if inspect_concrete_faults:
-                result.concrete_faults, result.evidence_refs = await self._concrete_faults(
-                    es, index_pattern, window_start, now
-                )
+                try:
+                    result.concrete_faults, result.evidence_refs = await self._concrete_faults(
+                        es, index_pattern, window_start, now
+                    )
+                except Exception as cf_err:
+                    logger.warning(
+                        "concrete_faults_inspection_degraded",
+                        index=index_pattern,
+                        error=f"{type(cf_err).__name__}: {cf_err}",
+                    )
+                    result.concrete_faults = 0
+                    result.evidence_refs = []
                 if result.concrete_faults and not result.is_anomaly:
                     result.is_anomaly = True
                     result.level = "warning"
@@ -173,63 +182,92 @@ class AnomalyDetector:
             )
 
     async def _concrete_faults(self, es, index, since, until) -> tuple[int, list[dict]]:
-        """Page current-window candidates; do not sample away a rare failure."""
-        from logmind.domain.log.error_signals import ALL_STATIC_SIGNALS
+        """
+        Inspect current-window candidates for concrete exceptions without
+        overloading high-volume ES indices.
+
+        Two-stage strategy:
+          1. Fast pass: filter strictly by error severity (keyword/filetype)
+             with bounded size=200 and ES timeout=8s (no scroll).
+          2. Lightweight fallback: only when Pass 1 finds 0 concrete faults,
+             probe high-confidence exception/infra phrases (timeout=6s, size=100)
+             to catch stack traces logged at info/debug level.
+        """
+        from logmind.domain.log.error_signals import EXCEPTION_SIGNALS, INFRA_SIGNALS
         from logmind.domain.log.events import event_key, is_concrete_fault
 
-        query = {
+        time_range = {"range": {"@timestamp": {"gte": since.isoformat(), "lt": until.isoformat()}}}
+
+        def _collect_faults(hits: list[dict]) -> tuple[int, list[dict]]:
+            count = 0
+            refs: list[dict] = []
+            patterns: set[str] = set()
+            for hit in hits:
+                src = hit.get("_source", {})
+                message = src.get("message") or src.get("content") or src.get("msg") or ""
+                if is_concrete_fault(message):
+                    count += 1
+                    pattern = event_key(message)
+                    if pattern not in patterns and len(refs) < 20:
+                        refs.append({
+                            "index": hit.get("_index", index),
+                            "id": hit["_id"],
+                            "key": pattern,
+                        })
+                        patterns.add(pattern)
+            return count, refs
+
+        # Stage 1: Fast error-severity query (cheap term/keyword filter, no scroll)
+        fast_query = {
             "bool": {
                 "filter": [
-                    {"range": {"@timestamp": {"gte": since.isoformat(), "lt": until.isoformat()}}},
-                    {
-                        "bool": {
-                            "should": [build_base_severity_filter("error")]
-                            + [{"match_phrase": {"message": s}} for s in ALL_STATIC_SIGNALS],
-                            "minimum_should_match": 1,
-                        }
-                    },
+                    time_range,
+                    build_base_severity_filter("error"),
                 ]
             }
         }
         response = await es.search(
             index=index,
             body={
-                "size": 500,
-                "query": query,
-                "sort": ["_doc"],
+                "size": 200,
+                "timeout": "8s",
+                "query": fast_query,
+                "sort": [{"@timestamp": {"order": "desc"}}],
                 "_source": ["message", "content", "msg"],
             },
-            scroll="1m",
         )
-        scroll_id = response.get("_scroll_id")
-        count = 0
-        refs = []
-        patterns = set()
-        pages = 0
-        max_scroll_pages = 10
-        try:
-            while True:
-                hits = response.get("hits", {}).get("hits", [])
-                if not hits:
-                    break
-                for hit in hits:
-                    src = hit.get("_source", {})
-                    message = src.get("message") or src.get("content") or src.get("msg") or ""
-                    if is_concrete_fault(message):
-                        count += 1
-                        pattern = event_key(message)
-                        if pattern not in patterns and len(refs) < 20:
-                            refs.append({"index": hit.get("_index", index), "id": hit["_id"]})
-                            patterns.add(pattern)
-                if not scroll_id or pages >= max_scroll_pages:
-                    break
-                pages += 1
-                response = await es.scroll(scroll_id=scroll_id, scroll="1m")
-                scroll_id = response.get("_scroll_id", scroll_id)
-        finally:
-            if scroll_id:
-                await es.clear_scroll(scroll_id=scroll_id)
-        return count, refs
+        hits = response.get("hits", {}).get("hits", [])
+        count, refs = _collect_faults(hits)
+        if count > 0:
+            return count, refs
+
+        # Stage 2: Lightweight phrase probe for exceptions logged in info/debug files
+        focused_signals = EXCEPTION_SIGNALS + INFRA_SIGNALS[:12]
+        fallback_query = {
+            "bool": {
+                "filter": [
+                    time_range,
+                    {
+                        "bool": {
+                            "should": [{"match_phrase": {"message": s}} for s in focused_signals],
+                            "minimum_should_match": 1,
+                        }
+                    },
+                ]
+            }
+        }
+        fb_response = await es.search(
+            index=index,
+            body={
+                "size": 100,
+                "timeout": "6s",
+                "query": fallback_query,
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "_source": ["message", "content", "msg"],
+            },
+        )
+        fb_hits = fb_response.get("hits", {}).get("hits", [])
+        return _collect_faults(fb_hits)
 
     async def _count_errors(
         self,

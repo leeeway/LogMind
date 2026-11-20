@@ -243,6 +243,7 @@ async def _patrol_single(business_line_id: str):
                     session=session,
                     biz=biz,
                     current_errors=anomaly.current_errors,
+                    current_evidence_refs=anomaly.evidence_refs,
                     cooldown_minutes=60,
                 )
                 if is_cooldown:
@@ -335,6 +336,7 @@ async def _check_patrol_cooldown(
     session,
     biz,
     current_errors: int,
+    current_evidence_refs: list[dict] | None = None,
     cooldown_minutes: int = 60,
 ) -> tuple[bool, str]:
     """
@@ -342,9 +344,11 @@ async def _check_patrol_cooldown(
 
     Safety invariants (NEVER cool down if):
     1. Error count surged (> 2.0x of previous task error count).
-    2. The previous task triggered an active alert (should_notify=True or priority='P0'/'P1').
-    3. The cooldown window (e.g. 60m) has elapsed since the last AI diagnosis.
-    4. There was no previous completed task in the window.
+    2. A brand-new exception fingerprint (event_key) appeared that was not in
+       the previous analyzed patrol window.
+    3. The previous task triggered an active alert (should_notify=True or priority='P0'/'P1').
+    4. The cooldown window (e.g. 60m) has elapsed since the last AI diagnosis.
+    5. There was no previous completed task in the window.
 
     Returns (is_cooldown, reason).
     """
@@ -392,6 +396,20 @@ async def _check_patrol_cooldown(
     last_errors = last_patrol.get("current_errors") or last_task.log_count or 1
     if current_errors > max(last_errors * 2, 50):
         return False, f"error_count_surge_{last_errors}_to_{current_errors}"
+
+    # Check for brand-new exception fingerprints: NEVER suppress if a new fault type appears
+    current_keys = {
+        ref.get("key") for ref in (current_evidence_refs or [])
+        if isinstance(ref, dict) and ref.get("key")
+    }
+    last_keys = {
+        ref.get("key") for ref in (last_patrol.get("evidence_refs") or [])
+        if isinstance(ref, dict) and ref.get("key")
+    }
+    if current_keys and last_keys:
+        new_keys = current_keys - last_keys
+        if new_keys:
+            return False, f"new_fault_fingerprint_detected_{len(new_keys)}"
 
     last_comp = last_task.completed_at
     if last_comp and last_comp.tzinfo is None:

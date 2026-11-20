@@ -73,3 +73,43 @@ def test_build_severity_filter_includes_fatal_for_critical():
 
     assert {"term": {"level.keyword": "critical"}} in should
     assert {"term": {"level.keyword": "fatal"}} in should
+
+
+@pytest.mark.asyncio
+async def test_concrete_faults_timeout_degrades_gracefully_instead_of_failing_patrol(monkeypatch):
+    class TimeoutConcreteES:
+        def __init__(self):
+            self.call_count = 0
+
+        async def search(self, index: str, body: dict):
+            self.call_count += 1
+            if self.call_count == 1:
+                return {"hits": {"total": {"value": 30}}}
+            if self.call_count == 2:
+                return {
+                    "aggregations": {
+                        "timeline": {
+                            "buckets": [
+                                {"doc_count": 2},
+                                {"doc_count": 2},
+                                {"doc_count": 3},
+                                {"doc_count": 3},
+                            ]
+                        }
+                    }
+                }
+            raise TimeoutError("ES concrete_faults timeout")
+
+    monkeypatch.setattr("logmind.core.elasticsearch.get_es_client", lambda: TimeoutConcreteES())
+
+    result = await AnomalyDetector().detect(
+        "master-stage-account-login-service.gyyx.cn*",
+        window_minutes=5,
+        severity_threshold="error",
+        inspect_concrete_faults=True,
+    )
+
+    assert result.detection_failed is False
+    assert result.is_anomaly is True
+    assert result.level == "critical"
+

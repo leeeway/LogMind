@@ -167,3 +167,58 @@ async def test_dispatch_patrols_skips_when_biz_is_inflight(monkeypatch):
     await alert_tasks._dispatch_patrols()
     assert delayed_tasks == []
 
+
+@pytest.mark.asyncio
+async def test_patrol_cooldown_breaks_through_on_new_exception_fingerprint():
+    import json
+    from datetime import datetime, timezone
+
+    class _LastTask:
+        id = "prev-task-1234"
+        log_count = 10
+        completed_at = datetime.now(timezone.utc)
+        query_params = json.dumps({
+            "patrol": {
+                "current_errors": 10,
+                "evidence_refs": [
+                    {"index": "idx-1", "id": "doc-1", "key": "fp_routine_noise_1"},
+                ],
+            },
+            "delivery": {
+                "context": {
+                    "priority_decision": {"should_notify": False, "priority": "P2"}
+                }
+            },
+        })
+
+    class _FakeCooldownSession:
+        async def execute(self, stmt):
+            class _Res:
+                def scalar_one_or_none(self):
+                    return _LastTask()
+            return _Res()
+
+    # Same fingerprint -> stays in cooldown
+    cooled, reason_same = await alert_tasks._check_patrol_cooldown(
+        session=_FakeCooldownSession(),
+        biz=_FakeBiz(),
+        current_errors=12,
+        current_evidence_refs=[{"index": "idx-1", "id": "doc-2", "key": "fp_routine_noise_1"}],
+    )
+    assert cooled is True
+    assert "non_alertable" in reason_same
+
+    # New fingerprint appears -> breaks through cooldown immediately
+    cooled_new, reason_new = await alert_tasks._check_patrol_cooldown(
+        session=_FakeCooldownSession(),
+        biz=_FakeBiz(),
+        current_errors=12,
+        current_evidence_refs=[
+            {"index": "idx-1", "id": "doc-2", "key": "fp_routine_noise_1"},
+            {"index": "idx-1", "id": "doc-3", "key": "fp_brand_new_deadlock"},
+        ],
+    )
+    assert cooled_new is False
+    assert reason_new == "new_fault_fingerprint_detected_1"
+
+

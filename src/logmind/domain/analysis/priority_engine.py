@@ -290,12 +290,25 @@ class PriorityDecisionEngine:
             action.reason += f" (低于最低通知级别门槛限制 {min_prio})"
 
         # ── Self-learning: auto-suppression override ─────
+        # Safety guard: NEVER let unacked-alert fatigue auto-suppression silence
+        # P0/P1 or critical outages (operators often handle alerts from chat
+        # without clicking Acknowledge in the web UI). Explicit human-ignored
+        # known issues still suppress normally.
         if factors.is_suppressed:
-            action.should_notify = False
-            action.should_wake = False
-            action.delay_until_morning = False
-            action.include_in_digest = True  # Still show in digest
-            action.reason = f"🔇 自动抑制: {factors.suppression_reason}"
+            is_unacked_fatigue = "未确认" in (factors.suppression_reason or "")
+            if is_unacked_fatigue and (priority in ("P0", "P1") or factors.ai_severity == "critical"):
+                logger.info(
+                    "priority_suppression_bypassed_for_high_severity",
+                    priority=priority,
+                    severity=factors.ai_severity,
+                    reason=factors.suppression_reason,
+                )
+            else:
+                action.should_notify = False
+                action.should_wake = False
+                action.delay_until_morning = False
+                action.include_in_digest = True  # Still show in digest
+                action.reason = f"🔇 自动抑制: {factors.suppression_reason}"
 
         return action
 

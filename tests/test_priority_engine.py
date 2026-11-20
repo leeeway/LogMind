@@ -263,3 +263,36 @@ class TestMinNotifyPriority:
             dec_override = engine.decide(factors, min_notify_priority="P1", night_policy="alert")
             assert dec_override.actions.should_notify is True
 
+    def test_unacked_fatigue_never_suppresses_critical_or_p0_p1(self, engine):
+        """Unacked alert fatigue must NOT mute P0/P1 or critical outages."""
+        factors = PriorityFactors(
+            ai_severity="critical",
+            confidence=0.9,
+            current_error_count=50,
+            baseline_error_count=5,
+            business_weight=8,
+            is_core_path=True,
+            is_suppressed=True,
+            suppression_reason="过去7天 5 次告警未确认，判定为低关注模式",
+        )
+        dec = engine.decide(factors, night_policy="always", min_notify_priority="P1")
+        assert dec.priority in ("P0", "P1")
+        assert dec.actions.should_notify is True
+        assert "自动抑制" not in dec.actions.reason
+
+    def test_explicit_ignored_known_issue_still_suppresses(self, engine):
+        """Human-marked ignored known issues must still be suppressed."""
+        factors = PriorityFactors(
+            ai_severity="critical",
+            confidence=0.9,
+            current_error_count=50,
+            baseline_error_count=5,
+            business_weight=8,
+            is_suppressed=True,
+            suppression_reason="匹配已忽略的已知问题: known_noise_sig",
+        )
+        dec = engine.decide(factors, night_policy="always", min_notify_priority="P1")
+        assert dec.actions.should_notify is False
+        assert "自动抑制" in dec.actions.reason
+
+
