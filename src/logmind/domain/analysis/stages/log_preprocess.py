@@ -238,14 +238,17 @@ class LogPreprocessStage(PipelineStage):
         )
         ctx.log_metadata["detected_language"] = detected_language
 
-        # Phase 2: Deduplicate
+        # Phase 2: Deduplicate (cache dedup_key per log object to avoid recomputing
+        # expensive normalization/masking multiple times across Phases 2-4)
         seen = set()
         unique_logs = []
         occurrence_counts: dict[str, int] = defaultdict(int)
         groups: dict[str, dict] = {}
+        key_by_log_id: dict[int, str] = {}
         for log in merged_logs:
             msg = self._extract_message(log)
             dedup_key = self._make_dedup_key(msg)
+            key_by_log_id[id(log)] = dedup_key
             occurrence_counts[dedup_key] += 1
             meta = metadata(log)
             group = groups.setdefault(
@@ -297,14 +300,14 @@ class LogPreprocessStage(PipelineStage):
         # A rare trigger must survive ordinary sampling; append to preserve the
         # latest-evidence side of the character budget as well.
         pinned = {
-            self._make_dedup_key(self._extract_message(log)): log
+            key_by_log_id.get(id(log)) or self._make_dedup_key(self._extract_message(log)): log
             for log in merged_logs
             if log.get("_trigger_evidence")
         }
         sampled_logs = [
             log
             for log in sampled_logs
-            if self._make_dedup_key(self._extract_message(log)) not in pinned
+            if (key_by_log_id.get(id(log)) or self._make_dedup_key(self._extract_message(log))) not in pinned
         ] + list(pinned.values())
         actionable_level_count = sum(
             1 for log in ctx.raw_logs if self._extract_level(log) in {"ERROR", "FATAL", "CRITICAL"}
@@ -323,7 +326,10 @@ class LogPreprocessStage(PipelineStage):
             folded_msg = _fold_stack_trace(raw_msg)
             msg = mask_sensitive(folded_msg)
             item = evidence(log, self._detect_language([log]))
-            item.update(groups[self._make_dedup_key(self._extract_message(log))])
+            dedup_key = key_by_log_id.get(id(log)) or self._make_dedup_key(raw_msg)
+            group_info = groups.get(dedup_key)
+            if group_info:
+                item.update(group_info)
             selected_evidence.append(item)
 
             # GYYX gy.* context
@@ -353,7 +359,7 @@ class LogPreprocessStage(PipelineStage):
                 context_parts.append(f"host:{host_name}")
 
             context_str = f" [{', '.join(context_parts)}]" if context_parts else ""
-            occurrences = occurrence_counts[self._make_dedup_key(self._extract_message(log))]
+            occurrences = occurrence_counts.get(dedup_key, 1)
             frequency_str = f" [occurrences:{occurrences}]" if occurrences > 1 else ""
             lines.append(f"[{ts}] [{level}]{context_str}{frequency_str} {msg}")
 

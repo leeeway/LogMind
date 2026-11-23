@@ -286,6 +286,24 @@ def _verification_code_replacer(match: re.Match) -> str:
 # We handle these via the KV pattern above (key=token, value=uuid).
 
 
+_JSON_DECODER = json.JSONDecoder()
+_MAX_JSON_DECODE_ATTEMPTS = 32
+
+
+def _mask_text_regexes(text: str) -> str:
+    """Apply non-JSON regex masking passes to a plain text segment."""
+    if not text:
+        return text
+    result = _mask_credentials(text)
+    result = _KV_PATTERN.sub(_kv_replacer, result)
+    result = _PHONE_RE.sub(r"\1****\2", result)
+    result = _IDCARD_RE.sub(r"\1********\2", result)
+    result = _EMAIL_RE.sub(r"\1****\2", result)
+    result = _BANKCARD_RE.sub(r"\1********\2", result)
+    result = _VERIFICATION_CODE_RE.sub(_verification_code_replacer, result)
+    return result
+
+
 def mask_sensitive(text: str) -> str:
     """
     Mask sensitive data in a log message using universal pattern matching.
@@ -303,59 +321,71 @@ def mask_sensitive(text: str) -> str:
         return text
 
     try:
-        # Parse complete or prefixed JSON before text substitution. Never apply
-        # regexes to serialized JSON: escaped quotes and nested values matter.
-        for start, char in enumerate(text):
-            if char not in "{[":
-                continue
+        # Iteratively locate and mask embedded JSON objects/arrays in O(N) time
+        # without slicing text[start:] or recursively rescanning the tail.
+        def clean(value):
+            if isinstance(value, dict):
+                return {
+                    k: REDACTED
+                    if _CREDENTIAL_KEY_RE.fullmatch(k)
+                    else _mask_value_by_length(str(v))
+                    if k.lower() in _SENSITIVE_KEYS and v is not None
+                    else clean(v)
+                    for k, v in value.items()
+                }
+            if isinstance(value, list):
+                return [clean(v) for v in value]
+            return mask_sensitive(value) if isinstance(value, str) else value
+
+        parts: list[str] | None = None
+        cursor = 0
+        pos = 0
+        attempts = 0
+        text_len = len(text)
+
+        while pos < text_len and attempts < _MAX_JSON_DECODE_ATTEMPTS:
+            next_brace = text.find("{", pos)
+            next_bracket = text.find("[", pos)
+            if next_brace == -1 and next_bracket == -1:
+                break
+            if next_brace == -1:
+                start = next_bracket
+            elif next_bracket == -1:
+                start = next_brace
+            else:
+                start = next_brace if next_brace < next_bracket else next_bracket
+
+            attempts += 1
             try:
-                obj, length = json.JSONDecoder().raw_decode(text[start:])
+                obj, end = _JSON_DECODER.raw_decode(text, start)
             except ValueError:
+                pos = start + 1
                 continue
+
             if not isinstance(obj, (dict, list)):
+                pos = end
                 continue
 
-            def clean(value):
-                if isinstance(value, dict):
-                    return {
-                        k: REDACTED
-                        if _CREDENTIAL_KEY_RE.fullmatch(k)
-                        else _mask_value_by_length(str(v))
-                        if k.lower() in _SENSITIVE_KEYS and v is not None
-                        else clean(v)
-                        for k, v in value.items()
-                    }
-                if isinstance(value, list):
-                    return [clean(v) for v in value]
-                return mask_sensitive(value) if isinstance(value, str) else value
+            if parts is None:
+                parts = []
+            if start > cursor:
+                parts.append(_mask_text_regexes(text[cursor:start]))
+            parts.append(json.dumps(clean(obj), ensure_ascii=False))
+            cursor = end
+            pos = end
 
-            return (
-                mask_sensitive(text[:start])
-                + json.dumps(clean(obj), ensure_ascii=False)
-                + mask_sensitive(text[start + length :])
-            )
+        if parts is not None:
+            if cursor < text_len:
+                parts.append(_mask_text_regexes(text[cursor:]))
+            return "".join(parts)
 
-        result = _mask_credentials(text)
-        result = _KV_PATTERN.sub(_kv_replacer, result)
-
-        # Phase 2: Standalone phone numbers (not already caught by KV)
-        result = _PHONE_RE.sub(r"\1****\2", result)
-
-        # Phase 3: ID card numbers
-        result = _IDCARD_RE.sub(r"\1********\2", result)
-
-        # Phase 4: Email addresses
-        result = _EMAIL_RE.sub(r"\1****\2", result)
-
-        # Phase 5: Bank card numbers (16-19 digits)
-        result = _BANKCARD_RE.sub(r"\1********\2", result)
-
-        # Phase 6: OTP/dynamic-code values with an explicit semantic label
-        result = _VERIFICATION_CODE_RE.sub(_verification_code_replacer, result)
-
-        return result
+        return _mask_text_regexes(text)
 
     except Exception as e:
+        # Never swallow Celery soft time limit signals — swallowing them causes
+        # silent hash mismatches and downstream KeyErrors.
+        if type(e).__name__ == "SoftTimeLimitExceeded":
+            raise
         # Masking failure should NEVER break the pipeline
         logger.warning("sensitive_mask_error", error=type(e).__name__)
         return REDACTED

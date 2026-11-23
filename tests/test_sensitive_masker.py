@@ -184,3 +184,19 @@ class TestMaskSensitiveBulk:
         assert "13812345678" not in results[0]
         assert results[1] == "Normal log message"
         assert "test@example.com" not in results[2]
+
+
+def test_mask_sensitive_does_not_swallow_soft_time_limit(monkeypatch):
+    class SoftTimeLimitExceeded(Exception):
+        pass
+
+    def boom(_text):
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr("logmind.domain.analysis.sensitive_masker._mask_text_regexes", boom)
+    try:
+        mask_sensitive("normal text without json")
+        assert False, "SoftTimeLimitExceeded should propagate"
+    except SoftTimeLimitExceeded:
+        pass
+
