@@ -96,6 +96,24 @@ STATIC_NOISE_PATTERNS: list[dict] = [
      "reason": "访客离场或断开连接后WebSocket回执推送失败属于正常客户端断连",
      "requires_additional": ["msgType=1120", "ControlVisitorLeaveProtocolImpl"],
      "force": True},
+    {"pattern": "访客网关校验访客身份失败", "category": "auth_flow",
+     "reason": "访客端登录失效或身份过期属于正常鉴权拦截",
+     "requires_additional": ["登录失效", "STATUS_ERROR", "token", "未登录"]},
+    {"pattern": "操作过快，请稍后重试", "category": "biz_rate_limit",
+     "reason": "分布式防重点击锁限流属于正常并发保护",
+     "requires_additional": ["RedisLockException", "mutexLock"],
+     "force": True},
+
+    # ── 客户端主动断连与非法请求扫描噪音 ──────────────────────
+    {"pattern": "Connection has been closed BEFORE send operation", "category": "client_disconnect",
+     "reason": "服务端发送响应前客户端主动关闭连接属于正常客户端断连",
+     "force": True},
+    {"pattern": "HttpAntiForgeryException", "category": "client_invalid_request",
+     "reason": "CSRF防伪令牌缺失或无法解密属于客户端过期页面或爬虫请求",
+     "force": True},
+    {"pattern": "HttpRequestMethodNotSupportedException", "category": "client_invalid_request",
+     "reason": "HTTP请求方法不被接口支持属于客户端非法调用或扫描请求",
+     "force": True},
 
     # ── 业务校验/参数校验 ──────────────────────────────────
     {"pattern": "余额不足", "category": "biz_validation", "reason": "余额校验属于正常业务逻辑"},

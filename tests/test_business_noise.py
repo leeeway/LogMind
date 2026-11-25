@@ -344,6 +344,35 @@ class TestClassifyLine:
         is_chat_noise, _ = classify_line(normal_chat_line)
         assert is_chat_noise is False
 
+    def test_client_disconnect_csrf_method_and_ratelimit_noise(self):
+        """Common client-side and rate-limit noises are cleanly suppressed."""
+        cases = [
+            (
+                "[ERROR] 访客网关校验访客身份失败,clientName:IOS,result:ResultBean(retCode=STATUS_ERROR, message=登录失效)",
+                "auth_flow",
+            ),
+            (
+                "[ERROR] 互斥锁 mutexLock:chat_assign:seat_lock:3:262 RedisLockException: 操作过快，请稍后重试\n\tat cn.gydev.lib.MutexLockUtil.lock(MutexLockUtil.java:55)",
+                "biz_rate_limit",
+            ),
+            (
+                "[ERROR] reactor.netty.channel.AbortedException: Connection has been closed BEFORE send operation\n\tat reactor.netty.NettyOutbound.send(NettyOutbound.java:10)",
+                "client_disconnect",
+            ),
+            (
+                "[ERROR] System.Web.Mvc.HttpAntiForgeryException: 缺少必需的防伪表单字段“__RequestVerificationToken”\n\tat System.Web.Helpers.AntiForgery.Validate()",
+                "client_invalid_request",
+            ),
+            (
+                "[ERROR] org.springframework.web.HttpRequestMethodNotSupportedException: Request method 'POST' not supported\n\tat org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:10)",
+                "client_invalid_request",
+            ),
+        ]
+        for line, expected_cat in cases:
+            is_noise, rule = classify_line(line)
+            assert is_noise is True, f"Expected noise for: {line[:60]}"
+            assert rule["category"] == expected_cat
+
     def test_learned_rules(self):
         """Test AI-learned noise rules."""
         learned = [
