@@ -316,6 +316,34 @@ class TestClassifyLine:
         assert is_noise_forced is True
         assert rule["category"] == "decommissioned_third_party"
 
+    def test_connector_bootstrap_degrade_and_visitor_leave_conn_7002_noise(self):
+        """Connector bootstrap degrade and visitor-leave CONN_7002 are suppressed."""
+        bootstrap_line = (
+            "[2026-11-25 17:38:20.687] [WARN] [sc.connection.core.protocol.capability.MessageBootstrapService]"
+            " - [traceId=5545de1598e4000] bootstrap 消息落库失败，降级为普通消息, sessionId:abc, roomId:room-1"
+        )
+        is_noise, rule = classify_line(bootstrap_line)
+        assert is_noise is True
+        assert rule["category"] == "connector_degrade_flow"
+
+        leave_line = (
+            "[ERROR] Connector推送到WebSocket失败 - msgType=1120 | error=WebSocket 消息投递失败 [CONN_7002]\n"
+            "sc.connection.core.exception.ConnectionBusinessException: WebSocket 消息投递失败 [CONN_7002]\n"
+            "\tat sc.connection.core.protocol.impl.control.ControlVisitorLeaveProtocolImpl.receive(ControlVisitorLeaveProtocolImpl.java:42)"
+        )
+        is_leave_noise, leave_rule = classify_line(leave_line)
+        assert is_leave_noise is True
+        assert leave_rule["category"] == "websocket_client_disconnect"
+
+        # Non-leave CONN_7002 without msgType=1120 / ControlVisitorLeaveProtocolImpl must NOT be suppressed by static rule
+        normal_chat_line = (
+            "[ERROR] Connector推送到WebSocket失败 - msgType=1001 | error=WebSocket 消息投递失败 [CONN_7002]\n"
+            "sc.connection.core.exception.ConnectionBusinessException: WebSocket 消息投递失败 [CONN_7002]\n"
+            "\tat sc.connection.core.protocol.impl.chat.ChatSendProtocolImpl.receive(ChatSendProtocolImpl.java:88)"
+        )
+        is_chat_noise, _ = classify_line(normal_chat_line)
+        assert is_chat_noise is False
+
     def test_learned_rules(self):
         """Test AI-learned noise rules."""
         learned = [

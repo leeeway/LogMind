@@ -89,6 +89,14 @@ STATIC_NOISE_PATTERNS: list[dict] = [
     {"pattern": "TLSv1 was negotiated", "category": "compatibility_warning",
      "reason": "TLS旧协议兼容警告属于待治理配置项，不是本次实时故障"},
 
+    # ── 在线客服连接器常态降级与客户端断连 ────────────────────
+    {"pattern": "bootstrap 消息落库失败，降级为普通消息", "category": "connector_degrade_flow",
+     "reason": "bootstrap落库失败后已自动降级为普通消息并成功持久化"},
+    {"pattern": "WebSocket 消息投递失败 [CONN_7002]", "category": "websocket_client_disconnect",
+     "reason": "访客离场或断开连接后WebSocket回执推送失败属于正常客户端断连",
+     "requires_additional": ["msgType=1120", "ControlVisitorLeaveProtocolImpl"],
+     "force": True},
+
     # ── 业务校验/参数校验 ──────────────────────────────────
     {"pattern": "余额不足", "category": "biz_validation", "reason": "余额校验属于正常业务逻辑"},
     {"pattern": "库存不足", "category": "biz_validation", "reason": "库存校验属于正常业务逻辑"},
@@ -460,7 +468,7 @@ def has_fault_protection(line: str) -> bool:
     return False
 
 
-def match_static_noise(line: str) -> dict | None:
+def match_static_noise(line: str, *, forced_only: bool = False) -> dict | None:
     """
     Check a log line against static noise patterns.
 
@@ -471,6 +479,8 @@ def match_static_noise(line: str) -> dict | None:
     keywords are present.
     """
     for rule, compiled_re in _COMPILED_STATIC:
+        if forced_only and rule.get("force") is not True:
+            continue
         if compiled_re:
             # Regex pattern
             if not compiled_re.search(line):
@@ -544,13 +554,17 @@ def classify_line(
 
     This function is the core classifier used by BusinessNoiseFilterStage.
     """
-    # Layer 0: Explicit operator-forced per-business-line ignore rules
+    # Layer 0: Explicit forced rules (per-business-line custom or static with force=True)
     if custom_patterns:
         forced_rules = [r for r in custom_patterns if r.get("force") is True]
         if forced_rules:
             match = match_custom_noise(line, forced_rules)
             if match:
                 return True, match
+
+    forced_static = match_static_noise(line, forced_only=True)
+    if forced_static:
+        return True, forced_static
 
     # Safety first: never filter lines with real fault indicators
     if has_fault_protection(line):
