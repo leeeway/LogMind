@@ -367,6 +367,14 @@ class TestClassifyLine:
                 "[ERROR] org.springframework.web.HttpRequestMethodNotSupportedException: Request method 'POST' not supported\n\tat org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:10)",
                 "client_invalid_request",
             ),
+            (
+                "[WARN] 会话模式切换同步协议分发失败, scene:online-conversation-end | CONN_1005\njava.lang.IllegalStateException: 结束提示持久化失败\n\tat sc.connection.core.protocol.capability.MessageBootstrapService.handleBootstrapPersistenceFailure(MessageBootstrapService.java:441)",
+                "connector_degrade_flow",
+            ),
+            (
+                "[WARN] WS注册阶段模式切换失败，降级到登录阶段重试\nsc.connection.core.conversation.ConversationModeSwitchException: 会话模式切换协议分发失败: online-conversation-end",
+                "connector_degrade_flow",
+            ),
         ]
         for line, expected_cat in cases:
             is_noise, rule = classify_line(line)
