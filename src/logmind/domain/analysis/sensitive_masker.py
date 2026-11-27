@@ -30,8 +30,7 @@ _CREDENTIAL_KEY_RE = re.compile(
 )
 _QUOTED_VALUE = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
 _CREDENTIAL_TEXT_RE = re.compile(
-    r"""(?i)(?<![\w.-])["']?([\w.-]*(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)[\w.-]*"""
-    r"""|sign|session_?id|bearer|jwt|private_?key)["']?\s*[:=]\s*("""
+    r"""(?i)(?<![\w.-])["']?([\w.-]{2,64})["']?\s*[:=]\s*("""
     + _QUOTED_VALUE
     + r"|\[REDACTED\]|(?:(?!\s+[\w.-]+\s*[:=])[^,;\r\n}&)\]])+)"
 )
@@ -43,14 +42,18 @@ _BASIC_AUTH_URL_RE = re.compile(r"(?i)(https?://)([^\s/:@]+):([^\s/@]+)@")
 
 
 def _mask_credentials(text: str) -> str:
-    text = _BASIC_AUTH_URL_RE.sub(
-        lambda m: m.group(1) + REDACTED + ":" + REDACTED + "@",
-        text,
-    )
+    if "://" in text and "@" in text:
+        text = _BASIC_AUTH_URL_RE.sub(
+            lambda m: m.group(1) + REDACTED + ":" + REDACTED + "@",
+            text,
+        )
     text = _HEADER_RE.sub(lambda m: m.group(1) + ": " + REDACTED, text)
 
     def replace(match):
-        return match.group(1) + "=" + REDACTED
+        key = match.group(1)
+        if _CREDENTIAL_KEY_RE.fullmatch(key):
+            return key + "=" + REDACTED
+        return match.group(0)
 
     return _CREDENTIAL_TEXT_RE.sub(replace, text)
 
@@ -181,25 +184,23 @@ _PHONE_VALUE_RE = re.compile(r"^1[3-9]\d{9}$")
 # Works for JSON, log4j MDC, Spring properties, URL params, etc.
 
 
+_CREDENTIAL_SUBSTR_RE = re.compile(
+    r"(?i)(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)"
+)
+
+
 def _build_kv_pattern() -> re.Pattern:
-    """Build a regex that matches any sensitive key followed by its value."""
-    # Escape key names and join with alternation
-    keys_pattern = "|".join(re.escape(k) for k in sorted(_SENSITIVE_KEYS, key=len, reverse=True))
-    compound_pattern = (
-        r"[a-zA-Z0-9_.]*"
-        r"(?:password|passwd|pwd|salt|secret|token|apikey|api_key|credential|signature)"
-        r"[a-zA-Z0-9_.]*"
-    )
-    full_pattern = f"(?:{compound_pattern}|{keys_pattern})"
+    """Build a linear-time O(N) KV regex; key membership is checked in _kv_replacer."""
     return re.compile(
-        r"(?i)"  # Case-insensitive
-        r'(?:"|\')?' + r""  # Optional quote before key
-        r"(" + full_pattern + r")"  # Group 1: key name
-        r'(?:"|\')?' + r""  # Optional quote after key
+        r"(?i)"
+        r"(?<![a-zA-Z0-9_.])"  # Anchor to identifier start to prevent O(N^2) backtracking
+        r'(?:"|\')?'
+        r"([a-zA-Z0-9_.]{2,64})"  # Group 1: candidate key name
+        r'(?:"|\')?'
         r"\s*[:=]\s*"  # Separator (: or =)
-        r'(?:"|\')?' + r""  # Optional quote before value
+        r'(?:"|\')?'
         r'([^"\',}\s&\])]{3,})'  # Group 2: value (at least 3 chars, non-delimiter)
-        r'(?:"|\')?' + r"",  # Optional quote after value
+        r'(?:"|\')?',
     )
 
 
@@ -215,12 +216,16 @@ def _kv_replacer(match: re.Match) -> str:
       - All others: generic length-based masking
     """
     full = match.group(0)
+    key = match.group(1)
+    if key.lower() not in _SENSITIVE_KEYS and not _CREDENTIAL_SUBSTR_RE.search(key):
+        return full
+
     value = match.group(2)
     if value.startswith("[REDACTED"):
         return full
 
     # Phone number detection: apply standard phone masking
-    if _CREDENTIAL_KEY_RE.fullmatch(match.group(1)):
+    if _CREDENTIAL_KEY_RE.fullmatch(key):
         masked = REDACTED
     elif "****" in value or value == REDACTED:
         masked = value
@@ -250,8 +255,9 @@ _IDCARD_RE = re.compile(
     r"(?![0-9])"
 )
 
-# Email addresses
+# Email addresses (anchored to avoid O(N^2) backtracking on long alphanumeric tokens)
 _EMAIL_RE = re.compile(
+    r"(?<![a-zA-Z0-9._%+-])"
     r"([a-zA-Z0-9._%+-]{1,3})[a-zA-Z0-9._%+-]*"
     r"(@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
 )
@@ -298,7 +304,8 @@ def _mask_text_regexes(text: str) -> str:
     result = _KV_PATTERN.sub(_kv_replacer, result)
     result = _PHONE_RE.sub(r"\1****\2", result)
     result = _IDCARD_RE.sub(r"\1********\2", result)
-    result = _EMAIL_RE.sub(r"\1****\2", result)
+    if "@" in result:
+        result = _EMAIL_RE.sub(r"\1****\2", result)
     result = _BANKCARD_RE.sub(r"\1********\2", result)
     result = _VERIFICATION_CODE_RE.sub(_verification_code_replacer, result)
     return result
